@@ -170,6 +170,23 @@ Return ONLY valid JSON, no markdown, no code fences."""
         elif provider_name == "groq":
             model = model or "llama-3.3-70b-versatile"
 
+        request_body = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": "You output only valid JSON."},
+                {"role": "user", "content": prompt},
+            ],
+            "temperature": 0.3,
+            "max_tokens": 8192,
+        }
+        # Forces the model to emit well-formed JSON instead of prose that
+        # merely resembles JSON — without this, long transcripts sometimes
+        # produced replies that got cut off mid-object and failed to parse.
+        # OpenAI-compatible endpoints that don't support it (e.g. Ollama's
+        # local /v1) just ignore an unrecognized field.
+        if provider_name in ("groq", "openai"):
+            request_body["response_format"] = {"type": "json_object"}
+
         async with httpx.AsyncClient(timeout=120) as client:
             resp = await client.post(
                 f"{api_base}/chat/completions",
@@ -177,15 +194,7 @@ Return ONLY valid JSON, no markdown, no code fences."""
                     "Authorization": f"Bearer {api_key}",
                     "Content-Type": "application/json",
                 },
-                json={
-                    "model": model,
-                    "messages": [
-                        {"role": "system", "content": "You output only valid JSON."},
-                        {"role": "user", "content": prompt},
-                    ],
-                    "temperature": 0.3,
-                    "max_tokens": 4096,
-                },
+                json=request_body,
             )
 
         if resp.status_code != 200:
