@@ -21,13 +21,19 @@ DEFAULT_LIMITS = {"rpm": 20, "rpd": 2000, "ash": 7200, "asd": 28800}
 
 def compute_audio_seconds_used(db, user_id: int, provider: str, window_seconds: int) -> float:
     """Sum audio-seconds this user has sent to `provider` within the
-    trailing `window_seconds`, combining two sources:
+    trailing `window_seconds`, combining two sources that are mutually
+    exclusive per transcript by parent Transcript.status:
       - completed/partial Transcripts (duration_seconds, updated_at) —
-        covers the single-shot path and fully-finished chunked transcripts.
-      - in-flight TranscriptionJobs (end_time - start_time, updated_at) for
-        jobs already dispatched (running or completed) — covers chunked
-        transcripts that haven't finished merging yet, which don't have
-        Transcript.duration_seconds set until the end.
+        counts a transcript once it has reached a terminal state (single-shot
+        path, or a chunked transcript whose finalize step has run).
+      - TranscriptionJobs (end_time - start_time, updated_at) for jobs
+        already dispatched (running or completed) whose PARENT Transcript is
+        still status == 'processing' — covers chunked transcripts that
+        haven't finished merging yet. Once the parent transcript finalizes to
+        completed/partial, its job rows stop contributing here even though
+        the individual TranscriptionJob.status values remain 'completed'
+        permanently — only the transcript-side sum counts it from then on,
+        preventing double-counting the same audio from both sources.
     """
     cutoff = datetime.datetime.utcnow() - datetime.timedelta(seconds=window_seconds)
 
@@ -49,6 +55,7 @@ def compute_audio_seconds_used(db, user_id: int, provider: str, window_seconds: 
         .filter(
             Transcript.user_id == user_id,
             Transcript.provider == provider,
+            Transcript.status == "processing",
             TranscriptionJob.status.in_(["running", "completed"]),
             TranscriptionJob.updated_at >= cutoff,
         )
@@ -70,6 +77,22 @@ def has_budget(db, user_id: int, provider: str, additional_seconds: float) -> bo
 
 def _normalize(text: str) -> str:
     return " ".join(text.lower().split())
+
+
+def _is_duplicate_boundary(prev_tail: str, next_head: str) -> bool:
+    """True if next_head looks like the same text as the tail of
+    prev_tail — i.e. the overlap window produced a duplicate segment at
+    a chunk boundary. Anchored (prefix/suffix) rather than arbitrary
+    substring containment, with a minimum length floor, so a short
+    generic segment (e.g. "the") can't falsely match unrelated text."""
+    if not next_head or not prev_tail:
+        return False
+    if next_head == prev_tail:
+        return True
+    MIN_MATCH_LEN = 8  # characters — below this, treat as coincidence, not overlap
+    if len(next_head) < MIN_MATCH_LEN or len(prev_tail) < MIN_MATCH_LEN:
+        return False
+    return prev_tail.endswith(next_head) or next_head.startswith(prev_tail)
 
 
 def merge_chunk_results(jobs: list) -> tuple:
@@ -97,7 +120,7 @@ def merge_chunk_results(jobs: list) -> tuple:
         if merged_segments and offset_segments:
             prev_tail = _normalize(merged_segments[-1]["text"])
             next_head = _normalize(offset_segments[0]["text"])
-            if next_head and (next_head in prev_tail or prev_tail in next_head):
+            if _is_duplicate_boundary(prev_tail, next_head):
                 offset_segments = offset_segments[1:]
 
         merged_segments.extend(offset_segments)
