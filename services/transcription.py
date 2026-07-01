@@ -48,6 +48,12 @@ class TranscriptionService:
         db.commit()
 
         try:
+            # Commit above happens BEFORE this await, on purpose: it closes
+            # out the transaction so no write lock is held while we wait on
+            # the (multi-second) provider call. Do not move the commit to
+            # after this await, or wrap the await inside an open
+            # transaction — that would hold a lock across the wait and risk
+            # "database is locked" errors under concurrent uploads.
             result = await provider.transcribe(
                 audio_path, language=language, temperature=temperature, **kwargs
             )
