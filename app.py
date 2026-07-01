@@ -17,7 +17,8 @@ from fastapi.responses import JSONResponse, FileResponse, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 
-from database import init_db, Transcript, Summary, VoiceProfile, ProviderConfig
+from database import init_db, backfill_user_id, Transcript, Summary, VoiceProfile, ProviderConfig, User
+from services.auth import get_or_create_fallback_user
 from services.transcription import TranscriptionService
 from services.diarization import DiarizationService
 from services.voice_id import VoiceIdentificationService
@@ -36,9 +37,20 @@ DB_PATH = DATA_DIR / "whisperdesk.db"
 for d in [DATA_DIR, UPLOAD_DIR, TRANSCRIPT_DIR, VOICES_DIR]:
     d.mkdir(parents=True, exist_ok=True)
 
-# migrated_tables is consumed by the migration bootstrap block added in
-# Task 3 of the per-user-auth plan — unused until then.
 engine, SessionLocal, migrated_tables = init_db(str(DB_PATH))
+
+if migrated_tables:
+    _migration_db = SessionLocal()
+    try:
+        _fallback_user = get_or_create_fallback_user(_migration_db)
+        backfill_user_id(engine, migrated_tables, _fallback_user.id)
+        print(
+            f"[migration] assigned {len(migrated_tables)} pre-existing table(s) "
+            f"to fallback user 'local' (password: changeme — change it after logging in)"
+        )
+    finally:
+        _migration_db.close()
+
 transcription_service = TranscriptionService(str(UPLOAD_DIR))
 diarization_service = DiarizationService()
 voice_id_service = VoiceIdentificationService(str(VOICES_DIR))
