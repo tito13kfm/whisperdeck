@@ -186,6 +186,14 @@ def _retry_eligible(job) -> bool:
     return elapsed >= backoff
 
 
+# SAFETY INVARIANT: this coroutine runs concurrently with sibling
+# _run_chunk_job calls via asyncio.gather, all sharing ONE db session
+# (see queue_worker_tick). This is only safe because every mutation here
+# is committed BEFORE the one await point (the provider call) — so at
+# every point asyncio could switch between concurrent jobs, the session
+# has no other job's uncommitted dirty state. If you add a second
+# mutation after the await, or move the commit, you MUST commit before
+# any await or use a separate session per job instead.
 async def _run_chunk_job(db, job, provider_config: dict, provider_name: str) -> None:
     job.status = "running"
     job.attempts += 1
@@ -312,6 +320,9 @@ async def queue_worker_tick(SessionLocal, diarization_service) -> None:
                 dispatched.append(job)
 
             if dispatched:
+                # All dispatched jobs share the single `db` session opened at the top of
+                # this tick — safe only because _run_chunk_job commits before its await
+                # point (see the safety invariant comment on _run_chunk_job itself).
                 await asyncio.gather(*[
                     _run_chunk_job(db, job, provider_config, transcript.provider) for job in dispatched
                 ])
