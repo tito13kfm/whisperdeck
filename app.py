@@ -49,7 +49,10 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    # allow_credentials=True + allow_origins=["*"] is a spec-invalid combo
+    # (browsers reject it) and unnecessary here — the SPA sends no
+    # cookies/auth headers, API keys stay server-side.
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -139,7 +142,7 @@ async def get_provider_config(name: str):
     return {
         "name": cfg.name,
         "display_name": cfg.display_name,
-        "api_key": "••••" + cfg.api_key[-4:] if cfg.api_key and len(cfg.api_key) > 8 else "",
+        "api_key": ("••••" + cfg.api_key[-4:] if len(cfg.api_key) > 8 else "••••••••") if cfg.api_key else "",
         "api_url": cfg.api_url,
         "default_model": cfg.default_model,
         "is_active": cfg.is_active,
@@ -291,8 +294,9 @@ async def transcribe_audio(
                 transcript.speaker_count = result.speaker_count
                 session.commit()
             except Exception as e:
-                # Non-fatal: diarization enhancement failed
-                pass
+                # Non-fatal: diarization enhancement failed. Transcript still
+                # succeeds without speaker labels, but log so it's visible.
+                print(f"[diarization] non-fatal failure for transcript {transcript.id}: {e}")
 
         return _serialize_transcript(transcript)
 
@@ -395,7 +399,7 @@ async def diarize_audio(
 async def summarize_transcript(
     transcript_id: int,
     provider: str = Form("groq"),
-    model: str = Form("llama3-70b-8192"),
+    model: str = Form("llama-3.3-70b-versatile"),
 ):
     """Generate an LLM summary of a completed transcript."""
     session = _get_db()

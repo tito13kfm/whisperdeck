@@ -15,7 +15,7 @@ class OpenRouterProvider(BaseProvider):
 
     def __init__(self, config: dict):
         super().__init__(config)
-        self.model = config.get("default_model", "openai/whisper-1")
+        self.model = config.get("default_model") or "openai/whisper-1"
         self.api_key = config.get("api_key", "")
         self.site_url = config.get("site_url", "")
         self.site_name = config.get("site_name", "")
@@ -68,14 +68,17 @@ class OpenRouterProvider(BaseProvider):
                 f"OpenRouter API error ({response.status_code}): {response.text}"
             )
 
-        result = response.json()
+        try:
+            result = response.json()
+        except ValueError as e:
+            raise ProviderError(f"OpenRouter returned a non-JSON response: {e}")
         raw_segments = result.get("segments", [])
 
         # Some OpenRouter models return flat text without segments
         if not raw_segments and result.get("text"):
             return TranscriptionResult(
                 full_text=result["text"],
-                language=language or "en",
+                language=result.get("language") or language or "en",
                 duration_seconds=0,
                 model=self.model,
                 provider="openrouter",
@@ -87,7 +90,7 @@ class OpenRouterProvider(BaseProvider):
         return TranscriptionResult(
             segments=self._build_segments(raw_segments),
             full_text=result.get("text", ""),
-            language=language or "en",
+            language=result.get("language") or language or "en",
             duration_seconds=duration,
             model=self.model,
             provider="openrouter",

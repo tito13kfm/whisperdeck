@@ -14,7 +14,7 @@ class LocalProvider(BaseProvider):
     def __init__(self, config: dict):
         super().__init__(config)
         self.api_url = config.get("api_url", "http://localhost:8080/v1")
-        self.model = config.get("default_model", "whisper-large-v3-turbo")
+        self.model = config.get("default_model") or "whisper-large-v3-turbo"
         # Strip trailing slash
         self.api_url = self.api_url.rstrip("/")
 
@@ -52,14 +52,17 @@ class LocalProvider(BaseProvider):
                 f"Local endpoint error ({response.status_code}): {response.text}"
             )
 
-        result = response.json()
+        try:
+            result = response.json()
+        except ValueError as e:
+            raise ProviderError(f"Local endpoint returned a non-JSON response: {e}")
         raw_segments = result.get("segments", [])
 
         # Some local endpoints return a flat text response
         if not raw_segments and result.get("text"):
             return TranscriptionResult(
                 full_text=result["text"],
-                language=language,
+                language=result.get("language") or language,
                 duration_seconds=0,
                 model=self.model,
                 provider="local",
@@ -71,7 +74,7 @@ class LocalProvider(BaseProvider):
         return TranscriptionResult(
             segments=self._build_segments(raw_segments),
             full_text=result.get("text", ""),
-            language=language,
+            language=result.get("language") or language,
             duration_seconds=duration,
             model=self.model,
             provider="local",

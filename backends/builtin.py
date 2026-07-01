@@ -40,7 +40,7 @@ class BuiltinProvider(BaseProvider):
 
     def __init__(self, config: dict):
         super().__init__(config)
-        self.model_name = config.get("default_model", "tiny")
+        self.model_name = config.get("default_model") or "tiny"
         self.device = config.get("device", "auto")  # "auto", "cpu", "cuda"
         self.compute_type = config.get("compute_type", "default")  # "default", "float16", "int8_float16"
         self.cache_dir = os.environ.get(

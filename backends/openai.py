@@ -11,7 +11,7 @@ class OpenAIProvider(BaseProvider):
 
     def __init__(self, config: dict):
         super().__init__(config)
-        self.model = config.get("default_model", "whisper-1")
+        self.model = config.get("default_model") or "whisper-1"
 
     async def transcribe(self, audio_path: str, **kwargs) -> TranscriptionResult:
         if not self.api_key:
@@ -49,14 +49,17 @@ class OpenAIProvider(BaseProvider):
                 f"OpenAI API error ({response.status_code}): {response.text}"
             )
 
-        result = response.json()
+        try:
+            result = response.json()
+        except ValueError as e:
+            raise ProviderError(f"OpenAI returned a non-JSON response: {e}")
         raw_segments = result.get("segments", [])
         duration = max((s.get("end", 0) for s in raw_segments), default=0)
 
         return TranscriptionResult(
             segments=self._build_segments(raw_segments),
             full_text=result.get("text", ""),
-            language=language or "en",
+            language=result.get("language") or language or "en",
             duration_seconds=duration,
             model=self.model,
             provider="openai",

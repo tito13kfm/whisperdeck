@@ -977,7 +977,7 @@ async function summarizeTranscript() {
   try {
     const form = new FormData();
     form.append('provider', 'groq');
-    form.append('model', 'llama3-70b-8192');
+    form.append('model', 'llama-3.3-70b-versatile');
     const r = await fetch(API + '/api/transcripts/' + currentTranscriptId + '/summarize', { method: 'POST', body: form });
     if (!r.ok) throw new Error(await r.text());
     const sum = await r.json();

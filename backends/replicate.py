@@ -10,11 +10,17 @@ class ReplicateProvider(BaseProvider):
     """Transcribe using Replicate's hosted Whisper model."""
 
     API_BASE = "https://api.replicate.com/v1"
+    # NOTE: unverified — Replicate's /predictions endpoint has historically
+    # required a specific version hash (64-char hex) in the "version" field,
+    # not an "owner/model:tag" string. This wasn't tested against a real
+    # Replicate API key; if predictions fail with an "invalid version" style
+    # error, set model_ref in provider config to a real version hash from
+    # https://replicate.com/varunp2k/whisper-large-v3-turbo/versions
     MODEL_VERSION = "varunp2k/whisper-large-v3-turbo:latest"
 
     def __init__(self, config: dict):
         super().__init__(config)
-        self.model = config.get("default_model", "whisper-large-v3-turbo")
+        self.model = config.get("default_model") or "whisper-large-v3-turbo"
         model_ref = config.get("model_ref", "")
         if model_ref:
             self.MODEL_VERSION = model_ref
@@ -72,7 +78,10 @@ class ReplicateProvider(BaseProvider):
                     f"Replicate API error ({resp.status_code}): {resp.text}"
                 )
 
-            prediction = resp.json()
+            try:
+                prediction = resp.json()
+            except ValueError as e:
+                raise ProviderError(f"Replicate returned a non-JSON response: {e}")
             prediction_id = prediction["id"]
 
             # Poll until complete
@@ -82,7 +91,10 @@ class ReplicateProvider(BaseProvider):
                     f"{self.API_BASE}/predictions/{prediction_id}",
                     headers={"Authorization": f"Bearer {self.api_key}"},
                 )
-                prediction = resp.json()
+                try:
+                    prediction = resp.json()
+                except ValueError as e:
+                    raise ProviderError(f"Replicate returned a non-JSON response while polling: {e}")
 
             if prediction["status"] != "succeeded":
                 raise ProviderError(
@@ -91,8 +103,10 @@ class ReplicateProvider(BaseProvider):
 
         output = prediction.get("output", {})
         raw_segments = []
+        detected_language = language
         if isinstance(output, dict):
             raw_segments = output.get("segments", output.get("chunks", []))
+            detected_language = output.get("language") or language
         elif isinstance(output, str):
             # Text-only output
             return TranscriptionResult(
@@ -110,7 +124,7 @@ class ReplicateProvider(BaseProvider):
         return TranscriptionResult(
             segments=self._build_segments(raw_segments),
             full_text=full_text.strip(),
-            language=language,
+            language=detected_language,
             duration_seconds=duration,
             model=self.model,
             provider="replicate",
@@ -121,9 +135,10 @@ class ReplicateProvider(BaseProvider):
         if not self.api_key:
             return {"ok": False, "error": "No API key configured"}
         try:
+            model_path = self.MODEL_VERSION.split(":")[0]
             async with httpx.AsyncClient(timeout=10) as client:
                 resp = await client.get(
-                    f"{self.API_BASE}/models/varunp2k/whisper-large-v3-turbo",
+                    f"{self.API_BASE}/models/{model_path}",
                     headers={"Authorization": f"Bearer {self.api_key}"},
                 )
                 return {"ok": resp.status_code == 200, "error": None if resp.status_code == 200 else resp.text}

@@ -13,7 +13,9 @@ class GroqProvider(BaseProvider):
         super().__init__(config)
         # whisper-large-v3 (not -turbo) trades some speed for better accuracy on
         # noisy audio and heavy accents — worth it for meeting transcription.
-        self.model = config.get("default_model", "whisper-large-v3")
+        # `or` (not .get's default arg) so a saved-but-empty default_model in
+        # the DB doesn't shadow this fallback with "".
+        self.model = config.get("default_model") or "whisper-large-v3"
 
     async def transcribe(self, audio_path: str, **kwargs) -> TranscriptionResult:
         if not self.api_key:
@@ -30,10 +32,11 @@ class GroqProvider(BaseProvider):
                 files = {"file": (audio_path, f, "audio/mpeg")}
                 data = {
                     "model": self.model,
-                    "language": language,
                     "temperature": temperature,
                     "response_format": response_format,
                 }
+                if language and language != "auto":
+                    data["language"] = language
                 response = await client.post(
                     f"{self.API_BASE}/audio/transcriptions",
                     headers={"Authorization": f"Bearer {self.api_key}"},
@@ -46,14 +49,17 @@ class GroqProvider(BaseProvider):
                 f"Groq API error ({response.status_code}): {response.text}"
             )
 
-        result = response.json()
+        try:
+            result = response.json()
+        except ValueError as e:
+            raise ProviderError(f"Groq returned a non-JSON response: {e}")
         raw_segments = result.get("segments", [])
         duration = max((s.get("end", 0) for s in raw_segments), default=0)
 
         return TranscriptionResult(
             segments=self._build_segments(raw_segments),
             full_text=result.get("text", ""),
-            language=language,
+            language=result.get("language") or language,
             duration_seconds=duration,
             model=self.model,
             provider="groq",

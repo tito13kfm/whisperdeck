@@ -61,9 +61,15 @@ class VoiceIdentificationService:
         """Enroll a speaker by name from an audio sample."""
         embedding = self._extract_embedding(audio_path)
         if embedding is None:
+            if self._backend == "none":
+                raise ValueError(
+                    "No voice embedding backend available. "
+                    "Install speechbrain: pip install speechbrain"
+                )
             raise ValueError(
-                f"No voice embedding backend available. "
-                f"Install speechbrain: pip install speechbrain"
+                f"Voice embedding extraction failed using the {self.backend_name} "
+                f"backend. Check that the audio file is valid and the backend's "
+                f"dependencies (e.g. torch, torchaudio) are working correctly."
             )
 
         existing = self.db.query(VoiceProfile).filter(VoiceProfile.name == name).first()

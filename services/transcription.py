@@ -54,6 +54,10 @@ class TranscriptionService:
 
             transcript.status = "completed"
             transcript.full_text = result.full_text
+            if result.language:
+                transcript.language = result.language
+            if result.model:
+                transcript.model = result.model
             transcript.segments = [
                 {
                     "start": s.start,
@@ -111,7 +115,7 @@ class TranscriptionService:
         api_key: str = "",
         provider_name: str = "groq",
         provider_config: Optional[dict] = None,
-        model: str = "llama3-70b-8192",
+        model: str = "llama-3.3-70b-versatile",
     ) -> Summary:
         """Generate an LLM summary of a completed transcript."""
         transcript = self.get_transcript(transcript_id)
@@ -151,7 +155,7 @@ Return ONLY valid JSON, no markdown, no code fences."""
             api_base = (provider_config or {}).get("api_url", "http://localhost:11434/v1")
             model = model or "llama3"
         elif provider_name == "groq":
-            model = model or "llama3-70b-8192"
+            model = model or "llama-3.3-70b-versatile"
 
         async with httpx.AsyncClient(timeout=120) as client:
             resp = await client.post(

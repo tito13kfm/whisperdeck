@@ -38,7 +38,9 @@ class BaseProvider(ABC):
         self.config = config
         self.api_key = config.get("api_key", "")
         self.api_url = config.get("api_url", "")
-        self.model = config.get("default_model", "whisper-large-v3-turbo")
+        # `or` (not .get's default arg) so a saved-but-empty default_model in
+        # the DB doesn't shadow this fallback with "".
+        self.model = config.get("default_model") or "whisper-large-v3-turbo"
 
     @abstractmethod
     async def transcribe(self, audio_path: str, **kwargs) -> TranscriptionResult:
