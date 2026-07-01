@@ -21,19 +21,28 @@ DEFAULT_LIMITS = {"rpm": 20, "rpd": 2000, "ash": 7200, "asd": 28800}
 
 def compute_audio_seconds_used(db, user_id: int, provider: str, window_seconds: int) -> float:
     """Sum audio-seconds this user has sent to `provider` within the
-    trailing `window_seconds`, combining two sources that are mutually
-    exclusive per transcript by parent Transcript.status:
+    trailing `window_seconds`, combining two sources that are strict
+    logical complements over parent Transcript.status, so no row is ever
+    counted by both (double-count-free) and no non-NULL status value is
+    ever counted by neither (undercount-free — Transcript.status defaults
+    to "pending" and the app always sets it, but the column isn't
+    DB-enforced NOT NULL, so a NULL status would fall outside both the
+    IN and NOT IN filters at the SQL level):
       - completed/partial Transcripts (duration_seconds, updated_at) —
-        counts a transcript once it has reached a terminal state (single-shot
-        path, or a chunked transcript whose finalize step has run).
+        counts exactly when Transcript.status IN (completed, partial).
       - TranscriptionJobs (end_time - start_time, updated_at) for jobs
-        already dispatched (running or completed) whose PARENT Transcript is
-        still status == 'processing' — covers chunked transcripts that
-        haven't finished merging yet. Once the parent transcript finalizes to
+        already dispatched (running or completed) whose PARENT Transcript
+        counts exactly when Transcript.status NOT IN (completed, partial)
+        — i.e. processing, failed, pending, or any other non-terminal
+        status. This covers chunked transcripts still in flight AND
+        chunked transcripts whose parent ended in a terminal-but-not-
+        finalized state (e.g. failed) while still having job rows that
+        reached 'completed' before the overall transcript failed — those
+        job rows' audio was really sent to the provider and must still be
+        counted somewhere. Once the parent transcript finalizes to
         completed/partial, its job rows stop contributing here even though
         the individual TranscriptionJob.status values remain 'completed'
-        permanently — only the transcript-side sum counts it from then on,
-        preventing double-counting the same audio from both sources.
+        permanently — only the transcript-side sum counts it from then on.
     """
     cutoff = datetime.datetime.utcnow() - datetime.timedelta(seconds=window_seconds)
 
@@ -55,7 +64,7 @@ def compute_audio_seconds_used(db, user_id: int, provider: str, window_seconds: 
         .filter(
             Transcript.user_id == user_id,
             Transcript.provider == provider,
-            Transcript.status == "processing",
+            Transcript.status.notin_(["completed", "partial"]),
             TranscriptionJob.status.in_(["running", "completed"]),
             TranscriptionJob.updated_at >= cutoff,
         )
