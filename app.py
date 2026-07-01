@@ -22,6 +22,7 @@ from sqlalchemy.orm import Session
 
 from database import init_db, backfill_user_id, Transcript, Summary, VoiceProfile, ProviderConfig, User
 from services.auth import get_or_create_fallback_user, create_user, authenticate_user
+from services.settings import get_user_settings, update_user_settings
 from services.transcription import TranscriptionService
 from services.diarization import DiarizationService
 from services.voice_id import VoiceIdentificationService
@@ -177,6 +178,18 @@ async def logout(request: Request):
 @app.get("/api/me")
 async def me(current_user: User = Depends(get_current_user)):
     return {"username": current_user.username}
+
+
+# ── Settings ──────────────────────────────────────────────────────────────
+
+@app.get("/api/settings")
+async def get_settings(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    return get_user_settings(db, current_user.id)
+
+
+@app.put("/api/settings")
+async def put_settings(data: dict = Body(...), db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    return update_user_settings(db, current_user.id, data)
 
 
 # ── API Routes ────────────────────────────────────────────────────────────
