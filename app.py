@@ -537,9 +537,9 @@ async def get_summary(transcript_id: int, db: Session = Depends(get_db), current
 # ── Voice Identification Database ─────────────────────────────────────────
 
 @app.get("/api/voices")
-async def list_voices(db: Session = Depends(get_db)):
+async def list_voices(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     """List all enrolled voice profiles."""
-    return voice_id_service.list_profiles(db)
+    return voice_id_service.list_profiles(db, current_user.id)
 
 
 @app.post("/api/voices/enroll")
@@ -548,6 +548,7 @@ async def enroll_voice(
     name: str = Form(...),
     notes: str = Form(""),
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     """Enroll a new speaker from an audio sample."""
     file_ext = os.path.splitext(file.filename or "voice.wav")[1] or ".wav"
@@ -559,7 +560,7 @@ async def enroll_voice(
         f.write(content)
 
     try:
-        profile = voice_id_service.enroll(db, name=name, audio_path=str(save_path), notes=notes)
+        profile = voice_id_service.enroll(db, current_user.id, name=name, audio_path=str(save_path), notes=notes)
         return {
             "id": profile.id,
             "name": profile.name,
@@ -576,6 +577,7 @@ async def identify_speaker(
     file: UploadFile = File(...),
     threshold: float = Form(0.65),
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     """Identify a speaker from an audio sample against enrolled profiles."""
     file_ext = os.path.splitext(file.filename or "voice.wav")[1] or ".wav"
@@ -587,10 +589,10 @@ async def identify_speaker(
         f.write(content)
 
     try:
-        matches = voice_id_service.identify(db, str(save_path), threshold=threshold)
+        matches = voice_id_service.identify(db, current_user.id, str(save_path), threshold=threshold)
         return {
             "matches": matches,
-            "total_profiles": len(voice_id_service.list_profiles(db)),
+            "total_profiles": len(voice_id_service.list_profiles(db, current_user.id)),
             "backend": voice_id_service._backend,
         }
     except Exception as e:
@@ -598,8 +600,8 @@ async def identify_speaker(
 
 
 @app.delete("/api/voices/{profile_id}")
-async def delete_voice_profile(profile_id: int, db: Session = Depends(get_db)):
-    ok = voice_id_service.delete_profile(db, profile_id)
+async def delete_voice_profile(profile_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    ok = voice_id_service.delete_profile(db, current_user.id, profile_id)
     if not ok:
         raise HTTPException(status_code=404, detail="Voice profile not found")
     return {"ok": True}
