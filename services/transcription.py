@@ -16,6 +16,37 @@ class TranscriptionService:
         self.upload_dir = upload_dir
         os.makedirs(upload_dir, exist_ok=True)
 
+    def create_transcript_stub(
+        self,
+        db,
+        user_id: int,
+        filename: str,
+        provider_name: str,
+        model: str,
+        language: str,
+        audio_path: str,
+        diarize_requested: bool,
+        title: Optional[str] = None,
+    ) -> Transcript:
+        """Create a Transcript row in 'processing' status without calling a
+        provider — used by the chunked upload path, which enqueues chunk
+        jobs instead of transcribing inline. See services/queue.py for how
+        those jobs eventually populate full_text/segments/status."""
+        transcript = Transcript(
+            user_id=user_id,
+            title=title or os.path.splitext(filename)[0],
+            filename=filename,
+            provider=provider_name,
+            model=model or "",
+            language=language,
+            status="processing",
+            audio_path=audio_path,
+            diarize_requested=diarize_requested,
+        )
+        db.add(transcript)
+        db.commit()
+        return transcript
+
     async def transcribe(
         self,
         db,
