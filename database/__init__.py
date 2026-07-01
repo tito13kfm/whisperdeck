@@ -16,6 +16,7 @@ class User(Base):
     username = Column(String(64), unique=True, nullable=False)
     password_hash = Column(String(128), nullable=False)
     password_salt = Column(String(64), nullable=False)
+    settings = Column(JSON, default=dict)
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
 
 
@@ -30,15 +31,37 @@ class Transcript(Base):
     provider = Column(String(64), default="groq")
     model = Column(String(64), default="whisper-large-v3-turbo")
     language = Column(String(10), default="auto")
-    status = Column(String(32), default="pending")  # pending, processing, completed, failed
+    status = Column(String(32), default="pending")  # pending, processing, completed, failed, partial
     full_text = Column(Text, default="")
     segments = Column(JSON, default=list)  # [{start, end, speaker, text}]
     speaker_count = Column(Integer, default=0)
     error = Column(Text, nullable=True)
+    audio_path = Column(String(512), nullable=True)  # post-transcode, pre-chunk-split file; used by chunked-path diarization
+    diarize_requested = Column(Boolean, default=False)
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
 
     summary = relationship("Summary", back_populates="transcript", uselist=False, cascade="all, delete-orphan")
+    jobs = relationship("TranscriptionJob", back_populates="transcript", cascade="all, delete-orphan")
+
+
+class TranscriptionJob(Base):
+    __tablename__ = "transcription_jobs"
+
+    id = Column(Integer, primary_key=True)
+    transcript_id = Column(Integer, ForeignKey("transcripts.id"), nullable=False)
+    chunk_index = Column(Integer, nullable=False)
+    start_time = Column(Float, nullable=False)  # offset into the full transcript, seconds
+    end_time = Column(Float, nullable=False)
+    audio_path = Column(String(512), nullable=False)
+    status = Column(String(32), default="pending")  # pending, running, completed, failed
+    attempts = Column(Integer, default=0)
+    error = Column(Text, nullable=True)
+    result_json = Column(JSON, nullable=True)  # raw {segments, full_text, language, model} once completed
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
+
+    transcript = relationship("Transcript", back_populates="jobs")
 
 
 class Summary(Base):
@@ -135,6 +158,27 @@ def backfill_user_id(engine, migrated_tables: list[str], user_id: int) -> None:
             conn.execute(text(f"DROP TABLE {old_table}"))
 
 
+def ensure_columns(engine, table_name: str, columns: dict[str, str]) -> None:
+    """Add any missing columns to an existing table via plain ALTER TABLE.
+
+    Only safe for additive, unconstrained columns (nullable, no UNIQUE/FK
+    changes) — SQLite supports this without a table rebuild. Do NOT use
+    this for constraint changes; that needs the rename-and-recreate
+    approach in migrate_schema()/backfill_user_id() instead.
+
+    columns maps column name -> SQL type clause, e.g. {"settings": "JSON"}.
+    """
+    inspector = inspect(engine)
+    if table_name not in inspector.get_table_names():
+        return  # table doesn't exist yet — create_all() will create it with all columns already present
+    existing = {c["name"] for c in inspector.get_columns(table_name)}
+    with engine.begin() as conn:
+        for col_name, sql_type in columns.items():
+            if col_name in existing:
+                continue
+            conn.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {col_name} {sql_type}"))
+
+
 def init_db(db_path: str = "data/whisperdesk.db") -> tuple:
     """Initialize the database. Returns (engine, SessionLocal, migrated_tables).
 
@@ -149,11 +193,13 @@ def init_db(db_path: str = "data/whisperdesk.db") -> tuple:
     engine = create_engine(f"sqlite:///{db_path}", connect_args={"check_same_thread": False})
     migrated_tables = migrate_schema(engine)
     Base.metadata.create_all(engine)
+    ensure_columns(engine, "users", {"settings": "JSON"})
+    ensure_columns(engine, "transcripts", {"audio_path": "TEXT", "diarize_requested": "BOOLEAN"})
     SessionLocal = sessionmaker(bind=engine)
     return engine, SessionLocal, migrated_tables
 
 
 __all__ = [
-    "Base", "User", "Transcript", "Summary", "VoiceProfile", "ProviderConfig",
-    "init_db", "migrate_schema", "backfill_user_id",
+    "Base", "User", "Transcript", "Summary", "VoiceProfile", "ProviderConfig", "TranscriptionJob",
+    "init_db", "migrate_schema", "backfill_user_id", "ensure_columns",
 ]
