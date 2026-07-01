@@ -390,6 +390,34 @@ svg{display:block;flex-shrink:0}
 </head>
 <body>
 
+<!-- ══════════ AUTH ══════════ -->
+<div id="authShell" style="display:none;height:100vh;display:flex;align-items:center;justify-content:center;background:var(--bg-page)">
+  <div style="width:340px;max-width:90vw;background:var(--bg-elevated);border:1px solid var(--border);border-radius:var(--radius-lg);padding:28px;box-shadow:var(--shadow-lg)">
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:20px">
+      <div class="sb-logo">W</div>
+      <span style="font-size:16px;font-weight:600">WhisperDeck</span>
+    </div>
+    <h3 id="authTitle" style="font-size:15px;font-weight:600;margin-bottom:14px">Log in</h3>
+    <div class="cfg-f" style="margin-bottom:10px">
+      <label>Username</label>
+      <input type="text" id="authUsername" style="width:100%;padding:7px 10px;font-size:12px;background:var(--bg-page);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text-primary);font-family:var(--font);outline:none">
+    </div>
+    <div class="cfg-f" style="margin-bottom:16px">
+      <label>Password</label>
+      <input type="password" id="authPassword" style="width:100%;padding:7px 10px;font-size:12px;background:var(--bg-page);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text-primary);font-family:var(--font);outline:none">
+    </div>
+    <div id="authError" style="display:none;color:var(--error);font-size:12px;margin-bottom:12px"></div>
+    <button class="btn btn-primary" id="authSubmitBtn" style="width:100%;justify-content:center;margin-bottom:10px" onclick="submitAuth()">Log in</button>
+    <div style="text-align:center;font-size:12px;color:var(--text-secondary)">
+      <span id="authToggleText">Don't have an account?</span>
+      <a href="#" onclick="toggleAuthMode();return false" id="authToggleLink">Register</a>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════ APP SHELL ══════════ -->
+<div id="appShell" style="display:none">
+
 <!-- ══════════ SIDEBAR ══════════ -->
 <aside class="sidebar">
   <div class="sb-header">
@@ -596,6 +624,10 @@ svg{display:block;flex-shrink:0}
           <p style="font-size:12px;color:var(--text-muted)">WhisperDeck v0.6 — Transcribe meeting recordings using local or hosted Whisper models. Supports Groq, OpenAI, Replicate, and custom endpoints. Features speaker diarization, LLM summarization, and voice identification database.</p>
           <p style="font-size:11px;color:var(--text-muted);margin-top:8px">Backend: <span id="aboutBackend">FastAPI + SQLite</span></p>
         </div>
+        <div class="set-card">
+          <h4>Account</h4>
+          <button class="btn btn-sm" onclick="logout()">Log out</button>
+        </div>
       </div>
     </div>
 
@@ -641,12 +673,15 @@ svg{display:block;flex-shrink:0}
 <!-- ══════ TOAST ══════ -->
 <div class="toast-container" id="toastContainer"></div>
 
+</div><!-- /appShell -->
+
 <script>
 /* ═══════════════════════════════════════════════════════
    STATE
    ═══════════════════════════════════════════════════════ */
 const API = '';
 let currentPage = 'dashboard';
+let authMode = 'login';
 let selectedFile = null;
 let currentTranscriptId = null;
 let currentDetailData = null;
@@ -1383,7 +1418,68 @@ document.querySelectorAll('.nav-item[data-page]').forEach(item => {
 /* ═══════════════════════════════════════════════════════
    INIT
    ═══════════════════════════════════════════════════════ */
-loadDashboard();
+checkAuth();
+
+/* ═══════════════════════════════════════════════════════
+   AUTH
+   ═══════════════════════════════════════════════════════ */
+async function checkAuth() {
+  try {
+    const r = await fetch(API + '/api/me');
+    if (r.ok) {
+      document.getElementById('authShell').style.display = 'none';
+      document.getElementById('appShell').style.display = 'block';
+      loadDashboard();
+      return;
+    }
+  } catch (e) {}
+  document.getElementById('appShell').style.display = 'none';
+  document.getElementById('authShell').style.display = 'flex';
+}
+
+function toggleAuthMode() {
+  authMode = authMode === 'login' ? 'register' : 'login';
+  document.getElementById('authTitle').textContent = authMode === 'login' ? 'Log in' : 'Create account';
+  document.getElementById('authSubmitBtn').textContent = authMode === 'login' ? 'Log in' : 'Register';
+  document.getElementById('authToggleText').textContent = authMode === 'login' ? "Don't have an account?" : 'Already have an account?';
+  document.getElementById('authToggleLink').textContent = authMode === 'login' ? 'Register' : 'Log in';
+  document.getElementById('authError').style.display = 'none';
+}
+
+async function submitAuth() {
+  const username = document.getElementById('authUsername').value.trim();
+  const password = document.getElementById('authPassword').value;
+  const errEl = document.getElementById('authError');
+  errEl.style.display = 'none';
+  if (!username || !password) {
+    errEl.textContent = 'Username and password are required.';
+    errEl.style.display = 'block';
+    return;
+  }
+  const endpoint = authMode === 'login' ? '/api/login' : '/api/register';
+  try {
+    const r = await fetch(API + endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password }),
+    });
+    if (!r.ok) {
+      const body = await r.json().catch(() => ({}));
+      throw new Error(body.detail || 'Authentication failed');
+    }
+    checkAuth();
+  } catch (e) {
+    errEl.textContent = e.message || 'Authentication failed';
+    errEl.style.display = 'block';
+  }
+}
+
+async function logout() {
+  await fetch(API + '/api/logout', { method: 'POST' });
+  document.getElementById('authUsername').value = '';
+  document.getElementById('authPassword').value = '';
+  checkAuth();
+}
 </script>
 </body>
 </html>
