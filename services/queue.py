@@ -4,10 +4,13 @@ The dispatch worker loop lives in this same module — see the bottom half
 of this file (queue_worker_tick, queue_worker_loop), added alongside the
 functions below.
 """
+import asyncio
 import datetime
 from typing import Optional
 
 from database import Transcript, TranscriptionJob
+from backends import get_provider, ProviderError
+from database import ProviderConfig
 
 # Free-tier numbers confirmed live against https://console.groq.com/docs/rate-limits
 # on 2026-07-01. Paid/dev tiers raise these — kept here as a dict (not a
@@ -136,3 +139,194 @@ def merge_chunk_results(jobs: list) -> tuple:
 
     full_text = " ".join(s["text"].strip() for s in merged_segments if s["text"].strip())
     return merged_segments, full_text
+
+
+MAX_ATTEMPTS = 3
+
+
+def create_chunk_jobs(db, transcript_id: int, chunks: list) -> None:
+    """Insert one pending TranscriptionJob per chunk dict (as returned by
+    services.audio_prep.chunk_audio)."""
+    for chunk in chunks:
+        db.add(TranscriptionJob(
+            transcript_id=transcript_id,
+            chunk_index=chunk["index"],
+            start_time=chunk["start_time"],
+            end_time=chunk["end_time"],
+            audio_path=chunk["path"],
+        ))
+    db.commit()
+
+
+def retry_failed_chunks(db, transcript_id: int) -> int:
+    """Reset every permanently-failed job for this transcript back to
+    pending so the worker picks it up again. Returns how many were reset."""
+    failed = (
+        db.query(TranscriptionJob)
+        .filter(TranscriptionJob.transcript_id == transcript_id, TranscriptionJob.status == "failed")
+        .all()
+    )
+    for job in failed:
+        job.status = "pending"
+        job.attempts = 0
+        job.error = None
+    if failed:
+        transcript = db.query(Transcript).filter(Transcript.id == transcript_id).first()
+        if transcript:
+            transcript.status = "processing"
+        db.commit()
+    return len(failed)
+
+
+def _retry_eligible(job) -> bool:
+    if job.attempts >= MAX_ATTEMPTS:
+        return False
+    backoff = min(60, 5 * (2 ** job.attempts))
+    elapsed = (datetime.datetime.utcnow() - job.updated_at).total_seconds()
+    return elapsed >= backoff
+
+
+async def _run_chunk_job(db, job, provider_config: dict, provider_name: str) -> None:
+    job.status = "running"
+    job.attempts += 1
+    db.commit()
+    try:
+        provider = get_provider(provider_name, provider_config)
+        result = await provider.transcribe(job.audio_path, language="en", temperature=0.0)
+        job.result_json = {
+            "segments": [
+                {"start": s.start, "end": s.end, "text": s.text, "speaker": s.speaker, "confidence": s.confidence}
+                for s in result.segments
+            ],
+            "full_text": result.full_text,
+            "language": result.language,
+            "model": result.model,
+        }
+        job.status = "completed"
+        job.error = None
+    except (ProviderError, Exception) as e:
+        # Always land on "failed", never straight back to "pending" — the
+        # tick's own _retry_eligible + backoff pass (below) is what
+        # resurrects a job to "pending" once its backoff window has
+        # elapsed. Setting "pending" here directly would skip that check
+        # and let a job that fails immediately get redispatched on the
+        # very next tick (~5s later), hammering the provider on repeated
+        # failures instead of backing off. Once attempts reaches
+        # MAX_ATTEMPTS, _retry_eligible permanently refuses to resurrect
+        # it — that's what makes "failed" terminal.
+        job.status = "failed"
+        job.error = str(e)
+    db.commit()
+
+
+async def _finalize_if_done(db, transcript_id: int, diarization_service) -> None:
+    jobs = db.query(TranscriptionJob).filter(TranscriptionJob.transcript_id == transcript_id).all()
+    if not jobs or any(j.status in ("pending", "running") for j in jobs):
+        return  # still work outstanding
+
+    transcript = db.query(Transcript).filter(Transcript.id == transcript_id).first()
+    if not transcript:
+        return
+
+    segments, full_text = merge_chunk_results(jobs)
+    transcript.segments = segments
+    transcript.full_text = full_text
+    transcript.duration_seconds = max((j.end_time for j in jobs), default=0)
+    transcript.status = "partial" if any(j.status == "failed" for j in jobs) else "completed"
+    transcript.updated_at = datetime.datetime.utcnow()
+
+    if transcript.diarize_requested and segments and transcript.audio_path:
+        try:
+            if diarization_service._check_pyannote():
+                result = await diarization_service.diarize_pyannote(transcript.audio_path, num_speakers=2)
+            else:
+                result = await diarization_service.diarize_heuristic(
+                    transcript.audio_path, num_speakers=2, segments=segments,
+                )
+            merged = await diarization_service.combine_with_transcript(result, segments)
+            transcript.segments = merged
+            transcript.speaker_count = result.speaker_count
+        except Exception as e:
+            print(f"[queue] non-fatal diarization failure for transcript {transcript_id}: {e}")
+
+    db.commit()
+
+
+async def queue_worker_tick(SessionLocal, diarization_service) -> None:
+    """One pass: retry-eligible failed jobs become pending, then dispatch
+    pending jobs (grouped by user+provider) up to that user's concurrency
+    setting, skipping any dispatch that would exceed rate-limit budget."""
+    db = SessionLocal()
+    try:
+        from services.settings import get_user_settings  # local import avoids a module-load cycle with app.py
+
+        pending_or_retry = (
+            db.query(TranscriptionJob)
+            .filter(TranscriptionJob.status.in_(["pending", "failed"]))
+            .all()
+        )
+        for job in pending_or_retry:
+            if job.status == "failed" and _retry_eligible(job):
+                job.status = "pending"
+                job.error = None
+        db.commit()
+
+        pending = db.query(TranscriptionJob).filter(TranscriptionJob.status == "pending").all()
+        by_transcript = {}
+        for job in pending:
+            by_transcript.setdefault(job.transcript_id, []).append(job)
+
+        for transcript_id, jobs in by_transcript.items():
+            transcript = db.query(Transcript).filter(Transcript.id == transcript_id).first()
+            if not transcript:
+                continue
+            settings = get_user_settings(db, transcript.user_id)
+            concurrency_cap = settings["max_concurrent_chunks"]
+
+            already_running = (
+                db.query(TranscriptionJob)
+                .filter(TranscriptionJob.transcript_id == transcript_id, TranscriptionJob.status == "running")
+                .count()
+            )
+            slots = max(0, concurrency_cap - already_running)
+            if slots == 0:
+                continue
+
+            prov_cfg = (
+                db.query(ProviderConfig)
+                .filter(ProviderConfig.user_id == transcript.user_id, ProviderConfig.name == transcript.provider)
+                .first()
+            )
+            provider_config = {
+                "api_key": prov_cfg.api_key if prov_cfg else "",
+                "api_url": prov_cfg.api_url if prov_cfg else "",
+                "default_model": (prov_cfg.default_model if prov_cfg else "") or transcript.model,
+            }
+
+            jobs.sort(key=lambda j: j.chunk_index)
+            dispatched = []
+            for job in jobs[:slots]:
+                job_duration = job.end_time - job.start_time
+                if not has_budget(db, transcript.user_id, transcript.provider, job_duration):
+                    break  # over budget — leave remaining jobs pending for a later tick
+                dispatched.append(job)
+
+            if dispatched:
+                await asyncio.gather(*[
+                    _run_chunk_job(db, job, provider_config, transcript.provider) for job in dispatched
+                ])
+
+            await _finalize_if_done(db, transcript_id, diarization_service)
+    finally:
+        db.close()
+
+
+async def queue_worker_loop(SessionLocal, diarization_service, interval_seconds: float = 5.0) -> None:
+    """Runs forever (until cancelled) — call via asyncio.create_task from
+    app.py's lifespan startup."""
+    while True:
+        try:
+            await queue_worker_tick(SessionLocal, diarization_service)
+        except Exception as e:
+            print(f"[queue] worker tick failed: {e}")
+        await asyncio.sleep(interval_seconds)
