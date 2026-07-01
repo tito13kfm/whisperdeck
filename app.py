@@ -355,6 +355,7 @@ async def transcribe_audio(
     try:
         transcript = await transcription_service.transcribe(
             db,
+            current_user.id,
             audio_path=str(save_path),
             provider_name=provider,
             provider_config=provider_config,
@@ -395,9 +396,10 @@ async def transcribe_audio(
 
 
 @app.get("/api/transcripts")
-async def list_transcripts(limit: int = 50, offset: int = 0, db: Session = Depends(get_db)):
+async def list_transcripts(limit: int = 50, offset: int = 0, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     transcripts = (
         db.query(Transcript)
+        .filter(Transcript.user_id == current_user.id)
         .order_by(Transcript.created_at.desc())
         .offset(offset)
         .limit(limit)
@@ -407,16 +409,20 @@ async def list_transcripts(limit: int = 50, offset: int = 0, db: Session = Depen
 
 
 @app.get("/api/transcripts/{transcript_id}")
-async def get_transcript(transcript_id: int, db: Session = Depends(get_db)):
-    t = db.query(Transcript).filter(Transcript.id == transcript_id).first()
+async def get_transcript(transcript_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    t = db.query(Transcript).filter(
+        Transcript.id == transcript_id, Transcript.user_id == current_user.id
+    ).first()
     if not t:
         raise HTTPException(status_code=404, detail="Transcript not found")
     return _serialize_transcript(t)
 
 
 @app.delete("/api/transcripts/{transcript_id}")
-async def delete_transcript(transcript_id: int, db: Session = Depends(get_db)):
-    t = db.query(Transcript).filter(Transcript.id == transcript_id).first()
+async def delete_transcript(transcript_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    t = db.query(Transcript).filter(
+        Transcript.id == transcript_id, Transcript.user_id == current_user.id
+    ).first()
     if not t:
         raise HTTPException(status_code=404, detail="Transcript not found")
     db.delete(t)
@@ -425,8 +431,10 @@ async def delete_transcript(transcript_id: int, db: Session = Depends(get_db)):
 
 
 @app.patch("/api/transcripts/{transcript_id}")
-async def update_transcript(transcript_id: int, data: dict = Body(...), db: Session = Depends(get_db)):
-    t = db.query(Transcript).filter(Transcript.id == transcript_id).first()
+async def update_transcript(transcript_id: int, data: dict = Body(...), db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    t = db.query(Transcript).filter(
+        Transcript.id == transcript_id, Transcript.user_id == current_user.id
+    ).first()
     if not t:
         raise HTTPException(status_code=404, detail="Transcript not found")
     if "title" in data:
@@ -499,6 +507,7 @@ async def summarize_transcript(
     try:
         summary = await transcription_service.summarize(
             db,
+            current_user.id,
             transcript_id=transcript_id,
             api_key=api_key,
             provider_name=provider,
@@ -513,7 +522,12 @@ async def summarize_transcript(
 
 
 @app.get("/api/transcripts/{transcript_id}/summary")
-async def get_summary(transcript_id: int, db: Session = Depends(get_db)):
+async def get_summary(transcript_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    t = db.query(Transcript).filter(
+        Transcript.id == transcript_id, Transcript.user_id == current_user.id
+    ).first()
+    if not t:
+        raise HTTPException(status_code=404, detail="Transcript not found")
     summary = db.query(Summary).filter(Summary.transcript_id == transcript_id).first()
     if not summary:
         raise HTTPException(status_code=404, detail="No summary found")
@@ -603,22 +617,30 @@ async def index():
 
 
 @app.get("/api/status")
-async def full_status(db: Session = Depends(get_db)):
+async def full_status(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     """Return comprehensive app status for the frontend dashboard."""
-    total = db.query(Transcript).count()
-    completed = db.query(Transcript).filter(Transcript.status == "completed").count()
-    processing = db.query(Transcript).filter(Transcript.status == "processing").count()
-    failed = db.query(Transcript).filter(Transcript.status == "failed").count()
+    total = db.query(Transcript).filter(Transcript.user_id == current_user.id).count()
+    completed = db.query(Transcript).filter(
+        Transcript.user_id == current_user.id, Transcript.status == "completed"
+    ).count()
+    processing = db.query(Transcript).filter(
+        Transcript.user_id == current_user.id, Transcript.status == "processing"
+    ).count()
+    failed = db.query(Transcript).filter(
+        Transcript.user_id == current_user.id, Transcript.status == "failed"
+    ).count()
     total_duration = (
         db.query(Transcript.duration_seconds)
-        .filter(Transcript.status == "completed")
+        .filter(Transcript.user_id == current_user.id, Transcript.status == "completed")
         .all()
     )
     total_minutes = sum(d[0] for d in total_duration if d[0]) / 60
-    voice_count = db.query(VoiceProfile).count()
+    voice_count = db.query(VoiceProfile).filter(VoiceProfile.user_id == current_user.id).count()
 
     # Get active provider
-    active_prov = db.query(ProviderConfig).filter(ProviderConfig.is_active == True).first()  # noqa: E712
+    active_prov = db.query(ProviderConfig).filter(
+        ProviderConfig.user_id == current_user.id, ProviderConfig.is_active == True  # noqa: E712
+    ).first()
 
     return {
         "total_transcripts": total,

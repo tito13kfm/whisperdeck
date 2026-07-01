@@ -19,6 +19,7 @@ class TranscriptionService:
     async def transcribe(
         self,
         db,
+        user_id: int,
         audio_path: str,
         provider_name: str = "groq",
         provider_config: Optional[dict] = None,
@@ -37,6 +38,7 @@ class TranscriptionService:
 
         filename = os.path.basename(audio_path)
         transcript = Transcript(
+            user_id=user_id,
             title=title or os.path.splitext(filename)[0],
             filename=filename,
             provider=provider_name,
@@ -95,20 +97,23 @@ class TranscriptionService:
             db.commit()
             raise
 
-    def get_transcript(self, db, transcript_id: int) -> Optional[Transcript]:
-        return db.query(Transcript).filter(Transcript.id == transcript_id).first()
+    def get_transcript(self, db, user_id: int, transcript_id: int) -> Optional[Transcript]:
+        return db.query(Transcript).filter(
+            Transcript.id == transcript_id, Transcript.user_id == user_id
+        ).first()
 
-    def list_transcripts(self, db, limit: int = 50, offset: int = 0) -> list[Transcript]:
+    def list_transcripts(self, db, user_id: int, limit: int = 50, offset: int = 0) -> list[Transcript]:
         return (
             db.query(Transcript)
+            .filter(Transcript.user_id == user_id)
             .order_by(Transcript.created_at.desc())
             .offset(offset)
             .limit(limit)
             .all()
         )
 
-    def delete_transcript(self, db, transcript_id: int) -> bool:
-        t = self.get_transcript(db, transcript_id)
+    def delete_transcript(self, db, user_id: int, transcript_id: int) -> bool:
+        t = self.get_transcript(db, user_id, transcript_id)
         if not t:
             return False
         db.delete(t)
@@ -118,6 +123,7 @@ class TranscriptionService:
     async def summarize(
         self,
         db,
+        user_id: int,
         transcript_id: int,
         api_key: str = "",
         provider_name: str = "groq",
@@ -125,7 +131,7 @@ class TranscriptionService:
         model: str = "llama-3.3-70b-versatile",
     ) -> Summary:
         """Generate an LLM summary of a completed transcript."""
-        transcript = self.get_transcript(db, transcript_id)
+        transcript = self.get_transcript(db, user_id, transcript_id)
         if not transcript:
             raise ValueError(f"Transcript {transcript_id} not found")
         if transcript.status != "completed":
