@@ -195,13 +195,14 @@ async def health():
 # ── Providers ─────────────────────────────────────────────────────────────
 
 @app.get("/api/providers")
-async def get_providers(db: Session = Depends(get_db)):
+async def get_providers(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     """List available providers with their metadata."""
     providers = list_providers()
     # Merge in saved config status
     for p in providers:
         saved = db.query(ProviderConfig).filter(
-            ProviderConfig.name == p["id"]
+            ProviderConfig.user_id == current_user.id,
+            ProviderConfig.name == p["id"],
         ).first()
         if saved:
             p["configured"] = bool(saved.api_key)
@@ -213,8 +214,11 @@ async def get_providers(db: Session = Depends(get_db)):
 
 
 @app.get("/api/providers/{name}")
-async def get_provider_config(name: str, db: Session = Depends(get_db)):
-    cfg = db.query(ProviderConfig).filter(ProviderConfig.name == name).first()
+async def get_provider_config(name: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    cfg = db.query(ProviderConfig).filter(
+        ProviderConfig.user_id == current_user.id,
+        ProviderConfig.name == name,
+    ).first()
     if not cfg:
         return {"name": name, "api_key": "", "api_url": "", "default_model": "", "is_active": False}
     return {
@@ -229,10 +233,13 @@ async def get_provider_config(name: str, db: Session = Depends(get_db)):
 
 
 @app.put("/api/providers/{name}")
-async def update_provider_config(name: str, data: dict = Body(...), db: Session = Depends(get_db)):
-    cfg = db.query(ProviderConfig).filter(ProviderConfig.name == name).first()
+async def update_provider_config(name: str, data: dict = Body(...), db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    cfg = db.query(ProviderConfig).filter(
+        ProviderConfig.user_id == current_user.id,
+        ProviderConfig.name == name,
+    ).first()
     if not cfg:
-        cfg = ProviderConfig(name=name)
+        cfg = ProviderConfig(name=name, user_id=current_user.id)
         db.add(cfg)
 
     if "api_key" in data and data["api_key"] and not data["api_key"].startswith("••••"):
@@ -251,7 +258,7 @@ async def update_provider_config(name: str, data: dict = Body(...), db: Session 
 
 
 @app.get("/api/providers/{name}/models")
-async def list_provider_models(name: str, db: Session = Depends(get_db)):
+async def list_provider_models(name: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     """Fetch available transcription models for a given provider (live if possible)."""
     from backends import get_provider, list_providers
 
@@ -261,7 +268,10 @@ async def list_provider_models(name: str, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail=f"Unknown provider: {name}")
 
     # Get saved config
-    cfg = db.query(ProviderConfig).filter(ProviderConfig.name == name).first()
+    cfg = db.query(ProviderConfig).filter(
+        ProviderConfig.user_id == current_user.id,
+        ProviderConfig.name == name,
+    ).first()
     prov_config = {}
     if cfg:
         prov_config = {
@@ -307,6 +317,7 @@ async def transcribe_audio(
     temperature: float = Form(0.0),
     diarize: bool = Form(False),
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     """Upload and transcribe an audio file."""
     # Save uploaded file
@@ -329,7 +340,10 @@ async def transcribe_audio(
             raise HTTPException(status_code=500, detail=str(e))
 
     # Get provider config
-    prov_cfg = db.query(ProviderConfig).filter(ProviderConfig.name == provider).first()
+    prov_cfg = db.query(ProviderConfig).filter(
+        ProviderConfig.user_id == current_user.id,
+        ProviderConfig.name == provider,
+    ).first()
     provider_config = {}
     if prov_cfg:
         provider_config = {
@@ -473,9 +487,13 @@ async def summarize_transcript(
     provider: str = Form("groq"),
     model: str = Form("llama-3.3-70b-versatile"),
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     """Generate an LLM summary of a completed transcript."""
-    prov_cfg = db.query(ProviderConfig).filter(ProviderConfig.name == provider).first()
+    prov_cfg = db.query(ProviderConfig).filter(
+        ProviderConfig.user_id == current_user.id,
+        ProviderConfig.name == provider,
+    ).first()
     api_key = prov_cfg.api_key if prov_cfg else ""
 
     try:
