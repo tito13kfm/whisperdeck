@@ -1,0 +1,1389 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>WhisperDeck — Meeting Transcription & Voice Intelligence</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;450;500;600;700&family=JetBrains+Mono:wght@450;500&display=swap" rel="stylesheet">
+<style>
+/* ═══════════════════════════════════════════════════
+   TOKENS
+   ═══════════════════════════════════════════════════ */
+:root {
+  --bg-page: #0b0d14;
+  --bg-surface: #141720;
+  --bg-raised: #1a1e2b;
+  --bg-hover: #222738;
+  --bg-elevated: #1e2335;
+  --border: #282e42;
+  --border-light: #333a52;
+  --text-primary: #e4e7ed;
+  --text-secondary: #949bb0;
+  --text-muted: #5b637a;
+  --accent: #7c5cfc;
+  --accent-hover: #6a4ae0;
+  --accent-subtle: rgba(124,92,252,0.10);
+  --accent-glow: rgba(124,92,252,0.20);
+  --success: #34d399;
+  --success-subtle: rgba(52,211,153,0.10);
+  --warning: #fbbf24;
+  --warning-subtle: rgba(251,191,36,0.10);
+  --error: #f87171;
+  --error-subtle: rgba(248,113,113,0.10);
+  --sidebar-w: 220px;
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 16px;
+  --radius-xl: 20px;
+  --shadow-sm: 0 1px 2px rgba(0,0,0,0.4);
+  --shadow-md: 0 4px 20px rgba(0,0,0,0.5);
+  --shadow-lg: 0 8px 48px rgba(0,0,0,0.6);
+  --font: 'Inter', system-ui, -apple-system, sans-serif;
+  --mono: 'JetBrains Mono', monospace;
+  --transition: 0.2s ease;
+}
+[data-theme="light"] {
+  --bg-page: #f4f5f9;
+  --bg-surface: #ffffff;
+  --bg-raised: #ffffff;
+  --bg-hover: #edf0f5;
+  --bg-elevated: #ffffff;
+  --border: #e0e3eb;
+  --border-light: #cdd1dd;
+  --text-primary: #161922;
+  --text-secondary: #5b637a;
+  --text-muted: #949bb0;
+  --shadow-sm: 0 1px 3px rgba(0,0,0,0.05);
+  --shadow-md: 0 4px 16px rgba(0,0,0,0.07);
+  --shadow-lg: 0 8px 40px rgba(0,0,0,0.09);
+}
+[data-accent="teal"] { --accent: #14b8a6; --accent-hover: #0d9488; --accent-subtle: rgba(20,184,166,0.10); --accent-glow: rgba(20,184,166,0.20); }
+[data-accent="amber"] { --accent: #f59e0b; --accent-hover: #d97706; --accent-subtle: rgba(245,158,11,0.10); --accent-glow: rgba(245,158,11,0.20); }
+[data-accent="rose"] { --accent: #f43f5e; --accent-hover: #e11d48; --accent-subtle: rgba(244,63,94,0.10); --accent-glow: rgba(244,63,94,0.20); }
+[data-accent="sky"] { --accent: #0ea5e9; --accent-hover: #0284c7; --accent-subtle: rgba(14,165,233,0.10); --accent-glow: rgba(14,165,233,0.20); }
+
+/* ═══════════════════════════════════════════════════
+   RESET / BASE
+   ═══════════════════════════════════════════════════ */
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+html{font-size:16px;-webkit-font-smoothing:antialiased}
+body{
+  font-family:var(--font);background:var(--bg-page);color:var(--text-primary);
+  height:100vh;overflow:hidden;display:flex;transition:background var(--transition),color var(--transition);
+}
+::selection{background:var(--accent);color:#fff}
+a{color:var(--accent);text-decoration:none}
+a:hover{color:var(--accent-hover)}
+svg{display:block;flex-shrink:0}
+::-webkit-scrollbar{width:5px;height:5px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px}
+
+/* ═══════════════════════════════════════════════════
+   SIDEBAR
+   ═══════════════════════════════════════════════════ */
+.sidebar{
+  width:var(--sidebar-w);height:100vh;background:var(--bg-surface);
+  border-right:1px solid var(--border);display:flex;flex-direction:column;
+  flex-shrink:0;z-index:20;transition:background var(--transition),border-color var(--transition);
+}
+.sb-header{
+  padding:18px 16px 14px;display:flex;align-items:center;gap:10px;
+  border-bottom:1px solid var(--border);
+}
+.sb-logo{
+  width:30px;height:30px;border-radius:var(--radius-sm);
+  background:linear-gradient(135deg,var(--accent),var(--accent-hover));
+  display:flex;align-items:center;justify-content:center;
+  color:#fff;font-weight:700;font-size:14px;flex-shrink:0;
+}
+.sb-title{font-size:15px;font-weight:600;letter-spacing:-0.01em}
+.sb-ver{font-size:9px;font-weight:600;color:var(--text-muted);background:var(--bg-page);padding:1px 5px;border-radius:3px;margin-left:auto}
+.sb-nav{flex:1;padding:10px 8px;overflow-y:auto}
+.sb-label{font-size:9px;font-weight:600;text-transform:uppercase;letter-spacing:0.08em;color:var(--text-muted);padding:14px 10px 5px}
+.nav-item{
+  display:flex;align-items:center;gap:9px;padding:8px 10px;border-radius:var(--radius-sm);
+  font-size:13px;font-weight:450;color:var(--text-secondary);cursor:pointer;
+  transition:all var(--transition);border:none;background:none;width:100%;text-align:left;
+  position:relative;
+}
+.nav-item:hover{background:var(--bg-hover);color:var(--text-primary)}
+.nav-item.active{background:var(--accent-subtle);color:var(--accent);font-weight:500}
+.nav-item .ni-icon{width:16px;height:16px;opacity:0.6;flex-shrink:0}
+.nav-item.active .ni-icon{opacity:1}
+.nav-item .ni-badge{
+  margin-left:auto;background:var(--accent-subtle);color:var(--accent);
+  font-size:10px;font-weight:600;padding:0 6px;border-radius:3px;height:16px;display:flex;align-items:center;
+}
+.sb-footer{padding:10px 8px;border-top:1px solid var(--border)}
+.sb-storage{padding:5px 10px}
+.sb-storage-l{display:flex;justify-content:space-between;font-size:10px;color:var(--text-muted);margin-bottom:3px}
+.sb-storage-t{height:3px;background:var(--bg-page);border-radius:2px;overflow:hidden}
+.sb-storage-f{height:100%;background:var(--accent);border-radius:2px;width:0%;transition:width 1s ease}
+
+/* ═══════════════════════════════════════════════════
+   MAIN
+   ═══════════════════════════════════════════════════ */
+.main{flex:1;display:flex;flex-direction:column;height:100vh;overflow:hidden}
+.main-hdr{
+  display:flex;align-items:center;justify-content:space-between;
+  padding:14px 28px;border-bottom:1px solid var(--border);
+  background:var(--bg-surface);flex-shrink:0;transition:background var(--transition),border-color var(--transition);
+  min-height:57px;
+}
+.main-hdr-l{display:flex;align-items:center;gap:10px}
+.main-hdr h1{font-size:16px;font-weight:600;letter-spacing:-0.01em}
+.hdr-actions{display:flex;align-items:center;gap:6px}
+
+.btn{
+  display:inline-flex;align-items:center;justify-content:center;gap:5px;
+  padding:6px 14px;border-radius:var(--radius-sm);
+  font-size:12px;font-weight:500;font-family:var(--font);
+  border:1px solid var(--border);background:var(--bg-raised);
+  color:var(--text-primary);cursor:pointer;
+  transition:all var(--transition);white-space:nowrap;line-height:1.4;
+}
+.btn:hover{background:var(--bg-hover);border-color:var(--border-light)}
+.btn-primary{background:var(--accent);color:#fff;border-color:var(--accent)}
+.btn-primary:hover{background:var(--accent-hover);border-color:transparent}
+.btn-ghost{border-color:transparent;background:transparent;color:var(--text-secondary)}
+.btn-ghost:hover{background:var(--bg-hover);color:var(--text-primary)}
+.btn-danger{border-color:var(--error);color:var(--error);background:transparent}
+.btn-danger:hover{background:var(--error-subtle)}
+.btn-xs{padding:3px 8px;font-size:11px}
+.btn-sm{padding:5px 10px;font-size:12px}
+.btn-lg{padding:9px 22px;font-size:14px}
+.btn-icon{padding:6px;width:30px;height:30px}
+.btn-icon.btn-sm{width:26px;height:26px;padding:4px}
+.btn svg{width:15px;height:15px}
+.btn-icon svg{width:16px;height:16px}
+
+.area{flex:1;overflow-y:auto;padding:28px}
+.area-wide{padding:28px 32px}
+
+/* ═══════════════════════════════════════════════════
+   PAGE SYSTEM
+   ═══════════════════════════════════════════════════ */
+.page{display:none;animation:fadeIn 0.2s ease}
+.page.active{display:block}
+@keyframes fadeIn{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:translateY(0)}}
+
+/* ═══════════════════════════════════════════════════
+   DASHBOARD
+   ═══════════════════════════════════════════════════ */
+.greeting{margin-bottom:24px}
+.greeting h2{font-size:22px;font-weight:600;letter-spacing:-0.02em;margin-bottom:3px}
+.greeting p{font-size:13px;color:var(--text-secondary)}
+.greeting .sub{font-size:12px;color:var(--text-muted);margin-top:2px}
+
+.stats{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:12px;margin-bottom:28px}
+.stat{
+  background:var(--bg-surface);border:1px solid var(--border);border-radius:var(--radius-md);
+  padding:16px 18px;transition:all var(--transition);
+}
+.stat:hover{border-color:var(--border-light);box-shadow:var(--shadow-sm)}
+.stat-icon{width:30px;height:30px;border-radius:var(--radius-sm);display:flex;align-items:center;justify-content:center;margin-bottom:8px}
+.stat-icon svg{width:14px;height:14px}
+.stat-v{font-size:24px;font-weight:700;letter-spacing:-0.02em;line-height:1.2}
+.stat-l{font-size:11px;color:var(--text-muted);margin-top:1px}
+
+.s-hdr{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px}
+.s-hdr h3{font-size:14px;font-weight:600}
+
+/* ═══════════════════════════════════════════════════
+   CARD LIST
+   ═══════════════════════════════════════════════════ */
+.card-list{display:flex;flex-direction:column;gap:4px}
+.card-item{
+  display:flex;align-items:center;gap:12px;padding:10px 14px;
+  border-radius:var(--radius-sm);background:var(--bg-surface);
+  border:1px solid var(--border);cursor:pointer;
+  transition:all var(--transition);
+}
+.card-item:hover{border-color:var(--border-light);background:var(--bg-hover)}
+.ci-icon{width:32px;height:32px;border-radius:var(--radius-sm);display:flex;align-items:center;justify-content:center;flex-shrink:0}
+.ci-icon svg{width:14px;height:14px}
+.ci-body{flex:1;min-width:0}
+.ci-title{font-size:13px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ci-meta{font-size:11px;color:var(--text-muted);margin-top:1px}
+.ci-status{font-size:10px;font-weight:500;padding:2px 7px;border-radius:3px;flex-shrink:0}
+.ci-badge{font-size:10px;color:var(--text-muted);flex-shrink:0}
+
+/* ═══════════════════════════════════════════════════
+   UPLOAD ZONE
+   ═══════════════════════════════════════════════════ */
+.upload-zone{
+  border:2px dashed var(--border);border-radius:var(--radius-lg);
+  padding:50px 36px;text-align:center;cursor:pointer;
+  transition:all var(--transition);position:relative;background:var(--bg-surface);
+}
+.upload-zone:hover{border-color:var(--accent);background:var(--accent-subtle)}
+.upload-zone.dragover{border-color:var(--accent);background:var(--accent-subtle);border-style:solid}
+.uz-icon{width:44px;height:44px;margin:0 auto 14px;background:var(--accent-subtle);border-radius:var(--radius-lg);display:flex;align-items:center;justify-content:center}
+.uz-icon svg{width:20px;height:20px;color:var(--accent)}
+.upload-zone h3{font-size:16px;font-weight:600;margin-bottom:3px}
+.upload-zone p{font-size:12px;color:var(--text-muted);margin-bottom:14px}
+.upload-zone input[type="file"]{display:none}
+.uz-tags{display:flex;gap:5px;justify-content:center;flex-wrap:wrap;margin-top:12px}
+.uz-tag{font-size:10px;font-weight:500;padding:2px 7px;background:var(--bg-page);border-radius:3px;color:var(--text-muted)}
+
+.rec-bar{display:none;align-items:center;gap:10px;padding:10px 14px;background:var(--error-subtle);border:1px solid rgba(248,113,113,0.15);border-radius:var(--radius-md);margin-top:14px}
+.rec-bar.on{display:flex}
+.rec-dot{width:8px;height:8px;border-radius:50%;background:var(--error);animation:pulse-d 1s ease-in-out infinite}
+@keyframes pulse-d{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.5;transform:scale(.8)}}
+.rec-t{font-size:13px;font-weight:500;font-variant-numeric:tabular-nums}
+.rec-l{font-size:12px;color:var(--text-secondary);flex:1}
+
+/* ═══════════════════════════════════════════════════
+   CONFIG SECTION
+   ═══════════════════════════════════════════════════ */
+.cfg-sec{margin-top:20px;background:var(--bg-surface);border:1px solid var(--border);border-radius:var(--radius-md);padding:18px 22px}
+.cfg-sec h4{font-size:12px;font-weight:600;margin-bottom:14px;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.05em}
+.cfg-g{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.cfg-f{}
+.cfg-f label{display:block;font-size:11px;font-weight:500;color:var(--text-secondary);margin-bottom:3px}
+.cfg-f select,.cfg-f input{
+  width:100%;padding:7px 10px;font-size:12px;font-family:var(--font);
+  background:var(--bg-page);border:1px solid var(--border);
+  border-radius:var(--radius-sm);color:var(--text-primary);outline:none;
+  transition:border var(--transition);
+}
+.cfg-f select:focus,.cfg-f input:focus{border-color:var(--accent)}
+.cfg-f select option{background:var(--bg-elevated);color:var(--text-primary)}
+.cfg-adv{display:none;margin-top:10px;padding-top:10px;border-top:1px solid var(--border)}
+.cfg-adv.o{display:block}
+.cfg-toggle{font-size:12px;color:var(--accent);cursor:pointer;display:inline-flex;align-items:center;gap:3px;background:none;border:none;font-family:var(--font);padding:3px 0;margin-top:8px}
+.cfg-toggle:hover{color:var(--accent-hover)}
+
+/* ═══════════════════════════════════════════════════
+   PROGRESS
+   ═══════════════════════════════════════════════════ */
+.prog{max-width:520px;margin:30px auto;text-align:center}
+.prog-ring{width:72px;height:72px;margin:0 auto 20px;position:relative}
+.prog-ring svg{transform:rotate(-90deg)}
+.prog-ring circle{fill:none;stroke-width:5;stroke-linecap:round}
+.prog-ring .bg{stroke:var(--border)}
+.prog-ring .fg{stroke:var(--accent);stroke-dasharray:210.5;stroke-dashoffset:105.2;transition:stroke-dashoffset .5s ease}
+.prog-ring .check{fill:var(--success);display:none}
+.prog h3{font-size:18px;font-weight:600;margin-bottom:3px}
+.prog p{font-size:13px;color:var(--text-muted);margin-bottom:18px}
+.stages{display:flex;flex-direction:column;gap:6px;text-align:left}
+.stg{display:flex;align-items:center;gap:10px;padding:8px 12px;border-radius:var(--radius-sm);background:var(--bg-surface);border:1px solid var(--border);font-size:12px;color:var(--text-muted);transition:all .3s}
+.stg.active{color:var(--text-primary);border-color:var(--accent);background:var(--accent-subtle)}
+.stg.done{color:var(--success);border-color:rgba(52,211,153,.15);background:var(--success-subtle)}
+.stg-icon{width:18px;height:18px;border-radius:50%;display:flex;align-items:center;justify-content:center;flex-shrink:0}
+.stg-icon svg{width:10px;height:10px}
+
+/* ═══════════════════════════════════════════════════
+   TRANSCRIPT / DETAIL
+   ═══════════════════════════════════════════════════ */
+.detail-meta{display:flex;gap:20px;margin-bottom:16px;padding:12px 16px;background:var(--bg-surface);border:1px solid var(--border);border-radius:var(--radius-md);flex-wrap:wrap}
+.dm-item{display:flex;flex-direction:column}
+.dm-l{font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.04em}
+.dm-v{font-size:13px;font-weight:500;margin-top:1px}
+.detail-tabs{display:flex;gap:2px;margin-bottom:14px;border-bottom:1px solid var(--border);padding-bottom:0}
+.dt-tab{padding:7px 14px;font-size:12px;font-weight:500;color:var(--text-muted);cursor:pointer;border:none;background:none;font-family:var(--font);border-bottom:2px solid transparent;transition:all var(--transition);margin-bottom:-1px}
+.dt-tab:hover{color:var(--text-primary)}
+.dt-tab.active{color:var(--accent);border-bottom-color:var(--accent)}
+.detail-search{position:relative;margin-bottom:14px}
+.detail-search input{width:100%;padding:8px 12px 8px 32px;font-size:12px;font-family:var(--font);background:var(--bg-surface);border:1px solid var(--border);border-radius:var(--radius-md);color:var(--text-primary);outline:none}
+.detail-search input:focus{border-color:var(--accent)}
+.detail-search svg{position:absolute;left:10px;top:50%;transform:translateY(-50%);width:14px;height:14px;color:var(--text-muted)}
+
+.seg{display:flex;gap:12px;padding:8px 12px;border-radius:var(--radius-sm);cursor:pointer;transition:background var(--transition);border-left:3px solid transparent}
+.seg:hover{background:var(--bg-hover)}
+.seg.active{border-left-color:var(--accent);background:var(--accent-subtle)}
+.seg-t{font-family:var(--mono);font-size:11px;color:var(--text-muted);white-space:nowrap;padding-top:2px;min-width:46px}
+.seg-b{flex:1}
+.seg-s{font-size:11px;font-weight:600;color:var(--accent);margin-bottom:1px}
+.seg-x{font-size:13px;line-height:1.55;color:var(--text-primary)}
+.seg-x mark{background:var(--warning-subtle);color:var(--text-primary);border-radius:2px;padding:0 2px}
+.seg-speaker-dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:4px}
+
+/* ═══════════════════════════════════════════════════
+   SUMMARY
+   ═══════════════════════════════════════════════════ */
+.summary-card{background:var(--bg-surface);border:1px solid var(--border);border-radius:var(--radius-md);padding:18px 20px;margin-bottom:14px}
+.summary-card h4{font-size:12px;font-weight:600;color:var(--text-secondary);text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px}
+.summary-card p{font-size:13px;line-height:1.6;color:var(--text-primary)}
+.summary-card ul{list-style:none;padding:0}
+.summary-card li{padding:5px 0;font-size:13px;line-height:1.5;border-bottom:1px solid var(--border)}
+.summary-card li:last-child{border-bottom:none}
+.summary-card li::before{content:"→";color:var(--accent);margin-right:6px}
+
+/* ═══════════════════════════════════════════════════
+   VOICE PROFILES
+   ═══════════════════════════════════════════════════ */
+.vp-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:12px}
+.vp-card{background:var(--bg-surface);border:1px solid var(--border);border-radius:var(--radius-md);padding:16px 18px;transition:all var(--transition)}
+.vp-card:hover{border-color:var(--border-light);box-shadow:var(--shadow-sm)}
+.vp-avatar{width:40px;height:40px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:16px;color:#fff;margin-bottom:10px}
+.vp-name{font-size:14px;font-weight:600;margin-bottom:2px}
+.vp-meta{font-size:11px;color:var(--text-muted)}
+.vp-actions{display:flex;gap:6px;margin-top:10px}
+
+/* ═══════════════════════════════════════════════════
+   SETTINGS
+   ═══════════════════════════════════════════════════ */
+.set-sec{max-width:640px}
+.set-card{background:var(--bg-surface);border:1px solid var(--border);border-radius:var(--radius-md);padding:18px 22px;margin-bottom:14px}
+.set-card h4{font-size:13px;font-weight:600;margin-bottom:10px;display:flex;align-items:center;gap:7px}
+.set-card h4 svg{width:15px;height:15px;color:var(--accent)}
+.set-card>p{font-size:12px;color:var(--text-muted);margin-bottom:12px}
+.prov-item{display:flex;align-items:center;gap:10px;padding:10px 0;border-bottom:1px solid var(--border)}
+.prov-item:last-child{border-bottom:none}
+.pv-icon{width:32px;height:32px;border-radius:var(--radius-sm);display:flex;align-items:center;justify-content:center;font-weight:700;font-size:12px;flex-shrink:0;color:#fff}
+.pv-info{flex:1;min-width:0}
+.pv-name{font-size:12px;font-weight:500}
+.pv-desc{font-size:10px;color:var(--text-muted);margin-top:0px}
+.pv-key{display:flex;align-items:center;gap:6px}
+.pv-key input{width:160px;padding:5px 8px;font-size:11px;background:var(--bg-page);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text-primary);font-family:var(--mono);outline:none}
+.pv-key input:focus{border-color:var(--accent)}
+.pv-key .ks{width:7px;height:7px;border-radius:50%;flex-shrink:0}
+.pv-key .ks.on{background:var(--success)}
+.pv-key .ks.off{background:var(--text-muted)}
+
+/* ═══════════════════════════════════════════════════
+   TOAST
+   ═══════════════════════════════════════════════════ */
+.toast-container{position:fixed;bottom:20px;right:20px;z-index:999;display:flex;flex-direction:column;gap:8px}
+.toast{
+  padding:10px 16px;border-radius:var(--radius-sm);font-size:12px;font-weight:500;
+  box-shadow:var(--shadow-md);animation:slideUp .25s ease;max-width:360px;
+  display:flex;align-items:center;gap:8px;
+}
+.toast-success{background:var(--success);color:#0f1117}
+.toast-error{background:var(--error);color:#fff}
+.toast-info{background:var(--accent);color:#fff}
+@keyframes slideUp{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:translateY(0)}}
+
+/* ═══════════════════════════════════════════════════
+   EMPTY STATE
+   ═══════════════════════════════════════════════════ */
+.empty-state{text-align:center;padding:60px 20px;color:var(--text-muted)}
+.empty-state svg{width:48px;height:48px;margin:0 auto 16px;opacity:0.3}
+.empty-state h3{font-size:16px;font-weight:600;color:var(--text-secondary);margin-bottom:4px}
+.empty-state p{font-size:13px;max-width:360px;margin:0 auto}
+
+/* ═══════════════════════════════════════════════════
+   RESPONSIVE
+   ═══════════════════════════════════════════════════ */
+@media(max-width:860px){
+  .sidebar{width:56px}
+  .sb-title,.sb-ver,.sb-label,.nav-item span,.sb-storage{display:none}
+  .nav-item{justify-content:center;padding:9px}
+  .nav-item .ni-badge{display:none}
+  .sb-header{padding:14px;justify-content:center}
+  .sb-footer{padding:6px;justify-content:center}
+  .main-hdr{padding:10px 14px}
+  .area{padding:18px 14px}
+  .stats{grid-template-columns:repeat(2,1fr)}
+  .cfg-g{grid-template-columns:1fr}
+  .pv-key input{width:110px}
+}
+@media(max-width:560px){
+  .stats{grid-template-columns:1fr}
+  .detail-meta{gap:10px}
+}
+</style>
+</head>
+<body>
+
+<!-- ══════════ SIDEBAR ══════════ -->
+<aside class="sidebar">
+  <div class="sb-header">
+    <div class="sb-logo">W</div>
+    <span class="sb-title">WhisperDeck</span>
+    <span class="sb-ver">v0.6</span>
+  </div>
+  <nav class="sb-nav">
+    <div class="sb-label">Workspace</div>
+    <button class="nav-item active" data-page="dashboard">
+      <svg class="ni-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+      <span>Dashboard</span>
+    </button>
+    <button class="nav-item" data-page="transcribe">
+      <svg class="ni-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/></svg>
+      <span>Transcribe</span>
+    </button>
+    <div class="sb-label">Library</div>
+    <button class="nav-item" data-page="transcripts">
+      <svg class="ni-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z"/><polyline points="14 2 14 8 20 8"/></svg>
+      <span>Transcripts</span>
+      <span class="ni-badge" id="transcriptBadge">0</span>
+    </button>
+    <button class="nav-item" data-page="voices">
+      <svg class="ni-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+      <span>Voice DB</span>
+      <span class="ni-badge" id="voiceBadge">0</span>
+    </button>
+    <div class="sb-label">System</div>
+    <button class="nav-item" data-page="settings">
+      <svg class="ni-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+      <span>Settings</span>
+    </button>
+  </nav>
+  <div class="sb-footer">
+    <div class="sb-storage">
+      <div class="sb-storage-l"><span>Storage</span><span id="storageLabel">—</span></div>
+      <div class="sb-storage-t"><div class="sb-storage-f" id="storageFill"></div></div>
+    </div>
+  </div>
+</aside>
+
+<!-- ══════════ MAIN ══════════ -->
+<div class="main">
+  <header class="main-hdr">
+    <div class="main-hdr-l">
+      <h1 id="pageTitle">Dashboard</h1>
+    </div>
+    <div class="hdr-actions" id="hdrActions"></div>
+  </header>
+
+  <div class="area" id="contentArea">
+
+    <!-- ══════ DASHBOARD ══════ -->
+    <div class="page active" id="page-dashboard">
+      <div class="greeting">
+        <h2 id="dashGreeting">Loading...</h2>
+        <p id="dashSub">Gathering your transcription statistics</p>
+      </div>
+      <div class="stats" id="dashStats"></div>
+      <div class="s-hdr"><h3>Recent transcripts</h3><button class="btn btn-ghost btn-xs" onclick="navigate('transcripts')">View all</button></div>
+      <div class="card-list" id="dashRecents"></div>
+    </div>
+
+    <!-- ══════ TRANSCRIBE ══════ -->
+    <div class="page" id="page-transcribe">
+      <div class="upload-zone" id="uploadZone">
+        <div class="uz-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg></div>
+        <h3>Drop audio here</h3>
+        <p>or click to browse — MP3, WAV, M4A, FLAC, OGG, MP4</p>
+        <input type="file" id="fileInput" accept="audio/*,video/mp4">
+        <button class="btn btn-primary btn-sm" onclick="document.getElementById('fileInput').click()">Choose file</button>
+        <div class="uz-tags"><span class="uz-tag">MP3</span><span class="uz-tag">WAV</span><span class="uz-tag">M4A</span><span class="uz-tag">FLAC</span><span class="uz-tag">OGG</span><span class="uz-tag">MP4</span></div>
+      </div>
+
+      <div id="providerStatus" style="margin-top:14px;padding:8px 14px;background:var(--warning-subtle);border:1px solid rgba(251,191,36,0.15);border-radius:var(--radius-sm);font-size:12px;display:none">
+        <span id="providerStatusText"></span>
+      </div>
+
+      <div class="cfg-sec">
+        <h4>Configuration</h4>
+        <div class="cfg-g">
+          <div class="cfg-f"><label>Provider</label>
+            <select id="txProvider" onchange="loadTxModels()">
+              <option value="builtin">Built-in (Whisper Tiny)</option>
+              <option value="groq">Groq</option>
+              <option value="openai">OpenAI</option>
+              <option value="replicate">Replicate</option>
+              <option value="openrouter">OpenRouter</option>
+              <option value="local">Local / Custom</option>
+            </select>
+          </div>
+          <div class="cfg-f"><label>Model</label>
+            <select id="txModel"><option value="" disabled selected>Select a provider first</option></select>
+          </div>
+          <div class="cfg-f"><label>Language</label>
+            <select id="txLang"><option value="en">English</option><option value="auto">Auto-detect</option><option value="es">Spanish</option><option value="fr">French</option><option value="de">German</option><option value="ja">Japanese</option><option value="zh">Chinese</option></select>
+          </div>
+          <div class="cfg-f"><label>Speaker diarization</label>
+            <select id="txDiarize"><option value="true">On</option><option value="false">Off</option></select>
+          </div>
+        </div>
+        <button class="cfg-toggle" onclick="toggleAdv()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:12px;height:12px"><polyline points="9 18 15 12 9 6"/></svg> Advanced</button>
+        <div class="cfg-adv" id="txAdvanced">
+          <div class="cfg-g">
+            <div class="cfg-f"><label>Temperature</label><input type="number" id="txTemp" step="0.1" min="0" max="1" value="0"></div>
+            <div class="cfg-f"><label>Title (optional)</label><input type="text" id="txTitle" placeholder="Meeting name..."></div>
+          </div>
+        </div>
+      </div>
+
+      <div style="text-align:right;margin-top:16px">
+        <button class="btn btn-primary btn-lg" id="txStartBtn" onclick="startTx()" disabled>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:16px;height:16px"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+          Start Transcription
+        </button>
+      </div>
+    </div>
+
+    <!-- ══════ TRANSCRIBING (progress overlay) ══════ -->
+    <div class="page" id="page-progress">
+      <div class="prog">
+        <div class="prog-ring">
+          <svg width="72" height="72" viewBox="0 0 72 72">
+            <circle class="bg" cx="36" cy="36" r="33.5"/>
+            <circle class="fg" id="progCircle" cx="36" cy="36" r="33.5"/>
+            <circle class="check" id="progCheck" cx="36" cy="36" r="16" fill="var(--success)"/>
+          </svg>
+        </div>
+        <h3 id="progTitle">Starting...</h3>
+        <p id="progDesc">Preparing your transcription</p>
+        <div class="stages">
+          <div class="stg" id="stg-upload"><div class="stg-icon" style="background:var(--bg-page);color:var(--text-muted)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg></div>Uploading audio</div>
+          <div class="stg" id="stg-transcribe"><div class="stg-icon" style="background:var(--bg-page);color:var(--text-muted)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/></svg></div>Transcribing with Whisper</div>
+          <div class="stg" id="stg-diarize"><div class="stg-icon" style="background:var(--bg-page);color:var(--text-muted)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg></div>Speaker diarization</div>
+          <div class="stg" id="stg-done"><div class="stg-icon" style="background:var(--bg-page);color:var(--text-muted)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg></div>Finalizing</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ══════ TRANSCRIPT DETAIL ══════ -->
+    <div class="page" id="page-detail">
+      <div class="detail-meta" id="detailMeta"></div>
+      <div class="detail-tabs" id="detailTabs">
+        <button class="dt-tab active" data-tab="transcript" onclick="switchDetailTab('transcript')">Transcript</button>
+        <button class="dt-tab" data-tab="summary" onclick="switchDetailTab('summary')">Summary</button>
+      </div>
+      <div class="detail-search" id="detailSearchWrap">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+        <input type="text" id="detailSearch" placeholder="Search transcript..." oninput="searchDetail(this.value)">
+      </div>
+      <div id="detailTranscript"></div>
+      <div id="detailSummary" style="display:none"></div>
+    </div>
+
+    <!-- ══════ TRANSCRIPTS LIST ══════ -->
+    <div class="page" id="page-transcripts">
+      <div class="s-hdr"><h3>All transcripts</h3></div>
+      <div id="transcriptList" class="card-list"></div>
+    </div>
+
+    <!-- ══════ VOICE DB ══════ -->
+    <div class="page" id="page-voices">
+      <div class="s-hdr"><h3>Voice Identification Database</h3></div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px">
+        <button class="btn btn-primary btn-sm" onclick="showEnrollModal()">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14"/><path d="M5 12h14"/></svg>
+          Enroll Speaker
+        </button>
+        <button class="btn btn-sm" onclick="showIdentifyModal()">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+          Identify Speaker
+        </button>
+      </div>
+      <div id="voiceGrid" class="vp-grid"></div>
+      <div id="voiceEmpty" class="empty-state" style="display:none">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+        <h3>No voice profiles</h3>
+        <p>Enroll speakers by uploading a voice sample. This builds a database for automatic speaker identification during transcription.</p>
+      </div>
+    </div>
+
+    <!-- ══════ SETTINGS ══════ -->
+    <div class="page" id="page-settings">
+      <div class="set-sec">
+        <div class="set-card">
+          <h4><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></svg>Providers</h4>
+          <p>Configure API keys for transcription backends. Keys are stored locally.</p>
+          <div id="providerList"></div>
+        </div>
+        <div class="set-card">
+          <h4><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="9" y1="21" x2="9" y2="9"/></svg>General</h4>
+          <div class="cfg-g">
+            <div class="cfg-f"><label>Theme</label><select id="setTheme" onchange="setTheme(this.value)">
+              <option value="dark">Dark</option><option value="light">Light</option>
+            </select></div>
+            <div class="cfg-f"><label>Accent</label><select id="setAccent" onchange="setAccent(this.value)">
+              <option value="purple">Purple</option><option value="teal">Teal</option><option value="amber">Amber</option><option value="rose">Rose</option><option value="sky">Sky</option>
+            </select></div>
+          </div>
+        </div>
+        <div class="set-card">
+          <h4><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>About</h4>
+          <p style="font-size:12px;color:var(--text-muted)">WhisperDeck v0.6 — Transcribe meeting recordings using local or hosted Whisper models. Supports Groq, OpenAI, Replicate, and custom endpoints. Features speaker diarization, LLM summarization, and voice identification database.</p>
+          <p style="font-size:11px;color:var(--text-muted);margin-top:8px">Backend: <span id="aboutBackend">FastAPI + SQLite</span></p>
+        </div>
+      </div>
+    </div>
+
+  </div><!-- /area -->
+</div><!-- /main -->
+
+<!-- ══════ MODALS ══════ -->
+<div id="enrollModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:100;display:none;align-items:center;justify-content:center" onclick="if(event.target===this)hideModals()">
+  <div style="background:var(--bg-elevated);border:1px solid var(--border);border-radius:var(--radius-lg);padding:24px;width:380px;max-width:90vw;box-shadow:var(--shadow-lg)">
+    <h3 style="font-size:16px;font-weight:600;margin-bottom:14px">Enroll Speaker</h3>
+    <div class="cfg-f" style="margin-bottom:10px"><label>Speaker name</label><input type="text" id="enrollName" placeholder="e.g. Sarah Chen" style="width:100%;padding:7px 10px;font-size:12px;background:var(--bg-page);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text-primary);font-family:var(--font);outline:none"></div>
+    <div class="cfg-f" style="margin-bottom:10px"><label>Notes (optional)</label><input type="text" id="enrollNotes" placeholder="Role, context..." style="width:100%;padding:7px 10px;font-size:12px;background:var(--bg-page);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text-primary);font-family:var(--font);outline:none"></div>
+    <div class="cfg-f" style="margin-bottom:14px"><label>Voice sample (audio file)</label>
+      <input type="file" id="enrollFile" accept="audio/*" style="font-size:12px;color:var(--text-secondary)">
+    </div>
+    <div style="display:flex;gap:8px;justify-content:flex-end">
+      <button class="btn btn-sm" onclick="hideModals()">Cancel</button>
+      <button class="btn btn-sm btn-primary" onclick="enrollSpeaker()">Enroll</button>
+    </div>
+  </div>
+</div>
+
+<div id="identifyModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:100;align-items:center;justify-content:center" onclick="if(event.target===this)hideModals()">
+  <div style="background:var(--bg-elevated);border:1px solid var(--border);border-radius:var(--radius-lg);padding:24px;width:380px;max-width:90vw;box-shadow:var(--shadow-lg)">
+    <h3 style="font-size:16px;font-weight:600;margin-bottom:14px">Identify Speaker</h3>
+    <p style="font-size:12px;color:var(--text-muted);margin-bottom:12px">Upload a voice sample to match against enrolled profiles.</p>
+    <div class="cfg-f" style="margin-bottom:10px"><label>Audio sample</label>
+      <input type="file" id="identifyFile" accept="audio/*" style="font-size:12px;color:var(--text-secondary)">
+    </div>
+    <div class="cfg-f" style="margin-bottom:14px"><label>Confidence threshold</label>
+      <select id="identifyThreshold" style="width:100%;padding:7px 10px;font-size:12px;background:var(--bg-page);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text-primary);font-family:var(--font);outline:none">
+        <option value="0.5">50% (lenient)</option><option value="0.65" selected>65% (balanced)</option><option value="0.8">80% (strict)</option>
+      </select>
+    </div>
+    <div style="display:flex;gap:8px;justify-content:flex-end">
+      <button class="btn btn-sm" onclick="hideModals()">Cancel</button>
+      <button class="btn btn-sm btn-primary" onclick="identifySpeaker()">Identify</button>
+    </div>
+    <div id="identifyResult" style="margin-top:12px;display:none"></div>
+  </div>
+</div>
+
+<!-- ══════ TOAST ══════ -->
+<div class="toast-container" id="toastContainer"></div>
+
+<script>
+/* ═══════════════════════════════════════════════════════
+   STATE
+   ═══════════════════════════════════════════════════════ */
+const API = '';
+let currentPage = 'dashboard';
+let selectedFile = null;
+let currentTranscriptId = null;
+let currentDetailData = null;
+let pollingProgress = false;
+
+/* ═══════════════════════════════════════════════════════
+   NAVIGATION
+   ═══════════════════════════════════════════════════════ */
+const pageTitles = {
+  dashboard: 'Dashboard',
+  transcribe: 'Transcribe Audio',
+  transcripts: 'Transcripts',
+  detail: 'Transcript',
+  voices: 'Voice Database',
+  settings: 'Settings',
+  progress: 'Transcribing',
+};
+
+function navigate(page, data) {
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  const target = document.getElementById('page-' + page);
+  if (!target) return;
+  target.classList.add('active');
+
+  document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+  const navItem = document.querySelector(`.nav-item[data-page="${page}"]`);
+  if (navItem) navItem.classList.add('active');
+
+  document.getElementById('pageTitle').textContent = pageTitles[page] || page;
+  document.getElementById('hdrActions').innerHTML = '';
+
+  currentPage = page;
+
+  if (page === 'detail' && data) {
+    loadTranscriptDetail(data);
+  }
+}
+
+/* ═══════════════════════════════════════════════════════
+   TOASTS
+   ═══════════════════════════════════════════════════════ */
+function toast(msg, type = 'info') {
+  const c = document.getElementById('toastContainer');
+  const el = document.createElement('div');
+  el.className = 'toast toast-' + type;
+  el.textContent = msg;
+  c.appendChild(el);
+  setTimeout(() => { el.style.opacity = '0'; el.style.transform = 'translateY(-4px)'; el.style.transition = '0.2s'; setTimeout(() => el.remove(), 300); }, 3000);
+}
+
+/* ═══════════════════════════════════════════════════════
+   DASHBOARD
+   ═══════════════════════════════════════════════════════ */
+async function loadDashboard() {
+  try {
+    const r = await fetch(API + '/api/status');
+    const d = await r.json();
+
+    const h = new Date();
+    const hr = h.getHours();
+    let greet = 'Good evening';
+    if (hr < 12) greet = 'Good morning';
+    else if (hr < 17) greet = 'Good afternoon';
+
+    document.getElementById('dashGreeting').textContent = greet + ' — WhisperDeck';
+    const sub = document.getElementById('dashSub');
+    sub.textContent = `${d.completed} transcripts completed · ${d.total_minutes} min transcribed · ${d.voice_profiles} voice profile${d.voice_profiles !== 1 ? 's' : ''}`;
+
+    const statsHtml = `
+      <div class="stat"><div class="stat-icon" style="background:var(--accent-subtle);color:var(--accent)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/></svg></div><div class="stat-v">${d.total_minutes}</div><div class="stat-l">Minutes transcribed</div></div>
+      <div class="stat"><div class="stat-icon" style="background:var(--success-subtle);color:var(--success)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z"/><polyline points="14 2 14 8 20 8"/></svg></div><div class="stat-v">${d.completed}</div><div class="stat-l">Total transcripts</div></div>
+      <div class="stat"><div class="stat-icon" style="background:var(--warning-subtle);color:var(--warning)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></svg></div><div class="stat-v">${d.voice_profiles}</div><div class="stat-l">Voice profiles</div></div>
+      <div class="stat"><div class="stat-icon" style="background:${d.diarization_available ? 'var(--success-subtle)' : 'var(--warning-subtle)'};color:${d.diarization_available ? 'var(--success)' : 'var(--warning)'}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg></div><div class="stat-v">${d.diarization_available ? 'ML Ready' : 'Heuristic'}</div><div class="stat-l">Diarization backend</div></div>
+    `;
+    document.getElementById('dashStats').innerHTML = statsHtml;
+
+    // Update storage
+    const storagePct = Math.min(100, (d.total_minutes / 500) * 100);
+    document.getElementById('storageFill').style.width = storagePct + '%';
+    document.getElementById('storageLabel').textContent = `${d.total_minutes} / 500 min`;
+  } catch (e) {
+    document.getElementById('dashGreeting').textContent = 'Welcome to WhisperDeck';
+    document.getElementById('dashSub').textContent = 'Start the backend server to see your data';
+  }
+
+  // Load recents
+  try {
+    const r = await fetch(API + '/api/transcripts?limit=5');
+    const list = await r.json();
+    const c = document.getElementById('dashRecents');
+    if (list.length === 0) {
+      c.innerHTML = '<div class="empty-state" style="padding:30px 10px"><h3>No transcripts yet</h3><p style="font-size:12px">Upload audio to get started with transcription.</p></div>';
+    } else {
+      c.innerHTML = list.map(t => {
+        const statusClass = t.status === 'completed' ? 'status-done' : t.status === 'processing' ? 'status-processing' : 'status-error';
+        const statusLabel = t.status === 'completed' ? 'Done' : t.status === 'processing' ? 'Processing' : 'Failed';
+        const minDur = t.duration_seconds ? Math.floor(t.duration_seconds / 60) + ':' + String(Math.floor(t.duration_seconds % 60)).padStart(2,'0') : '—';
+        return `<div class="card-item" onclick="navigate('detail',${t.id})">
+          <div class="ci-icon" style="background:${t.status === 'completed' ? 'var(--success-subtle)' : 'var(--accent-subtle)'};color:${t.status === 'completed' ? 'var(--success)' : 'var(--accent)'}">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2"/></svg>
+          </div>
+          <div class="ci-body"><div class="ci-title">${escapeHtml(t.title)}</div><div class="ci-meta">${t.provider} · ${t.model} · ${timeAgo(t.created_at)}</div></div>
+          <span class="ci-status ${statusClass}">${statusLabel}</span>
+          <span class="ci-badge">${minDur}</span>
+        </div>`;
+      }).join('');
+    }
+    document.getElementById('transcriptBadge').textContent = list.length > 0 ? list.length : '0';
+  } catch (e) {}
+}
+
+/* ═══════════════════════════════════════════════════════
+   TRANSCRIBE
+   ═══════════════════════════════════════════════════════ */
+document.getElementById('uploadZone').addEventListener('dragover', e => { e.preventDefault(); document.getElementById('uploadZone').classList.add('dragover'); });
+document.getElementById('uploadZone').addEventListener('dragleave', () => document.getElementById('uploadZone').classList.remove('dragover'));
+document.getElementById('uploadZone').addEventListener('drop', e => {
+  e.preventDefault();
+  document.getElementById('uploadZone').classList.remove('dragover');
+  if (e.dataTransfer.files[0]) handleFile(e.dataTransfer.files[0]);
+});
+document.getElementById('fileInput').addEventListener('change', e => {
+  if (e.target.files[0]) handleFile(e.target.files[0]);
+});
+
+function handleFile(file) {
+  selectedFile = file;
+  const z = document.getElementById('uploadZone');
+  z.querySelector('h3').textContent = '📁 ' + file.name;
+  z.querySelector('p').textContent = (file.size / (1024*1024)).toFixed(1) + ' MB selected';
+  document.getElementById('txStartBtn').disabled = false;
+}
+
+function toggleAdv() {
+  document.getElementById('txAdvanced').classList.toggle('o');
+}
+
+async function startTx() {
+  if (!selectedFile) { toast('Please select an audio file first', 'error'); return; }
+
+  const form = new FormData();
+  form.append('file', selectedFile);
+  form.append('provider', document.getElementById('txProvider').value);
+  form.append('model', document.getElementById('txModel').value);
+  form.append('language', document.getElementById('txLang').value);
+  form.append('temperature', document.getElementById('txTemp').value);
+  form.append('diarize', document.getElementById('txDiarize').value);
+  const title = document.getElementById('txTitle').value;
+  if (title) form.append('title', title);
+
+  // Show progress page
+  navigate('progress');
+  resetProgress();
+  setStageActive('stg-upload');
+
+  try {
+    document.getElementById('progTitle').textContent = 'Uploading audio...';
+    document.getElementById('progDesc').textContent = (selectedFile.size / (1024*1024)).toFixed(1) + ' MB';
+
+    const r = await fetch(API + '/api/transcribe', { method: 'POST', body: form });
+    if (!r.ok) {
+      const err = await r.text();
+      throw new Error(err);
+    }
+
+    // Upload complete
+    setStageDone('stg-upload');
+    setStageActive('stg-transcribe');
+    document.getElementById('progTitle').textContent = 'Transcribing with Whisper...';
+
+    const data = await r.json();
+
+    setStageDone('stg-transcribe');
+
+    if (document.getElementById('txDiarize').value === 'true') {
+      setStageActive('stg-diarize');
+      document.getElementById('progTitle').textContent = 'Running speaker diarization...';
+      await new Promise(r => setTimeout(r, 600));
+      setStageDone('stg-diarize');
+    } else {
+      setStageDone('stg-diarize');
+    }
+
+    setStageActive('stg-done');
+    document.getElementById('progTitle').textContent = 'Transcription complete!';
+    document.getElementById('progDesc').textContent = data.segments ? data.segments.length + ' segments · ' + data.provider : '';
+    document.getElementById('progCircle').style.strokeDashoffset = '0';
+    document.getElementById('progCircle').style.stroke = 'var(--success)';
+    document.getElementById('progCheck').style.display = 'block';
+
+    toast('Transcription complete!', 'success');
+    selectedFile = null;
+    document.getElementById('txStartBtn').disabled = true;
+
+    setTimeout(() => navigate('detail', data.id), 1200);
+  } catch (e) {
+    toast('Transcription failed: ' + (e.message || e), 'error');
+    document.getElementById('progTitle').textContent = 'Transcription failed';
+    document.getElementById('progDesc').textContent = e.message || 'Unknown error';
+  }
+}
+
+function resetProgress() {
+  ['stg-upload','stg-transcribe','stg-diarize','stg-done'].forEach(s => {
+    const el = document.getElementById(s);
+    const icon = el.querySelector('.stg-icon');
+    el.classList.remove('active','done');
+    icon.style.background = 'var(--bg-page)'; icon.style.color = 'var(--text-muted)';
+  });
+  document.getElementById('progCircle').style.strokeDashoffset = '105.2';
+  document.getElementById('progCircle').style.stroke = '';
+  document.getElementById('progCheck').style.display = 'none';
+}
+
+function setStageActive(id) {
+  const el = document.getElementById(id);
+  const icon = el.querySelector('.stg-icon');
+  el.classList.add('active');
+  icon.style.background = 'var(--accent-subtle)'; icon.style.color = 'var(--accent)';
+}
+function setStageDone(id) {
+  const el = document.getElementById(id);
+  const icon = el.querySelector('.stg-icon');
+  el.classList.remove('active');
+  el.classList.add('done');
+  icon.style.background = 'var(--success-subtle)'; icon.style.color = 'var(--success)';
+}
+
+/* ═══════════════════════════════════════════════════════
+   TRANSCRIPT DETAIL
+   ═══════════════════════════════════════════════════════ */
+async function loadTranscriptDetail(id) {
+  currentTranscriptId = id;
+  document.getElementById('detailTabs').querySelector('.dt-tab.active').classList.remove('active');
+  document.querySelector('[data-tab="transcript"]').classList.add('active');
+  document.getElementById('detailSummary').style.display = 'none';
+  document.getElementById('detailTranscript').style.display = 'block';
+  document.getElementById('detailSearch').value = '';
+
+  try {
+    const r = await fetch(API + '/api/transcripts/' + id);
+    const t = await r.json();
+    currentDetailData = t;
+
+    const metaHtml = `
+      <div class="dm-item"><span class="dm-l">Title</span><span class="dm-v">${escapeHtml(t.title)}</span></div>
+      <div class="dm-item"><span class="dm-l">Duration</span><span class="dm-v">${t.duration_seconds ? Math.floor(t.duration_seconds/60)+':'+String(Math.floor(t.duration_seconds%60)).padStart(2,'0') : '—'}</span></div>
+      <div class="dm-item"><span class="dm-l">Provider</span><span class="dm-v">${t.provider} · ${t.model}</span></div>
+      <div class="dm-item"><span class="dm-l">Status</span><span class="dm-v" style="color:${t.status === 'completed' ? 'var(--success)' : t.status === 'failed' ? 'var(--error)' : 'var(--warning)'}">${t.status}</span></div>
+      <div class="dm-item"><span class="dm-l">Speakers</span><span class="dm-v">${t.speaker_count || '—'}</span></div>
+      <div class="dm-item"><span class="dm-l">Segments</span><span class="dm-v">${t.segments ? t.segments.length : 0}</span></div>
+    `;
+    document.getElementById('detailMeta').innerHTML = metaHtml;
+
+    // Build header actions
+    document.getElementById('hdrActions').innerHTML = `
+      <button class="btn btn-sm btn-ghost" onclick="summarizeTranscript()">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:14px;height:14px"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+        Summarize
+      </button>
+      <button class="btn btn-sm btn-ghost" onclick="deleteCurrentTranscript()" style="color:var(--error)">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:14px;height:14px"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+        Delete
+      </button>
+    `;
+
+    // Render transcript segments
+    const segHtml = (t.segments || []).map(s => {
+      const color = hashColor(s.speaker || 'Unknown');
+      return `<div class="seg">
+        <span class="seg-t">${formatTime(s.start)}</span>
+        <div class="seg-b">
+          ${s.speaker ? `<div class="seg-s"><span class="seg-speaker-dot" style="background:${color}"></span>${escapeHtml(s.speaker)}</div>` : ''}
+          <div class="seg-x">${escapeHtml(s.text)}</div>
+        </div>
+      </div>`;
+    }).join('') || '<div class="empty-state" style="padding:30px"><h3>No segments</h3><p>This transcript has no segment data.</p></div>';
+
+    document.getElementById('detailTranscript').innerHTML = segHtml;
+    document.getElementById('pageTitle').textContent = escapeHtml(t.title);
+
+    // Check for existing summary
+    try {
+      const sr = await fetch(API + '/api/transcripts/' + id + '/summary');
+      if (sr.ok) {
+        const sum = await sr.json();
+        renderSummary(sum);
+      }
+    } catch (e) {}
+  } catch (e) {
+    toast('Failed to load transcript', 'error');
+  }
+}
+
+function switchDetailTab(tab) {
+  document.querySelectorAll('.dt-tab').forEach(t => t.classList.remove('active'));
+  document.querySelector(`[data-tab="${tab}"]`).classList.add('active');
+  document.getElementById('detailTranscript').style.display = tab === 'transcript' ? 'block' : 'none';
+  document.getElementById('detailSummary').style.display = tab === 'summary' ? 'block' : 'none';
+  document.getElementById('detailSearchWrap').style.display = tab === 'transcript' ? 'block' : 'none';
+}
+
+function searchDetail(q) {
+  const segs = document.querySelectorAll('#detailTranscript .seg-x');
+  if (!q) {
+    segs.forEach(el => { el.innerHTML = escapeHtml(el.textContent); el.closest('.seg').style.display = ''; });
+    return;
+  }
+  const ql = q.toLowerCase();
+  segs.forEach(el => {
+    const text = el.textContent;
+    const tl = text.toLowerCase();
+    if (tl.includes(ql)) {
+      const idx = tl.indexOf(ql);
+      el.innerHTML = escapeHtml(text.slice(0, idx)) + '<mark>' + escapeHtml(text.slice(idx, idx + q.length)) + '</mark>' + escapeHtml(text.slice(idx + q.length));
+      el.closest('.seg').style.display = '';
+    } else {
+      el.closest('.seg').style.display = 'none';
+    }
+  });
+}
+
+async function summarizeTranscript() {
+  if (!currentTranscriptId) return;
+  const btn = document.querySelector('#hdrActions button');
+  if (btn) btn.disabled = true;
+  toast('Generating summary...', 'info');
+  try {
+    const form = new FormData();
+    form.append('provider', 'groq');
+    form.append('model', 'llama3-70b-8192');
+    const r = await fetch(API + '/api/transcripts/' + currentTranscriptId + '/summarize', { method: 'POST', body: form });
+    if (!r.ok) throw new Error(await r.text());
+    const sum = await r.json();
+    renderSummary(sum);
+    switchDetailTab('summary');
+    toast('Summary generated!', 'success');
+  } catch (e) {
+    toast('Summarization failed: ' + (e.message || e), 'error');
+  }
+  if (btn) btn.disabled = false;
+}
+
+function renderSummary(s) {
+  if (!s) return;
+  let html = '';
+  if (s.short_summary) {
+    html += `<div class="summary-card"><h4>Summary</h4><p>${escapeHtml(s.short_summary)}</p></div>`;
+  }
+  if (s.key_points && s.key_points.length) {
+    html += `<div class="summary-card"><h4>Key Points</h4><ul>${s.key_points.map(k => '<li>' + escapeHtml(k) + '</li>').join('')}</ul></div>`;
+  }
+  if (s.action_items && s.action_items.length) {
+    html += `<div class="summary-card"><h4>Action Items</h4><ul>${s.action_items.map(a => '<li>' + escapeHtml(a) + '</li>').join('')}</ul></div>`;
+  }
+  if (s.decisions && s.decisions.length) {
+    html += `<div class="summary-card"><h4>Decisions</h4><ul>${s.decisions.map(d => '<li>' + escapeHtml(d) + '</li>').join('')}</ul></div>`;
+  }
+  document.getElementById('detailSummary').innerHTML = html || '<div class="empty-state"><h3>No summary</h3><p>Click "Summarize" to generate an LLM summary.</p></div>';
+}
+
+async function deleteCurrentTranscript() {
+  if (!currentTranscriptId || !confirm('Delete this transcript?')) return;
+  await fetch(API + '/api/transcripts/' + currentTranscriptId, { method: 'DELETE' });
+  toast('Transcript deleted', 'info');
+  navigate('transcripts');
+  loadTranscripts();
+}
+
+/* ═══════════════════════════════════════════════════════
+   TRANSCRIPTS LIST
+   ═══════════════════════════════════════════════════════ */
+async function loadTranscripts() {
+  try {
+    const r = await fetch(API + '/api/transcripts?limit=100');
+    const list = await r.json();
+    document.getElementById('transcriptBadge').textContent = list.length;
+
+    const c = document.getElementById('transcriptList');
+    if (list.length === 0) {
+      c.innerHTML = '<div class="empty-state"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z"/><polyline points="14 2 14 8 20 8"/></svg><h3>No transcripts</h3><p>Upload audio from the Transcribe page to get started.</p></div>';
+      return;
+    }
+    c.innerHTML = list.map(t => {
+      const sc = t.status === 'completed' ? 'var(--success-subtle)' : t.status === 'processing' ? 'var(--accent-subtle)' : 'var(--error-subtle)';
+      const sc2 = t.status === 'completed' ? 'var(--success)' : t.status === 'processing' ? 'var(--accent)' : 'var(--error)';
+      const sl = t.status === 'completed' ? 'Done' : t.status === 'processing' ? 'Processing' : 'Failed';
+      const md = t.duration_seconds ? Math.floor(t.duration_seconds/60)+'m' : '—';
+      return `<div class="card-item" onclick="navigate('detail',${t.id})">
+        <div class="ci-icon" style="background:${sc};color:${sc2}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2"/></svg></div>
+        <div class="ci-body"><div class="ci-title">${escapeHtml(t.title)}</div><div class="ci-meta">${t.provider} · ${t.model} · ${timeAgo(t.created_at)}${t.speaker_count ? ' · ' + t.speaker_count + ' speakers' : ''}</div></div>
+        <span class="ci-status" style="background:${sc};color:${sc2}">${sl}</span>
+        <span class="ci-badge">${md}</span>
+      </div>`;
+    }).join('');
+  } catch (e) {
+    document.getElementById('transcriptList').innerHTML = '<div class="empty-state"><h3>Failed to load</h3><p>Could not reach the backend server.</p></div>';
+  }
+}
+
+/* ═══════════════════════════════════════════════════════
+   VOICE DB
+   ═══════════════════════════════════════════════════════ */
+async function loadVoices() {
+  try {
+    const r = await fetch(API + '/api/voices');
+    const list = await r.json();
+    document.getElementById('voiceBadge').textContent = list.length;
+
+    const grid = document.getElementById('voiceGrid');
+    const empty = document.getElementById('voiceEmpty');
+
+    if (list.length === 0) {
+      grid.innerHTML = '';
+      empty.style.display = 'block';
+      return;
+    }
+    empty.style.display = 'none';
+    grid.innerHTML = list.map(v => {
+      const initials = v.name.split(' ').map(w => w[0]).join('').slice(0, 2).toUpperCase();
+      const colors = ['#7c5cfc','#14b8a6','#f59e0b','#f43f5e','#0ea5e9','#8b5cf6','#ec4899','#10b981'];
+      const color = colors[v.id % colors.length];
+      return `<div class="vp-card">
+        <div class="vp-avatar" style="background:${color}">${initials}</div>
+        <div class="vp-name">${escapeHtml(v.name)}</div>
+        <div class="vp-meta">${v.sample_count} sample${v.sample_count !== 1 ? 's' : ''} · ${v.embedding_model ? v.embedding_model.split('/').pop() : '—'}</div>
+        <div class="vp-meta" style="margin-top:2px">${v.notes ? escapeHtml(v.notes) : ''}</div>
+        <div class="vp-actions">
+          <button class="btn btn-xs btn-ghost" onclick="deleteVoice(${v.id})" style="color:var(--error)">Remove</button>
+        </div>
+      </div>`;
+    }).join('');
+  } catch (e) {}
+}
+
+function showEnrollModal() {
+  document.getElementById('enrollModal').style.display = 'flex';
+}
+function showIdentifyModal() {
+  document.getElementById('identifyModal').style.display = 'flex';
+  document.getElementById('identifyResult').style.display = 'none';
+}
+function hideModals() {
+  document.querySelectorAll('[id$="Modal"]').forEach(m => m.style.display = 'none');
+}
+
+async function enrollSpeaker() {
+  const name = document.getElementById('enrollName').value.trim();
+  const notes = document.getElementById('enrollNotes').value.trim();
+  const file = document.getElementById('enrollFile').files[0];
+  if (!name || !file) { toast('Name and audio file required', 'error'); return; }
+
+  const form = new FormData();
+  form.append('name', name);
+  form.append('notes', notes);
+  form.append('file', file);
+
+  try {
+    const r = await fetch(API + '/api/voices/enroll', { method: 'POST', body: form });
+    if (!r.ok) throw new Error(await r.text());
+    toast('Enrolled ' + name + ' successfully!', 'success');
+    hideModals();
+    document.getElementById('enrollName').value = '';
+    document.getElementById('enrollNotes').value = '';
+    document.getElementById('enrollFile').value = '';
+    loadVoices();
+  } catch (e) {
+    toast('Enrollment failed: ' + (e.message || e), 'error');
+  }
+}
+
+async function identifySpeaker() {
+  const file = document.getElementById('identifyFile').files[0];
+  const threshold = document.getElementById('identifyThreshold').value;
+  if (!file) { toast('Please select an audio file', 'error'); return; }
+
+  const form = new FormData();
+  form.append('file', file);
+  form.append('threshold', threshold);
+
+  try {
+    const r = await fetch(API + '/api/voices/identify', { method: 'POST', body: form });
+    const data = await r.json();
+    const resDiv = document.getElementById('identifyResult');
+    resDiv.style.display = 'block';
+
+    if (data.matches && data.matches.length > 0) {
+      resDiv.innerHTML = `<div style="padding:10px 14px;background:var(--success-subtle);border:1px solid rgba(52,211,153,0.2);border-radius:var(--radius-sm);font-size:13px">
+        <strong style="color:var(--success)">Match found!</strong>
+        ${data.matches.map(m => `<div style="margin-top:4px;display:flex;justify-content:space-between"><span>${escapeHtml(m.name)}</span><span style="color:var(--text-muted)">${(m.similarity * 100).toFixed(0)}% match</span></div>`).join('')}
+      </div>`;
+    } else {
+      resDiv.innerHTML = `<div style="padding:10px 14px;background:var(--warning-subtle);border:1px solid rgba(251,191,36,0.2);border-radius:var(--radius-sm);font-size:13px">
+        <strong style="color:var(--warning)">No match found</strong>
+        <p style="margin-top:4px;color:var(--text-muted);font-size:12px">No enrolled speaker matches this voice sample at the current threshold.</p>
+      </div>`;
+    }
+  } catch (e) {
+    toast('Identification failed: ' + (e.message || e), 'error');
+  }
+}
+
+async function deleteVoice(id) {
+  if (!confirm('Remove this voice profile?')) return;
+  await fetch(API + '/api/voices/' + id, { method: 'DELETE' });
+  toast('Voice profile removed', 'info');
+  loadVoices();
+}
+
+/* ═══════════════════════════════════════════════════════
+   SETTINGS
+   ═══════════════════════════════════════════════════════ */
+async function loadSettings() {
+  try {
+    const r = await fetch(API + '/api/providers');
+    const provs = await r.json();
+    const list = document.getElementById('providerList');
+    const icons = { builtin: 'B', groq: 'G', openai: 'O', replicate: 'R', openrouter: 'OR', local: 'L' };
+    const colors = {
+      builtin: 'linear-gradient(135deg,#34d399,#059669)',
+      groq: 'linear-gradient(135deg,#667eea,#764ba2)',
+      openai: 'linear-gradient(135deg,#00c853,#009624)',
+      replicate: 'linear-gradient(135deg,#ff6b6b,#ee5a24)',
+      openrouter: 'linear-gradient(135deg,#ff8c00,#e65c00)',
+      local: 'linear-gradient(135deg,#6366f1,#4338ca)',
+    };
+    list.innerHTML = provs.map(p => {
+      const needsUrl = p.id === 'local';
+      const zeroSetup = p.zero_setup;
+      return `<div class="prov-item">
+        <div class="pv-icon" style="background:${colors[p.id] || colors.groq}">${icons[p.id] || '?'}</div>
+        <div class="pv-info">
+          <div class="pv-name">${p.name}${zeroSetup ? ' <span style="font-size:9px;background:var(--success-subtle);color:var(--success);padding:1px 6px;border-radius:3px;font-weight:600">✓ Ready</span>' : ''}</div>
+          <div class="pv-desc">${p.description}</div>
+          ${needsUrl ? `<div style="margin-top:4px"><input type="text" id="url-${p.id}" placeholder="http://localhost:8080/v1" value="" style="width:100%;padding:4px 8px;font-size:11px;background:var(--bg-page);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text-primary);font-family:var(--mono);outline:none" onchange="saveProviderUrl('${p.id}')"></div>` : ''}
+        </div>
+        <div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px">
+          ${p.needs_key ? `<div class="pv-key">
+            <input type="password" id="key-${p.id}" placeholder="${p.key_prefix || ''}..." value="" data-provider="${p.id}" onchange="saveProviderKey('${p.id}')" style="width:150px">
+            <span class="ks ${p.configured ? 'on' : 'off'}" id="ks-${p.id}"></span>
+          </div>` : ''}
+          <button class="btn btn-xs btn-ghost" onclick="fetchProviderModels('${p.id}')" title="Fetch available models" style="font-size:10px">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:10px;height:10px"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+            ${zeroSetup ? 'Select model' : 'Fetch models'}
+          </button>
+        </div>
+      </div>`;
+    }).join('');
+
+    // Load existing key values and URLs
+    const r2 = await Promise.all(provs.map(p => fetch(API + '/api/providers/' + p.id).then(r => r.json())));
+    r2.forEach(cfg => {
+      const input = document.getElementById('key-' + cfg.name);
+      if (input && cfg._has_key) {
+        input.value = cfg.api_key || '••••••••';
+        input.dataset.hasKey = 'true';
+      }
+      const urlInput = document.getElementById('url-' + cfg.name);
+      if (urlInput && cfg.api_url) {
+        urlInput.value = cfg.api_url;
+      }
+    });
+  } catch (e) {}
+}
+
+async function saveProviderKey(name) {
+  const input = document.getElementById('key-' + name);
+  const val = input.value.trim();
+  if (!val || val === '••••••••' || val.startsWith('••••')) return;
+  await fetch(API + '/api/providers/' + name, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ api_key: val }),
+  });
+  document.getElementById('ks-' + name).className = 'ks on';
+  toast(name + ' API key saved', 'success');
+  // Refresh transcribe page status if visible
+  if (currentPage === 'transcribe') setTimeout(loadTxModels, 500);
+}
+
+async function saveProviderUrl(name) {
+  const input = document.getElementById('url-' + name);
+  const val = input.value.trim();
+  if (!val) return;
+  await fetch(API + '/api/providers/' + name, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ api_url: val }),
+  });
+  toast(name + ' endpoint URL saved', 'success');
+}
+
+async function fetchProviderModels(name) {
+  const btn = event.target.closest('button') || event.target;
+  btn.disabled = true;
+  btn.textContent = 'Loading...';
+  try {
+    const r = await fetch(API + '/api/providers/' + name + '/models');
+    const data = await r.json();
+    if (data.models && data.models.length > 0) {
+      toast(name + ': ' + data.models.length + ' models available', 'success');
+      // Show them in the transcribe model dropdown
+      const modelSelect = document.getElementById('txModel');
+      modelSelect.innerHTML = data.models.map(m =>
+        '<option value="' + escapeHtml(m) + '">' + escapeHtml(m) + '</option>'
+      ).join('');
+      navigate('transcribe');
+    } else {
+      toast(name + ': no models found', 'info');
+    }
+  } catch (e) {
+    toast('Failed to fetch models: ' + (e.message || e), 'error');
+  }
+  btn.disabled = false;
+  btn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:10px;height:10px"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg> Fetch models';
+}
+
+async function loadTxModels() {
+  const provider = document.getElementById('txProvider').value;
+  const modelSelect = document.getElementById('txModel');
+  modelSelect.innerHTML = '<option value="" disabled>Loading models...</option>';
+  modelSelect.disabled = true;
+
+  // Check provider config status
+  try {
+    const r = await fetch(API + '/api/providers/' + provider);
+    const cfg = await r.json();
+    const statusEl = document.getElementById('providerStatus');
+    const statusText = document.getElementById('providerStatusText');
+    if (provider === 'local') {
+      // Local doesn't need an API key, but needs a URL
+      statusEl.style.display = 'none';
+    } else if (provider === 'builtin') {
+      statusEl.style.display = 'block';
+      statusEl.style.background = 'var(--success-subtle)';
+      statusEl.style.borderColor = 'rgba(52,211,153,0.15)';
+      statusText.innerHTML = '✓ <strong>Built-in (Whisper Tiny)</strong> — local, offline-capable, no API key needed. Model downloads on first use.';
+    } else if (!cfg._has_key) {
+      statusEl.style.display = 'block';
+      statusEl.style.background = 'var(--warning-subtle)';
+      statusEl.style.borderColor = 'rgba(251,191,36,0.15)';
+      statusText.innerHTML = '⚠️ <strong>' + provider + '</strong> has no API key configured. <a href="#" onclick="navigate(\'settings\');loadSettings();return false" style="color:var(--accent);text-decoration:underline">Go to Settings →</a> to add one.';
+    } else {
+      statusEl.style.display = 'block';
+      statusEl.style.background = 'var(--success-subtle)';
+      statusEl.style.borderColor = 'rgba(52,211,153,0.15)';
+      statusText.innerHTML = '✓ <strong>' + provider + '</strong> is configured and ready.';
+    }
+  } catch (e) {}
+
+  try {
+    const r = await fetch(API + '/api/providers/' + provider + '/models');
+    const data = await r.json();
+    modelSelect.innerHTML = data.models.map(m =>
+      '<option value="' + escapeHtml(m) + '">' + escapeHtml(m) + '</option>'
+    ).join('');
+    modelSelect.disabled = false;
+  } catch (e) {
+    modelSelect.innerHTML = '<option value="" disabled>Failed to load models</option>';
+  }
+}
+
+/* ═══════════════════════════════════════════════════════
+   THEME
+   ═══════════════════════════════════════════════════════ */
+function setTheme(t) {
+  document.documentElement.setAttribute('data-theme', t);
+  document.getElementById('setTheme').value = t;
+  localStorage.setItem('wd-theme', t);
+}
+function setAccent(a) {
+  document.documentElement.setAttribute('data-accent', a);
+  document.getElementById('setAccent').value = a;
+  localStorage.setItem('wd-accent', a);
+}
+(function restorePrefs() {
+  const t = localStorage.getItem('wd-theme');
+  if (t) setTheme(t);
+  const a = localStorage.getItem('wd-accent');
+  if (a) setAccent(a);
+})();
+
+/* ═══════════════════════════════════════════════════════
+   UTILITY
+   ═══════════════════════════════════════════════════════ */
+function escapeHtml(s) {
+  if (!s) return '';
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+
+function timeAgo(iso) {
+  if (!iso) return '';
+  const diff = Date.now() - new Date(iso).getTime();
+  const mins = Math.floor(diff / 60000);
+  if (mins < 1) return 'just now';
+  if (mins < 60) return mins + 'm ago';
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return hrs + 'h ago';
+  const days = Math.floor(hrs / 24);
+  return days + 'd ago';
+}
+
+function formatTime(s) {
+  if (!s && s !== 0) return '00:00';
+  const m = Math.floor(s / 60);
+  const sec = Math.floor(s % 60);
+  return String(m).padStart(2,'0') + ':' + String(sec).padStart(2,'0');
+}
+
+function hashColor(s) {
+  let hash = 0;
+  for (let i = 0; i < s.length; i++) hash = s.charCodeAt(i) + ((hash << 5) - hash);
+  const colors = ['#7c5cfc','#14b8a6','#f59e0b','#f43f5e','#0ea5e9','#8b5cf6','#ec4899','#10b981','#f97316','#6366f1'];
+  return colors[Math.abs(hash) % colors.length];
+}
+
+/* ═══════════════════════════════════════════════════════
+   NAVIGATION EVENTS
+   ═══════════════════════════════════════════════════════ */
+document.querySelectorAll('.nav-item[data-page]').forEach(item => {
+  item.addEventListener('click', () => {
+    const page = item.dataset.page;
+    if (page === 'transcripts') { navigate(page); loadTranscripts(); }
+    else if (page === 'voices') { navigate(page); loadVoices(); }
+    else if (page === 'settings') { navigate(page); loadSettings(); }
+    else if (page === 'dashboard') { navigate(page); loadDashboard(); }
+    else if (page === 'transcribe') { navigate(page); setTimeout(loadTxModels, 100); }
+    else { navigate(page); }
+  });
+});
+
+/* ═══════════════════════════════════════════════════════
+   INIT
+   ═══════════════════════════════════════════════════════ */
+loadDashboard();
+</script>
+</body>
+</html>

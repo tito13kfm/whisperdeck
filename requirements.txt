@@ -1,0 +1,14 @@
+# See INSTALL.md for setup (Python version, API keys, optional diarization).
+# Optional extras:
+#   requirements-diarization.txt — real speaker diarization (pyannote.audio)
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+sqlalchemy>=2.0.0
+python-multipart>=0.0.12
+aiofiles>=24.1.0
+httpx>=0.27.0
+numpy>=1.26.0
+soundfile>=0.12.0
+pydub>=0.25.1
+pydantic>=2.5.0
+python-dotenv>=1.0.0

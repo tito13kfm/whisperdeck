@@ -1,0 +1,1 @@
+"""Service layer for WhisperDeck — transcription, diarization, summarization, voice identification."""

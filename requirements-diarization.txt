@@ -1,0 +1,14 @@
+# Optional: real speaker diarization via pyannote.audio.
+# Without this, WhisperDeck falls back to a pause-gap heuristic (no ML,
+# unreliable with overlapping speech / real meetings).
+#
+# Install: pip install -r requirements.txt -r requirements-diarization.txt
+# Then set a HUGGINGFACE_TOKEN env var (see INSTALL.md).
+
+# CPU-only PyTorch. If you have an NVIDIA GPU, install a CUDA build instead:
+#   pip install torch --index-url https://download.pytorch.org/whl/cu121
+# AMD GPUs (e.g. RDNA/RDNA4 cards): PyTorch has no ROCm build for Windows,
+# so this stays CPU-only there — pyannote still works, just slower.
+torch>=2.2.0
+
+pyannote.audio>=3.3.0
