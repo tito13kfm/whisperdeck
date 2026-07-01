@@ -8,6 +8,8 @@ import os
 import json
 import datetime
 import shutil
+import asyncio
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
 
@@ -26,7 +28,8 @@ from services.settings import get_user_settings, update_user_settings
 from services.transcription import TranscriptionService
 from services.diarization import DiarizationService
 from services.voice_id import VoiceIdentificationService
-from services.audio_prep import transcode_for_upload, AudioPrepError
+from services.audio_prep import transcode_for_upload, AudioPrepError, chunk_audio
+from services.queue import create_chunk_jobs, retry_failed_chunks, queue_worker_loop
 from backends import list_providers, get_provider
 
 # ── App Setup ──────────────────────────────────────────────────────────────
@@ -66,10 +69,18 @@ transcription_service = TranscriptionService(str(UPLOAD_DIR))
 diarization_service = DiarizationService()
 voice_id_service = VoiceIdentificationService(str(VOICES_DIR))
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    worker_task = asyncio.create_task(queue_worker_loop(SessionLocal, diarization_service))
+    yield
+    worker_task.cancel()
+
+
 app = FastAPI(
     title="WhisperDeck",
     version="0.6.0",
     description="Modern meeting transcription & voice intelligence",
+    lifespan=lifespan,
 )
 
 app.add_middleware(
@@ -109,6 +120,14 @@ def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
 
 
 def _serialize_transcript(t: Transcript) -> dict:
+    jobs = t.jobs or []
+    job_progress = None
+    if jobs:
+        job_progress = {
+            "total": len(jobs),
+            "completed": sum(1 for j in jobs if j.status == "completed"),
+            "failed": sum(1 for j in jobs if j.status == "failed"),
+        }
     return {
         "id": t.id,
         "title": t.title,
@@ -125,6 +144,7 @@ def _serialize_transcript(t: Transcript) -> dict:
         "created_at": t.created_at.isoformat() if t.created_at else None,
         "updated_at": t.updated_at.isoformat() if t.updated_at else None,
         "has_summary": t.summary is not None,
+        "job_progress": job_progress,
     }
 
 
@@ -342,13 +362,17 @@ async def transcribe_audio(
         content = await file.read()
         f.write(content)
 
+    user_settings = get_user_settings(db, current_user.id)
+
     # Normalize for cloud upload: strips video track, downsamples to 16kHz
     # mono (all Whisper providers resample to this internally anyway). Fixes
     # "file too large" errors on video uploads and long recordings. Builtin
     # runs locally with no upload limit, so skip the extra transcode there.
     if provider != "builtin":
         try:
-            save_path = Path(await transcode_for_upload(str(save_path), str(UPLOAD_DIR)))
+            save_path = Path(await transcode_for_upload(
+                str(save_path), str(UPLOAD_DIR), bitrate_kbps=user_settings["bitrate_kbps"]
+            ))
         except AudioPrepError as e:
             raise HTTPException(status_code=500, detail=str(e))
 
@@ -364,6 +388,34 @@ async def transcribe_audio(
             "api_url": prov_cfg.api_url,
             "default_model": prov_cfg.default_model or "",
         }
+
+    threshold_bytes = user_settings["chunk_threshold_mb"] * 1024 * 1024
+    file_size = os.path.getsize(save_path)
+
+    if provider != "builtin" and file_size > threshold_bytes:
+        # Over the size threshold: split into chunks and hand off to the
+        # background worker instead of transcribing inline. The request
+        # returns as soon as jobs are queued — see services/queue.py for
+        # dispatch/finalization and static/index.html's polling loop for
+        # how the frontend picks up the result.
+        try:
+            chunks = await chunk_audio(str(save_path), str(UPLOAD_DIR), target_chunk_bytes=threshold_bytes)
+        except AudioPrepError as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+        transcript = transcription_service.create_transcript_stub(
+            db,
+            current_user.id,
+            filename=file.filename or "audio.mp3",
+            provider_name=provider,
+            model=model or provider_config.get("default_model") or "",
+            language=language,
+            audio_path=str(save_path),
+            diarize_requested=diarize,
+            title=title or file.filename,
+        )
+        create_chunk_jobs(db, transcript.id, chunks)
+        return _serialize_transcript(transcript)
 
     try:
         transcript = await transcription_service.transcribe(
@@ -459,6 +511,17 @@ async def update_transcript(transcript_id: int, data: dict = Body(...), db: Sess
     t.updated_at = datetime.datetime.utcnow()
     db.commit()
     return _serialize_transcript(t)
+
+
+@app.post("/api/transcripts/{transcript_id}/retry-failed-chunks")
+async def retry_transcript_chunks(transcript_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    t = db.query(Transcript).filter(
+        Transcript.id == transcript_id, Transcript.user_id == current_user.id
+    ).first()
+    if not t:
+        raise HTTPException(status_code=404, detail="Transcript not found")
+    count = retry_failed_chunks(db, transcript_id)
+    return {"ok": True, "retried": count}
 
 
 # ── Diarization ───────────────────────────────────────────────────────────
