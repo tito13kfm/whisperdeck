@@ -11,14 +11,17 @@ import shutil
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Query, Body, Depends
+import secrets
+
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Query, Body, Depends, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse, FileResponse, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.sessions import SessionMiddleware
 from sqlalchemy.orm import Session
 
 from database import init_db, backfill_user_id, Transcript, Summary, VoiceProfile, ProviderConfig, User
-from services.auth import get_or_create_fallback_user
+from services.auth import get_or_create_fallback_user, create_user, authenticate_user
 from services.transcription import TranscriptionService
 from services.diarization import DiarizationService
 from services.voice_id import VoiceIdentificationService
@@ -36,6 +39,13 @@ DB_PATH = DATA_DIR / "whisperdesk.db"
 
 for d in [DATA_DIR, UPLOAD_DIR, TRANSCRIPT_DIR, VOICES_DIR]:
     d.mkdir(parents=True, exist_ok=True)
+
+SESSION_SECRET_PATH = DATA_DIR / ".session_secret"
+if SESSION_SECRET_PATH.exists():
+    SESSION_SECRET = SESSION_SECRET_PATH.read_text().strip()
+else:
+    SESSION_SECRET = secrets.token_hex(32)
+    SESSION_SECRET_PATH.write_text(SESSION_SECRET)
 
 engine, SessionLocal, migrated_tables = init_db(str(DB_PATH))
 
@@ -71,6 +81,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(SessionMiddleware, secret_key=SESSION_SECRET)
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────
@@ -83,6 +94,17 @@ def get_db():
         yield db
     finally:
         db.close()
+
+
+def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
+    user_id = request.session.get("user_id")
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Not logged in")
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        request.session.clear()
+        raise HTTPException(status_code=401, detail="Not logged in")
+    return user
 
 
 def _serialize_transcript(t: Transcript) -> dict:
@@ -118,6 +140,43 @@ def _serialize_summary(s: Summary) -> dict:
         "model": s.model,
         "created_at": s.created_at.isoformat() if s.created_at else None,
     }
+
+
+# ── Auth ──────────────────────────────────────────────────────────────────
+
+@app.post("/api/register")
+async def register(request: Request, data: dict = Body(...), db: Session = Depends(get_db)):
+    username = (data.get("username") or "").strip()
+    password = data.get("password") or ""
+    if not username or not password:
+        raise HTTPException(status_code=400, detail="username and password are required")
+    if db.query(User).filter(User.username == username).first():
+        raise HTTPException(status_code=400, detail="Username already taken")
+    user = create_user(db, username, password)
+    request.session["user_id"] = user.id
+    return {"ok": True, "username": user.username}
+
+
+@app.post("/api/login")
+async def login(request: Request, data: dict = Body(...), db: Session = Depends(get_db)):
+    username = (data.get("username") or "").strip()
+    password = data.get("password") or ""
+    user = authenticate_user(db, username, password)
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid username or password")
+    request.session["user_id"] = user.id
+    return {"ok": True, "username": user.username}
+
+
+@app.post("/api/logout")
+async def logout(request: Request):
+    request.session.clear()
+    return {"ok": True}
+
+
+@app.get("/api/me")
+async def me(current_user: User = Depends(get_current_user)):
+    return {"username": current_user.username}
 
 
 # ── API Routes ────────────────────────────────────────────────────────────
