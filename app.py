@@ -36,7 +36,9 @@ DB_PATH = DATA_DIR / "whisperdesk.db"
 for d in [DATA_DIR, UPLOAD_DIR, TRANSCRIPT_DIR, VOICES_DIR]:
     d.mkdir(parents=True, exist_ok=True)
 
-engine, SessionLocal = init_db(str(DB_PATH))
+# migrated_tables is consumed by the migration bootstrap block added in
+# Task 3 of the per-user-auth plan — unused until then.
+engine, SessionLocal, migrated_tables = init_db(str(DB_PATH))
 transcription_service = TranscriptionService(str(UPLOAD_DIR))
 diarization_service = DiarizationService()
 voice_id_service = VoiceIdentificationService(str(VOICES_DIR))
