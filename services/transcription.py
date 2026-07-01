@@ -12,13 +12,13 @@ from backends.base import BaseProvider, TranscriptionResult
 class TranscriptionService:
     """Coordinates transcription jobs: file handling, provider calls, DB persistence."""
 
-    def __init__(self, db_session, upload_dir: str = "data/uploads"):
-        self.db = db_session
+    def __init__(self, upload_dir: str = "data/uploads"):
         self.upload_dir = upload_dir
         os.makedirs(upload_dir, exist_ok=True)
 
     async def transcribe(
         self,
+        db,
         audio_path: str,
         provider_name: str = "groq",
         provider_config: Optional[dict] = None,
@@ -44,8 +44,8 @@ class TranscriptionService:
             language=language,
             status="processing",
         )
-        self.db.add(transcript)
-        self.db.commit()
+        db.add(transcript)
+        db.commit()
 
         try:
             result = await provider.transcribe(
@@ -79,38 +79,39 @@ class TranscriptionService:
             with open(txt_path, "w", encoding="utf-8") as f:
                 f.write(result.full_text)
 
-            self.db.commit()
+            db.commit()
             return transcript
 
         except Exception as e:
             transcript.status = "failed"
             transcript.error = str(e)
             transcript.updated_at = datetime.datetime.utcnow()
-            self.db.commit()
+            db.commit()
             raise
 
-    def get_transcript(self, transcript_id: int) -> Optional[Transcript]:
-        return self.db.query(Transcript).filter(Transcript.id == transcript_id).first()
+    def get_transcript(self, db, transcript_id: int) -> Optional[Transcript]:
+        return db.query(Transcript).filter(Transcript.id == transcript_id).first()
 
-    def list_transcripts(self, limit: int = 50, offset: int = 0) -> list[Transcript]:
+    def list_transcripts(self, db, limit: int = 50, offset: int = 0) -> list[Transcript]:
         return (
-            self.db.query(Transcript)
+            db.query(Transcript)
             .order_by(Transcript.created_at.desc())
             .offset(offset)
             .limit(limit)
             .all()
         )
 
-    def delete_transcript(self, transcript_id: int) -> bool:
-        t = self.get_transcript(transcript_id)
+    def delete_transcript(self, db, transcript_id: int) -> bool:
+        t = self.get_transcript(db, transcript_id)
         if not t:
             return False
-        self.db.delete(t)
-        self.db.commit()
+        db.delete(t)
+        db.commit()
         return True
 
     async def summarize(
         self,
+        db,
         transcript_id: int,
         api_key: str = "",
         provider_name: str = "groq",
@@ -118,7 +119,7 @@ class TranscriptionService:
         model: str = "llama-3.3-70b-versatile",
     ) -> Summary:
         """Generate an LLM summary of a completed transcript."""
-        transcript = self.get_transcript(transcript_id)
+        transcript = self.get_transcript(db, transcript_id)
         if not transcript:
             raise ValueError(f"Transcript {transcript_id} not found")
         if transcript.status != "completed":
@@ -195,7 +196,7 @@ Return ONLY valid JSON, no markdown, no code fences."""
                 "decisions": [],
             }
 
-        existing = self.db.query(Summary).filter(Summary.transcript_id == transcript_id).first()
+        existing = db.query(Summary).filter(Summary.transcript_id == transcript_id).first()
         if existing:
             existing.short_summary = summary_data.get("short_summary", "")
             existing.key_points = summary_data.get("key_points", [])
@@ -213,7 +214,7 @@ Return ONLY valid JSON, no markdown, no code fences."""
                 decisions=summary_data.get("decisions", []),
                 model=model,
             )
-            self.db.add(summary)
+            db.add(summary)
 
-        self.db.commit()
+        db.commit()
         return summary

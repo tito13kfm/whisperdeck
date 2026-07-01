@@ -72,12 +72,16 @@ class ProviderConfig(Base):
 
 
 def init_db(db_path: str = "data/whisperdesk.db") -> tuple:
-    """Initialize the database and return engine + session."""
+    """Initialize the database and return engine + session factory.
+
+    Returns a sessionmaker, not a live session — callers create one
+    session per request (see app.py's get_db dependency) rather than
+    sharing a single session across all concurrent requests.
+    """
     engine = create_engine(f"sqlite:///{db_path}", connect_args={"check_same_thread": False})
     Base.metadata.create_all(engine)
-    Session = sessionmaker(bind=engine)
-    session = Session()
-    return engine, session
+    SessionLocal = sessionmaker(bind=engine)
+    return engine, SessionLocal
 
 
 __all__ = ["Base", "Transcript", "Summary", "VoiceProfile", "ProviderConfig", "init_db"]

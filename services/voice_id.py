@@ -17,8 +17,7 @@ from database import VoiceProfile
 class VoiceIdentificationService:
     """Enroll known speakers and identify speakers in audio."""
 
-    def __init__(self, db_session, voices_dir: str = "data/voices"):
-        self.db = db_session
+    def __init__(self, voices_dir: str = "data/voices"):
         self.voices_dir = voices_dir
         os.makedirs(voices_dir, exist_ok=True)
         self._backend = self._detect_backend()
@@ -54,6 +53,7 @@ class VoiceIdentificationService:
 
     def enroll(
         self,
+        db,
         name: str,
         audio_path: str,
         notes: str = "",
@@ -72,7 +72,7 @@ class VoiceIdentificationService:
                 f"dependencies (e.g. torch, torchaudio) are working correctly."
             )
 
-        existing = self.db.query(VoiceProfile).filter(VoiceProfile.name == name).first()
+        existing = db.query(VoiceProfile).filter(VoiceProfile.name == name).first()
         if existing:
             existing.embedding = embedding.tolist() if isinstance(embedding, np.ndarray) else embedding
             existing.sample_count += 1
@@ -87,18 +87,18 @@ class VoiceIdentificationService:
                 sample_count=1,
                 notes=notes,
             )
-            self.db.add(profile)
+            db.add(profile)
 
-        self.db.commit()
+        db.commit()
         return profile
 
-    def identify(self, audio_path: str, threshold: float = 0.65) -> list[dict]:
+    def identify(self, db, audio_path: str, threshold: float = 0.65) -> list[dict]:
         """Identify a speaker from an audio sample. Returns ranked candidates."""
         probe_embedding = self._extract_embedding(audio_path)
         if probe_embedding is None:
             return []
 
-        profiles = self.db.query(VoiceProfile).all()
+        profiles = db.query(VoiceProfile).all()
         if not profiles:
             return []
 
@@ -117,7 +117,7 @@ class VoiceIdentificationService:
         results.sort(key=lambda x: x["similarity"], reverse=True)
         return results
 
-    def list_profiles(self) -> list[dict]:
+    def list_profiles(self, db) -> list[dict]:
         return [
             {
                 "id": p.id,
@@ -127,15 +127,15 @@ class VoiceIdentificationService:
                 "notes": p.notes,
                 "created_at": p.created_at.isoformat() if p.created_at else None,
             }
-            for p in self.db.query(VoiceProfile).order_by(VoiceProfile.name).all()
+            for p in db.query(VoiceProfile).order_by(VoiceProfile.name).all()
         ]
 
-    def delete_profile(self, profile_id: int) -> bool:
-        p = self.db.query(VoiceProfile).filter(VoiceProfile.id == profile_id).first()
+    def delete_profile(self, db, profile_id: int) -> bool:
+        p = db.query(VoiceProfile).filter(VoiceProfile.id == profile_id).first()
         if not p:
             return False
-        self.db.delete(p)
-        self.db.commit()
+        db.delete(p)
+        db.commit()
         return True
 
     def _extract_embedding(self, audio_path: str) -> Optional[np.ndarray]:

@@ -11,10 +11,11 @@ import shutil
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Query, Body
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Query, Body, Depends
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse, FileResponse, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy.orm import Session
 
 from database import init_db, Transcript, Summary, VoiceProfile, ProviderConfig
 from services.transcription import TranscriptionService
@@ -35,10 +36,10 @@ DB_PATH = DATA_DIR / "whisperdesk.db"
 for d in [DATA_DIR, UPLOAD_DIR, TRANSCRIPT_DIR, VOICES_DIR]:
     d.mkdir(parents=True, exist_ok=True)
 
-engine, db_session = init_db(str(DB_PATH))
-transcription_service = TranscriptionService(db_session, str(UPLOAD_DIR))
+engine, SessionLocal = init_db(str(DB_PATH))
+transcription_service = TranscriptionService(str(UPLOAD_DIR))
 diarization_service = DiarizationService()
-voice_id_service = VoiceIdentificationService(db_session, str(VOICES_DIR))
+voice_id_service = VoiceIdentificationService(str(VOICES_DIR))
 
 app = FastAPI(
     title="WhisperDeck",
@@ -60,8 +61,14 @@ app.add_middleware(
 
 # ── Helpers ────────────────────────────────────────────────────────────────
 
-def _get_db():
-    return db_session
+def get_db():
+    """Per-request DB session — one session per request, closed when the
+    request finishes, instead of one shared session for the whole app."""
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
 
 
 def _serialize_transcript(t: Transcript) -> dict:
@@ -115,13 +122,12 @@ async def health():
 # ── Providers ─────────────────────────────────────────────────────────────
 
 @app.get("/api/providers")
-async def get_providers():
+async def get_providers(db: Session = Depends(get_db)):
     """List available providers with their metadata."""
-    session = _get_db()
     providers = list_providers()
     # Merge in saved config status
     for p in providers:
-        saved = session.query(ProviderConfig).filter(
+        saved = db.query(ProviderConfig).filter(
             ProviderConfig.name == p["id"]
         ).first()
         if saved:
@@ -134,9 +140,8 @@ async def get_providers():
 
 
 @app.get("/api/providers/{name}")
-async def get_provider_config(name: str):
-    session = _get_db()
-    cfg = session.query(ProviderConfig).filter(ProviderConfig.name == name).first()
+async def get_provider_config(name: str, db: Session = Depends(get_db)):
+    cfg = db.query(ProviderConfig).filter(ProviderConfig.name == name).first()
     if not cfg:
         return {"name": name, "api_key": "", "api_url": "", "default_model": "", "is_active": False}
     return {
@@ -151,12 +156,11 @@ async def get_provider_config(name: str):
 
 
 @app.put("/api/providers/{name}")
-async def update_provider_config(name: str, data: dict = Body(...)):
-    session = _get_db()
-    cfg = session.query(ProviderConfig).filter(ProviderConfig.name == name).first()
+async def update_provider_config(name: str, data: dict = Body(...), db: Session = Depends(get_db)):
+    cfg = db.query(ProviderConfig).filter(ProviderConfig.name == name).first()
     if not cfg:
         cfg = ProviderConfig(name=name)
-        session.add(cfg)
+        db.add(cfg)
 
     if "api_key" in data and data["api_key"] and not data["api_key"].startswith("••••"):
         cfg.api_key = data["api_key"]
@@ -169,14 +173,13 @@ async def update_provider_config(name: str, data: dict = Body(...)):
     if "display_name" in data:
         cfg.display_name = data["display_name"]
 
-    session.commit()
+    db.commit()
     return {"ok": True, "name": name}
 
 
 @app.get("/api/providers/{name}/models")
-async def list_provider_models(name: str):
+async def list_provider_models(name: str, db: Session = Depends(get_db)):
     """Fetch available transcription models for a given provider (live if possible)."""
-    session = _get_db()
     from backends import get_provider, list_providers
 
     # Check provider exists
@@ -185,7 +188,7 @@ async def list_provider_models(name: str):
         raise HTTPException(status_code=404, detail=f"Unknown provider: {name}")
 
     # Get saved config
-    cfg = session.query(ProviderConfig).filter(ProviderConfig.name == name).first()
+    cfg = db.query(ProviderConfig).filter(ProviderConfig.name == name).first()
     prov_config = {}
     if cfg:
         prov_config = {
@@ -230,10 +233,9 @@ async def transcribe_audio(
     language: str = Form("en"),
     temperature: float = Form(0.0),
     diarize: bool = Form(False),
+    db: Session = Depends(get_db),
 ):
     """Upload and transcribe an audio file."""
-    session = _get_db()
-
     # Save uploaded file
     file_ext = os.path.splitext(file.filename or "audio.mp3")[1] or ".mp3"
     safe_name = f"{datetime.datetime.utcnow().strftime('%Y%m%d_%H%M%S')}_{hash(file.filename or 'audio')}{file_ext}"
@@ -254,7 +256,7 @@ async def transcribe_audio(
             raise HTTPException(status_code=500, detail=str(e))
 
     # Get provider config
-    prov_cfg = session.query(ProviderConfig).filter(ProviderConfig.name == provider).first()
+    prov_cfg = db.query(ProviderConfig).filter(ProviderConfig.name == provider).first()
     provider_config = {}
     if prov_cfg:
         provider_config = {
@@ -265,6 +267,7 @@ async def transcribe_audio(
 
     try:
         transcript = await transcription_service.transcribe(
+            db,
             audio_path=str(save_path),
             provider_name=provider,
             provider_config=provider_config,
@@ -292,7 +295,7 @@ async def transcribe_audio(
                 )
                 transcript.segments = merged
                 transcript.speaker_count = result.speaker_count
-                session.commit()
+                db.commit()
             except Exception as e:
                 # Non-fatal: diarization enhancement failed. Transcript still
                 # succeeds without speaker labels, but log so it's visible.
@@ -305,10 +308,9 @@ async def transcribe_audio(
 
 
 @app.get("/api/transcripts")
-async def list_transcripts(limit: int = 50, offset: int = 0):
-    session = _get_db()
+async def list_transcripts(limit: int = 50, offset: int = 0, db: Session = Depends(get_db)):
     transcripts = (
-        session.query(Transcript)
+        db.query(Transcript)
         .order_by(Transcript.created_at.desc())
         .offset(offset)
         .limit(limit)
@@ -318,29 +320,26 @@ async def list_transcripts(limit: int = 50, offset: int = 0):
 
 
 @app.get("/api/transcripts/{transcript_id}")
-async def get_transcript(transcript_id: int):
-    session = _get_db()
-    t = session.query(Transcript).filter(Transcript.id == transcript_id).first()
+async def get_transcript(transcript_id: int, db: Session = Depends(get_db)):
+    t = db.query(Transcript).filter(Transcript.id == transcript_id).first()
     if not t:
         raise HTTPException(status_code=404, detail="Transcript not found")
     return _serialize_transcript(t)
 
 
 @app.delete("/api/transcripts/{transcript_id}")
-async def delete_transcript(transcript_id: int):
-    session = _get_db()
-    t = session.query(Transcript).filter(Transcript.id == transcript_id).first()
+async def delete_transcript(transcript_id: int, db: Session = Depends(get_db)):
+    t = db.query(Transcript).filter(Transcript.id == transcript_id).first()
     if not t:
         raise HTTPException(status_code=404, detail="Transcript not found")
-    session.delete(t)
-    session.commit()
+    db.delete(t)
+    db.commit()
     return {"ok": True}
 
 
 @app.patch("/api/transcripts/{transcript_id}")
-async def update_transcript(transcript_id: int, data: dict = Body(...)):
-    session = _get_db()
-    t = session.query(Transcript).filter(Transcript.id == transcript_id).first()
+async def update_transcript(transcript_id: int, data: dict = Body(...), db: Session = Depends(get_db)):
+    t = db.query(Transcript).filter(Transcript.id == transcript_id).first()
     if not t:
         raise HTTPException(status_code=404, detail="Transcript not found")
     if "title" in data:
@@ -350,7 +349,7 @@ async def update_transcript(transcript_id: int, data: dict = Body(...)):
     if "full_text" in data:
         t.full_text = data["full_text"]
     t.updated_at = datetime.datetime.utcnow()
-    session.commit()
+    db.commit()
     return _serialize_transcript(t)
 
 
@@ -400,15 +399,15 @@ async def summarize_transcript(
     transcript_id: int,
     provider: str = Form("groq"),
     model: str = Form("llama-3.3-70b-versatile"),
+    db: Session = Depends(get_db),
 ):
     """Generate an LLM summary of a completed transcript."""
-    session = _get_db()
-
-    prov_cfg = session.query(ProviderConfig).filter(ProviderConfig.name == provider).first()
+    prov_cfg = db.query(ProviderConfig).filter(ProviderConfig.name == provider).first()
     api_key = prov_cfg.api_key if prov_cfg else ""
 
     try:
         summary = await transcription_service.summarize(
+            db,
             transcript_id=transcript_id,
             api_key=api_key,
             provider_name=provider,
@@ -423,9 +422,8 @@ async def summarize_transcript(
 
 
 @app.get("/api/transcripts/{transcript_id}/summary")
-async def get_summary(transcript_id: int):
-    session = _get_db()
-    summary = session.query(Summary).filter(Summary.transcript_id == transcript_id).first()
+async def get_summary(transcript_id: int, db: Session = Depends(get_db)):
+    summary = db.query(Summary).filter(Summary.transcript_id == transcript_id).first()
     if not summary:
         raise HTTPException(status_code=404, detail="No summary found")
     return _serialize_summary(summary)
@@ -434,9 +432,9 @@ async def get_summary(transcript_id: int):
 # ── Voice Identification Database ─────────────────────────────────────────
 
 @app.get("/api/voices")
-async def list_voices():
+async def list_voices(db: Session = Depends(get_db)):
     """List all enrolled voice profiles."""
-    return voice_id_service.list_profiles()
+    return voice_id_service.list_profiles(db)
 
 
 @app.post("/api/voices/enroll")
@@ -444,6 +442,7 @@ async def enroll_voice(
     file: UploadFile = File(...),
     name: str = Form(...),
     notes: str = Form(""),
+    db: Session = Depends(get_db),
 ):
     """Enroll a new speaker from an audio sample."""
     file_ext = os.path.splitext(file.filename or "voice.wav")[1] or ".wav"
@@ -455,7 +454,7 @@ async def enroll_voice(
         f.write(content)
 
     try:
-        profile = voice_id_service.enroll(name=name, audio_path=str(save_path), notes=notes)
+        profile = voice_id_service.enroll(db, name=name, audio_path=str(save_path), notes=notes)
         return {
             "id": profile.id,
             "name": profile.name,
@@ -471,6 +470,7 @@ async def enroll_voice(
 async def identify_speaker(
     file: UploadFile = File(...),
     threshold: float = Form(0.65),
+    db: Session = Depends(get_db),
 ):
     """Identify a speaker from an audio sample against enrolled profiles."""
     file_ext = os.path.splitext(file.filename or "voice.wav")[1] or ".wav"
@@ -482,10 +482,10 @@ async def identify_speaker(
         f.write(content)
 
     try:
-        matches = voice_id_service.identify(str(save_path), threshold=threshold)
+        matches = voice_id_service.identify(db, str(save_path), threshold=threshold)
         return {
             "matches": matches,
-            "total_profiles": len(voice_id_service.list_profiles()),
+            "total_profiles": len(voice_id_service.list_profiles(db)),
             "backend": voice_id_service._backend,
         }
     except Exception as e:
@@ -493,8 +493,8 @@ async def identify_speaker(
 
 
 @app.delete("/api/voices/{profile_id}")
-async def delete_voice_profile(profile_id: int):
-    ok = voice_id_service.delete_profile(profile_id)
+async def delete_voice_profile(profile_id: int, db: Session = Depends(get_db)):
+    ok = voice_id_service.delete_profile(db, profile_id)
     if not ok:
         raise HTTPException(status_code=404, detail="Voice profile not found")
     return {"ok": True}
@@ -512,23 +512,22 @@ async def index():
 
 
 @app.get("/api/status")
-async def full_status():
+async def full_status(db: Session = Depends(get_db)):
     """Return comprehensive app status for the frontend dashboard."""
-    session = _get_db()
-    total = session.query(Transcript).count()
-    completed = session.query(Transcript).filter(Transcript.status == "completed").count()
-    processing = session.query(Transcript).filter(Transcript.status == "processing").count()
-    failed = session.query(Transcript).filter(Transcript.status == "failed").count()
+    total = db.query(Transcript).count()
+    completed = db.query(Transcript).filter(Transcript.status == "completed").count()
+    processing = db.query(Transcript).filter(Transcript.status == "processing").count()
+    failed = db.query(Transcript).filter(Transcript.status == "failed").count()
     total_duration = (
-        session.query(Transcript.duration_seconds)
+        db.query(Transcript.duration_seconds)
         .filter(Transcript.status == "completed")
         .all()
     )
     total_minutes = sum(d[0] for d in total_duration if d[0]) / 60
-    voice_count = session.query(VoiceProfile).count()
+    voice_count = db.query(VoiceProfile).count()
 
     # Get active provider
-    active_prov = session.query(ProviderConfig).filter(ProviderConfig.is_active == True).first()  # noqa: E712
+    active_prov = db.query(ProviderConfig).filter(ProviderConfig.is_active == True).first()  # noqa: E712
 
     return {
         "total_transcripts": total,
