@@ -416,7 +416,7 @@ svg{display:block;flex-shrink:0}
 </div>
 
 <!-- ══════════ APP SHELL ══════════ -->
-<div id="appShell" style="display:none">
+<div id="appShell" style="display:none;height:100vh">
 
 <!-- ══════════ SIDEBAR ══════════ -->
 <aside class="sidebar">
@@ -1428,7 +1428,7 @@ async function checkAuth() {
     const r = await fetch(API + '/api/me');
     if (r.ok) {
       document.getElementById('authShell').style.display = 'none';
-      document.getElementById('appShell').style.display = 'block';
+      document.getElementById('appShell').style.display = 'flex';
       loadDashboard();
       return;
     }
