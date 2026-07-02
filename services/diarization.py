@@ -34,7 +34,15 @@ class DiarizationService:
 
     def _check_pyannote(self) -> bool:
         try:
-            import pyannote.audio  # noqa
+            import warnings
+            # pyannote.audio warns on import if torchcodec isn't installed —
+            # harmless, we don't use torchcodec's in-memory decoding path,
+            # but it's noisy on every startup since this check runs eagerly.
+            with warnings.catch_warnings():
+                # Narrowly scoped to just this one import — doesn't affect
+                # warnings anywhere else in the app.
+                warnings.filterwarnings("ignore", category=UserWarning)
+                import pyannote.audio  # noqa
             return True
         except ImportError:
             return False
