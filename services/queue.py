@@ -407,55 +407,75 @@ async def _finalize_if_done(db, transcript_id: int, diarization_service) -> None
         return
 
     segments, full_text = merge_chunk_results(jobs)
-    transcript.segments = segments
-    transcript.full_text = full_text
-    transcript.duration_seconds = max((j.end_time for j in jobs), default=0)
+    duration_seconds = max((j.end_time for j in jobs), default=0)
     completed_count = sum(1 for j in jobs if j.status == "completed")
     failed_count = sum(1 for j in jobs if j.status == "failed")
     if failed_count == 0:
-        transcript.status = "completed"
+        new_status = "completed"
     elif completed_count == 0:
-        transcript.status = "failed"
+        new_status = "failed"
     else:
-        transcript.status = "partial"
-    transcript.updated_at = datetime.datetime.utcnow()
+        new_status = "partial"
 
+    speaker_count = None
     if transcript.diarize_requested and segments and transcript.audio_path:
+        # IMPORTANT: nothing above this point may leave a dirty write on
+        # `transcript` — diarization result, segments, and the new status
+        # are all kept in local variables only. If `transcript.status` (or
+        # any other transcript attribute) is set in-memory before the
+        # awaits below, SQLAlchemy's autoflush would push that dirty write
+        # to the DB on the very next `db.query(...)` call (e.g.
+        # get_user_settings), inside this same still-open transaction —
+        # which means the post-await re-check further down would just be
+        # re-reading this session's own uncommitted write, not a
+        # concurrent session's commit. Ending the transaction (rollback,
+        # no-op since nothing is dirty) before the await is what actually
+        # lets a concurrent /cancel's commit land and be observed.
+        db.rollback()
+        transcript_user_id = transcript.user_id
+        audio_path = transcript.audio_path
+        num_speakers = transcript.num_speakers
         try:
             if diarization_service._check_pyannote():
                 from services.settings import get_user_settings  # local import avoids a module-load cycle with app.py
-                user_settings = get_user_settings(db, transcript.user_id)
+                user_settings = get_user_settings(db, transcript_user_id)
                 # num_speakers=None lets pyannote auto-detect the count.
                 result = await diarization_service.diarize_pyannote(
-                    transcript.audio_path, num_speakers=transcript.num_speakers,
+                    audio_path, num_speakers=num_speakers,
                     hf_token=user_settings.get("hf_token"),
                 )
             else:
                 # Heuristic fallback can't auto-detect — needs a real
                 # count, default to 2 if the user left it blank.
                 result = await diarization_service.diarize_heuristic(
-                    transcript.audio_path, num_speakers=transcript.num_speakers or 2, segments=segments,
+                    audio_path, num_speakers=num_speakers or 2, segments=segments,
                 )
             merged = await diarization_service.combine_with_transcript(result, segments)
-            transcript.segments = merged
-            transcript.speaker_count = result.speaker_count
+            segments = merged
+            speaker_count = result.speaker_count
         except Exception as e:
             print(f"[queue] non-fatal diarization failure for transcript {transcript_id}: {e}")
 
-        # Diarization awaits above can take several seconds, during which
-        # a /cancel request on another request-handling coroutine (same
-        # event loop, separate db session) can commit transcript.status =
-        # "cancelled" in the DB while this function's in-memory `transcript`
-        # object still holds an uncommitted "completed"/"partial"/"failed".
-        # Re-read the committed status before this function's own commit —
-        # if a cancel landed in that window, discard the completion we just
-        # computed so we don't overwrite "cancelled" (last-write-wins would
-        # otherwise silently defeat the cancel, the same failure mode this
-        # fix closes for the non-diarization path).
-        db.expire(transcript, ["status"])
-        if transcript.status == "cancelled":
+        # Diarization awaits above can take several seconds, during which a
+        # /cancel request on another request-handling coroutine (separate
+        # db session/connection) can commit transcript.status = "cancelled".
+        # Because nothing was left dirty on `transcript` going into the
+        # await (see above), this is a genuine fresh read — no pending
+        # write to autoflush-shadow it — so it will actually observe a
+        # concurrent commit. Re-fetch the transcript from a clean session
+        # state and bail out without writing if cancel won the race.
+        db.expire_all()
+        transcript = db.query(Transcript).filter(Transcript.id == transcript_id).first()
+        if not transcript or transcript.status == "cancelled":
             return
 
+    transcript.segments = segments
+    transcript.full_text = full_text
+    transcript.duration_seconds = duration_seconds
+    transcript.status = new_status
+    if speaker_count is not None:
+        transcript.speaker_count = speaker_count
+    transcript.updated_at = datetime.datetime.utcnow()
     db.commit()
 
 
