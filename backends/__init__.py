@@ -16,9 +16,11 @@ from .replicate import ReplicateProvider
 from .local import LocalProvider
 from .openrouter import OpenRouterProvider
 from .builtin import BuiltinProvider
+from .moonshine import MoonshineProvider
 
 PROVIDER_REGISTRY = {
     "builtin": BuiltinProvider,
+    "moonshine": MoonshineProvider,
     "groq": GroqProvider,
     "openai": OpenAIProvider,
     "replicate": ReplicateProvider,
@@ -43,6 +45,15 @@ def list_providers() -> list[dict]:
             "name": "Built-in (Whisper Tiny)",
             "description": "Local · no API key · great for quick dictation",
             "default_model": "tiny",
+            "needs_key": False,
+            "key_prefix": "",
+            "zero_setup": True,
+        },
+        {
+            "id": "moonshine",
+            "name": "Moonshine",
+            "description": "Local · no API key · lightweight on-device ASR",
+            "default_model": "base",
             "needs_key": False,
             "key_prefix": "",
             "zero_setup": True,
@@ -93,6 +104,6 @@ def list_providers() -> list[dict]:
 __all__ = [
     "BaseProvider", "ProviderError",
     "GroqProvider", "OpenAIProvider", "ReplicateProvider", "LocalProvider", "OpenRouterProvider",
-    "BuiltinProvider",
+    "BuiltinProvider", "MoonshineProvider",
     "get_provider", "list_providers", "PROVIDER_REGISTRY",
 ]

@@ -45,6 +45,10 @@ for d in [DATA_DIR, UPLOAD_DIR, TRANSCRIPT_DIR, VOICES_DIR]:
     d.mkdir(parents=True, exist_ok=True)
 
 SESSION_SECRET_PATH = DATA_DIR / ".session_secret"
+
+# Local providers run on-device with no upload size limit — skip the
+# ffmpeg transcode and background chunk-job path that remote providers need.
+LOCAL_PROVIDERS = ("builtin", "moonshine")
 if SESSION_SECRET_PATH.exists():
     SESSION_SECRET = SESSION_SECRET_PATH.read_text().strip()
 else:
@@ -371,7 +375,7 @@ async def transcribe_audio(
     # mono (all Whisper providers resample to this internally anyway). Fixes
     # "file too large" errors on video uploads and long recordings. Builtin
     # runs locally with no upload limit, so skip the extra transcode there.
-    if provider != "builtin":
+    if provider not in LOCAL_PROVIDERS:
         try:
             save_path = Path(await transcode_for_upload(
                 str(save_path), str(UPLOAD_DIR), bitrate_kbps=user_settings["bitrate_kbps"]
@@ -395,7 +399,7 @@ async def transcribe_audio(
     threshold_bytes = user_settings["chunk_threshold_mb"] * 1024 * 1024
     file_size = os.path.getsize(save_path)
 
-    if provider != "builtin" and file_size > threshold_bytes:
+    if provider not in LOCAL_PROVIDERS and file_size > threshold_bytes:
         # Over the size threshold: split into chunks and hand off to the
         # background worker instead of transcribing inline. The request
         # returns as soon as jobs are queued — see services/queue.py for
