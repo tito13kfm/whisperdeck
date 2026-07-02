@@ -815,6 +815,23 @@ function handleFile(file) {
   document.getElementById('txStartBtn').disabled = false;
 }
 
+async function pollTranscript(id) {
+  while (true) {
+    const r = await fetch(API + '/api/transcripts/' + id);
+    if (!r.ok) throw new Error('Lost track of transcript ' + id);
+    const data = await r.json();
+    if (data.job_progress) {
+      const p = data.job_progress;
+      document.getElementById('progDesc').textContent = p.completed + ' of ' + p.total + ' sections done';
+    }
+    if (['completed', 'failed', 'partial'].includes(data.status)) {
+      if (data.status === 'failed') throw new Error(data.error || 'Transcription failed');
+      return data;
+    }
+    await new Promise(res => setTimeout(res, 2000));
+  }
+}
+
 function toggleAdv() {
   document.getElementById('txAdvanced').classList.toggle('o');
 }
@@ -847,12 +864,12 @@ async function startTx() {
       throw new Error(err);
     }
 
-    // Upload complete
     setStageDone('stg-upload');
     setStageActive('stg-transcribe');
     document.getElementById('progTitle').textContent = 'Transcribing with Whisper...';
 
-    const data = await r.json();
+    const initial = await r.json();
+    const finalData = await pollTranscript(initial.id);
 
     setStageDone('stg-transcribe');
 
@@ -866,17 +883,18 @@ async function startTx() {
     }
 
     setStageActive('stg-done');
-    document.getElementById('progTitle').textContent = 'Transcription complete!';
-    document.getElementById('progDesc').textContent = data.segments ? data.segments.length + ' segments · ' + data.provider : '';
+    const failedMsg = finalData.status === 'partial' ? ' (some sections failed — retry from the transcript page)' : '';
+    document.getElementById('progTitle').textContent = finalData.status === 'partial' ? 'Transcription partially complete' : 'Transcription complete!';
+    document.getElementById('progDesc').textContent = (finalData.segments ? finalData.segments.length + ' segments · ' + finalData.provider : '') + failedMsg;
     document.getElementById('progCircle').style.strokeDashoffset = '0';
-    document.getElementById('progCircle').style.stroke = 'var(--success)';
+    document.getElementById('progCircle').style.stroke = finalData.status === 'partial' ? 'var(--warning)' : 'var(--success)';
     document.getElementById('progCheck').style.display = 'block';
 
-    toast('Transcription complete!', 'success');
+    toast(finalData.status === 'partial' ? 'Transcription partially complete' : 'Transcription complete!', finalData.status === 'partial' ? 'error' : 'success');
     selectedFile = null;
     document.getElementById('txStartBtn').disabled = true;
 
-    setTimeout(() => navigate('detail', data.id), 1200);
+    setTimeout(() => navigate('detail', finalData.id), 1200);
   } catch (e) {
     toast('Transcription failed: ' + (e.message || e), 'error');
     document.getElementById('progTitle').textContent = 'Transcription failed';
@@ -938,6 +956,7 @@ async function loadTranscriptDetail(id) {
 
     // Build header actions
     document.getElementById('hdrActions').innerHTML = `
+      ${t.status === 'partial' ? `<button class="btn btn-sm" onclick="retryFailedChunks(${t.id})">Retry failed sections</button>` : ''}
       <button class="btn btn-sm btn-ghost" onclick="summarizeTranscript()">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:14px;height:14px"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
         Summarize
@@ -1471,6 +1490,18 @@ async function submitAuth() {
   } catch (e) {
     errEl.textContent = e.message || 'Authentication failed';
     errEl.style.display = 'block';
+  }
+}
+
+async function retryFailedChunks(id) {
+  try {
+    const r = await fetch(API + '/api/transcripts/' + id + '/retry-failed-chunks', { method: 'POST' });
+    if (!r.ok) throw new Error(await r.text());
+    const body = await r.json();
+    toast('Retrying ' + body.retried + ' failed section(s)...', 'success');
+    setTimeout(() => navigate('detail', id), 500);
+  } catch (e) {
+    toast('Retry failed: ' + (e.message || e), 'error');
   }
 }
 
