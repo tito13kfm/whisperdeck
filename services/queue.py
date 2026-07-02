@@ -274,16 +274,19 @@ def retry_failed_chunks(db, transcript_id: int) -> int:
 
 def cancel_transcript_jobs(db, transcript_id: int) -> int:
     """Mark every still-pending job for this transcript as cancelled, so
-    the worker stops dispatching new work for it. Jobs already 'running'
-    are left alone — they're mid-flight to the provider and will finish
-    naturally; _finalize_if_done discards their result once they do (see
-    that function's cancelled-transcript branch). Returns how many
+    the worker stops dispatching new work for it, and flip the transcript
+    itself to 'cancelled' immediately. Jobs already 'running' are left
+    alone — they're mid-flight to the provider and will finish naturally;
+    _finalize_if_done checks the transcript's own status (not per-job
+    status) and refuses to overwrite 'cancelled' with a job-driven
+    completed/partial/failed result once they do. Returns how many
     pending jobs were cancelled.
 
-    If nothing is left running after this call, the transcript is marked
-    cancelled immediately — otherwise the next tick's finalize pass
-    (queue_worker_tick, fixed in this same task to check ALL processing
-    transcripts) picks it up once the running job(s) finish."""
+    The transcript-level flip (rather than waiting for every job to reach
+    a terminal state) is what makes cancellation stick even when every
+    job is 'running' at the moment cancel is called: in that case there
+    are zero pending jobs to mark, but the transcript must still end up
+    'cancelled', not 'completed', once the in-flight jobs finish normally."""
     pending = (
         db.query(TranscriptionJob)
         .filter(TranscriptionJob.transcript_id == transcript_id, TranscriptionJob.status == "pending")
@@ -291,25 +294,30 @@ def cancel_transcript_jobs(db, transcript_id: int) -> int:
     )
     for job in pending:
         job.status = "cancelled"
-    db.commit()
 
-    still_running = (
-        db.query(TranscriptionJob)
-        .filter(TranscriptionJob.transcript_id == transcript_id, TranscriptionJob.status == "running")
-        .count()
-    )
-    if still_running == 0:
-        transcript = db.query(Transcript).filter(Transcript.id == transcript_id).first()
-        if transcript:
-            transcript.status = "cancelled"
-            transcript.updated_at = datetime.datetime.utcnow()
-            db.commit()
+    transcript = db.query(Transcript).filter(Transcript.id == transcript_id).first()
+    if transcript:
+        transcript.status = "cancelled"
+        transcript.updated_at = datetime.datetime.utcnow()
+    db.commit()
     return len(pending)
 
 
 def resume_cancelled_chunks(db, transcript_id: int) -> int:
     """Reset every cancelled job for this transcript back to pending so
-    the worker picks it up again. Returns how many were reset."""
+    the worker picks it up again, and clear the transcript's own
+    'cancelled' marker so _finalize_if_done stops refusing to finalize it.
+
+    Note this always flips transcript.status back to 'processing', even
+    when there are zero cancelled jobs to reset (the all-running-at-cancel
+    case: every job already finished normally to 'completed'/'failed'
+    while the transcript sat at 'cancelled'). In that case resume means
+    "un-cancel and let the existing results stand" — the very next
+    queue_worker_tick pass will finalize this transcript to
+    completed/partial/failed from those already-finished jobs, via the
+    'processing transcripts with no pending jobs this tick' discovery
+    path in queue_worker_tick (finalize_candidate_ids), since a
+    fully-completed job set means it will never re-enter by_transcript."""
     cancelled = (
         db.query(TranscriptionJob)
         .filter(TranscriptionJob.transcript_id == transcript_id, TranscriptionJob.status == "cancelled")
@@ -319,11 +327,11 @@ def resume_cancelled_chunks(db, transcript_id: int) -> int:
         job.status = "pending"
         job.attempts = 0
         job.error = None
-    if cancelled:
-        transcript = db.query(Transcript).filter(Transcript.id == transcript_id).first()
-        if transcript:
-            transcript.status = "processing"
-        db.commit()
+
+    transcript = db.query(Transcript).filter(Transcript.id == transcript_id).first()
+    if transcript and transcript.status == "cancelled":
+        transcript.status = "processing"
+    db.commit()
     return len(cancelled)
 
 
@@ -385,14 +393,17 @@ async def _finalize_if_done(db, transcript_id: int, diarization_service) -> None
     if not transcript:
         return
 
-    if any(j.status == "cancelled" for j in jobs):
-        # Cancellation always wins: discard whatever any job produced
-        # (per the design's "result is simply discarded rather than
-        # merged") rather than partially merging results from jobs that
-        # happened to finish after cancel was requested.
-        transcript.status = "cancelled"
-        transcript.updated_at = datetime.datetime.utcnow()
-        db.commit()
+    if transcript.status == "cancelled":
+        # Cancellation always wins, and is decided at the TRANSCRIPT level
+        # (set by cancel_transcript_jobs the moment /cancel is called), not
+        # by waiting for a job to reach status == "cancelled". A transcript
+        # can be marked cancelled while every one of its jobs is still
+        # "running" (all chunks in flight when cancel was requested) — in
+        # that case no job ever becomes "cancelled", but the transcript
+        # must still discard whatever those jobs produce once they finish,
+        # rather than being overwritten with a job-driven completed/
+        # partial/failed status. Refusing to overwrite here is what makes
+        # that invariant hold regardless of job-completion timing.
         return
 
     segments, full_text = merge_chunk_results(jobs)
