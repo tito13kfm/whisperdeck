@@ -349,6 +349,7 @@ async def transcribe_audio(
     language: str = Form("en"),
     temperature: float = Form(0.0),
     diarize: bool = Form(False),
+    num_speakers: Optional[int] = Form(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -413,6 +414,7 @@ async def transcribe_audio(
             audio_path=str(save_path),
             diarize_requested=diarize,
             title=title or file.filename,
+            num_speakers=num_speakers,
         )
         create_chunk_jobs(db, transcript.id, chunks)
         return _serialize_transcript(transcript)
@@ -434,13 +436,16 @@ async def transcribe_audio(
         if diarize and transcript.segments:
             try:
                 if diarization_service._check_pyannote():
+                    # num_speakers=None lets pyannote auto-detect the count.
                     result = await diarization_service.diarize_pyannote(
-                        str(save_path), num_speakers=2
+                        str(save_path), num_speakers=num_speakers
                     )
                 else:
+                    # Heuristic fallback can't auto-detect — needs a real
+                    # count, default to 2 if the user left it blank.
                     result = await diarization_service.diarize_heuristic(
                         str(save_path),
-                        num_speakers=2,
+                        num_speakers=num_speakers or 2,
                         segments=transcript.segments,
                     )
                 merged = await diarization_service.combine_with_transcript(

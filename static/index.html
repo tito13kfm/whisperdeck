@@ -519,6 +519,9 @@ svg{display:block;flex-shrink:0}
           <div class="cfg-f"><label>Speaker diarization</label>
             <select id="txDiarize"><option value="true">On</option><option value="false">Off</option></select>
           </div>
+          <div class="cfg-f"><label>Number of speakers</label>
+            <input type="number" id="txNumSpeakers" min="1" placeholder="Auto">
+          </div>
         </div>
         <button class="cfg-toggle" onclick="toggleAdv()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:12px;height:12px"><polyline points="9 18 15 12 9 6"/></svg> Advanced</button>
         <div class="cfg-adv" id="txAdvanced">
@@ -862,6 +865,8 @@ async function startTx() {
   form.append('language', document.getElementById('txLang').value);
   form.append('temperature', document.getElementById('txTemp').value);
   form.append('diarize', document.getElementById('txDiarize').value);
+  const numSpeakers = document.getElementById('txNumSpeakers').value;
+  if (numSpeakers) form.append('num_speakers', numSpeakers);
   const title = document.getElementById('txTitle').value;
   if (title) form.append('title', title);
 

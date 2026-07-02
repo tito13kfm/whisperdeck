@@ -27,11 +27,16 @@ class TranscriptionService:
         audio_path: str,
         diarize_requested: bool,
         title: Optional[str] = None,
+        num_speakers: Optional[int] = None,
     ) -> Transcript:
         """Create a Transcript row in 'processing' status without calling a
         provider — used by the chunked upload path, which enqueues chunk
         jobs instead of transcribing inline. See services/queue.py for how
-        those jobs eventually populate full_text/segments/status."""
+        those jobs eventually populate full_text/segments/status.
+
+        num_speakers is persisted (not used here) because the chunked
+        path's diarization runs later, from the worker's finalize step,
+        which has no access to this request's form data otherwise."""
         transcript = Transcript(
             user_id=user_id,
             title=title or os.path.splitext(filename)[0],
@@ -42,6 +47,7 @@ class TranscriptionService:
             status="processing",
             audio_path=audio_path,
             diarize_requested=diarize_requested,
+            num_speakers=num_speakers,
         )
         db.add(transcript)
         db.commit()

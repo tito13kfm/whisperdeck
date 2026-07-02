@@ -253,10 +253,15 @@ async def _finalize_if_done(db, transcript_id: int, diarization_service) -> None
     if transcript.diarize_requested and segments and transcript.audio_path:
         try:
             if diarization_service._check_pyannote():
-                result = await diarization_service.diarize_pyannote(transcript.audio_path, num_speakers=2)
+                # num_speakers=None lets pyannote auto-detect the count.
+                result = await diarization_service.diarize_pyannote(
+                    transcript.audio_path, num_speakers=transcript.num_speakers
+                )
             else:
+                # Heuristic fallback can't auto-detect — needs a real
+                # count, default to 2 if the user left it blank.
                 result = await diarization_service.diarize_heuristic(
-                    transcript.audio_path, num_speakers=2, segments=segments,
+                    transcript.audio_path, num_speakers=transcript.num_speakers or 2, segments=segments,
                 )
             merged = await diarization_service.combine_with_transcript(result, segments)
             transcript.segments = merged

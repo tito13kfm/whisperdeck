@@ -38,6 +38,7 @@ class Transcript(Base):
     error = Column(Text, nullable=True)
     audio_path = Column(String(512), nullable=True)  # post-transcode, pre-chunk-split file; used by chunked-path diarization
     diarize_requested = Column(Boolean, default=False)
+    num_speakers = Column(Integer, nullable=True)  # None = auto-detect (pyannote only; heuristic fallback defaults to 2)
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
 
@@ -194,7 +195,7 @@ def init_db(db_path: str = "data/whisperdesk.db") -> tuple:
     migrated_tables = migrate_schema(engine)
     Base.metadata.create_all(engine)
     ensure_columns(engine, "users", {"settings": "JSON"})
-    ensure_columns(engine, "transcripts", {"audio_path": "TEXT", "diarize_requested": "BOOLEAN"})
+    ensure_columns(engine, "transcripts", {"audio_path": "TEXT", "diarize_requested": "BOOLEAN", "num_speakers": "INTEGER"})
     SessionLocal = sessionmaker(bind=engine)
     return engine, SessionLocal, migrated_tables
 
