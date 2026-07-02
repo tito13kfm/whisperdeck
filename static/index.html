@@ -552,6 +552,7 @@ svg{display:block;flex-shrink:0}
         </div>
         <h3 id="progTitle">Starting...</h3>
         <p id="progDesc">Preparing your transcription</p>
+        <button class="btn btn-sm" id="progCancelBtn" onclick="cancelCurrentUpload()" style="display:none;margin-bottom:10px">Cancel</button>
         <div class="stages">
           <div class="stg" id="stg-upload"><div class="stg-icon" style="background:var(--bg-page);color:var(--text-muted)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg></div>Uploading audio</div>
           <div class="stg" id="stg-transcribe"><div class="stg-icon" style="background:var(--bg-page);color:var(--text-muted)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/></svg></div>Transcribing with Whisper</div>
@@ -809,7 +810,12 @@ async function loadDashboard() {
     } else {
       c.innerHTML = list.map(t => {
         const statusClass = t.status === 'completed' ? 'status-done' : t.status === 'processing' ? 'status-processing' : 'status-error';
-        const statusLabel = t.status === 'completed' ? 'Done' : t.status === 'processing' ? 'Processing' : 'Failed';
+        let statusLabel = t.status === 'completed' ? 'Done' : t.status === 'processing' ? 'Processing' : t.status === 'cancelled' ? 'Cancelled' : 'Failed';
+        if (t.status === 'processing' && t.queue_status) {
+          if (t.queue_status.state === 'transcribing') statusLabel = t.queue_status.chunks_done + '/' + t.queue_status.chunks_total;
+          else if (t.queue_status.state === 'rate_limited') statusLabel = 'Rate limited';
+          else if (t.queue_status.state === 'queued') statusLabel = 'Queued';
+        }
         const minDur = t.duration_seconds ? Math.floor(t.duration_seconds / 60) + ':' + String(Math.floor(t.duration_seconds % 60)).padStart(2,'0') : '—';
         return `<div class="card-item" onclick="navigate('detail',${t.id})">
           <div class="ci-icon" style="background:${t.status === 'completed' ? 'var(--success-subtle)' : 'var(--accent-subtle)'};color:${t.status === 'completed' ? 'var(--success)' : 'var(--accent)'}">
@@ -847,20 +853,54 @@ function handleFile(file) {
   document.getElementById('txStartBtn').disabled = false;
 }
 
+let currentUploadTranscriptId = null;
+
 async function pollTranscript(id) {
-  while (true) {
-    const r = await fetch(API + '/api/transcripts/' + id);
-    if (!r.ok) throw new Error('Lost track of transcript ' + id);
-    const data = await r.json();
-    if (data.job_progress) {
-      const p = data.job_progress;
-      document.getElementById('progDesc').textContent = p.completed + ' of ' + p.total + ' sections done';
+  currentUploadTranscriptId = id;
+  document.getElementById('progCancelBtn').style.display = 'inline-flex';
+  try {
+    while (true) {
+      const r = await fetch(API + '/api/transcripts/' + id);
+      if (!r.ok) throw new Error('Lost track of transcript ' + id);
+      const data = await r.json();
+      document.getElementById('progTitle').textContent = 'Transcribing with ' + (data.model || 'Whisper') + '...';
+
+      if (data.processed_size_bytes) {
+        document.getElementById('progDesc').textContent = (data.processed_size_bytes / (1024*1024)).toFixed(1) + ' MB processed';
+      }
+
+      if (data.queue_status) {
+        const q = data.queue_status;
+        if (q.state === 'transcribing') {
+          document.getElementById('progDesc').textContent = q.chunks_done + ' of ' + q.chunks_total + ' sections done';
+        } else if (q.state === 'rate_limited') {
+          const mins = Math.max(1, Math.round(q.resume_in_seconds / 60));
+          document.getElementById('progDesc').textContent = 'Waiting on ' + data.provider + '\'s rate limit — resuming in ~' + mins + 'm';
+        } else if (q.state === 'queued') {
+          document.getElementById('progDesc').textContent = 'Queued — ' + q.chunks_done + ' of ' + q.chunks_total + ' sections done';
+        }
+      }
+
+      if (['completed', 'failed', 'partial', 'cancelled'].includes(data.status)) {
+        if (data.status === 'failed') throw new Error(data.error || 'Transcription failed');
+        return data;
+      }
+      await new Promise(res => setTimeout(res, 2000));
     }
-    if (['completed', 'failed', 'partial'].includes(data.status)) {
-      if (data.status === 'failed') throw new Error(data.error || 'Transcription failed');
-      return data;
-    }
-    await new Promise(res => setTimeout(res, 2000));
+  } finally {
+    document.getElementById('progCancelBtn').style.display = 'none';
+    currentUploadTranscriptId = null;
+  }
+}
+
+async function cancelCurrentUpload() {
+  if (!currentUploadTranscriptId) return;
+  if (!confirm("Cancel this transcription? You can resume it later from the transcript page.")) return;
+  try {
+    await fetch(API + '/api/transcripts/' + currentUploadTranscriptId + '/cancel', { method: 'POST' });
+    toast('Cancelling...', 'info');
+  } catch (e) {
+    toast('Failed to cancel: ' + (e.message || e), 'error');
   }
 }
 
@@ -917,14 +957,16 @@ async function startTx() {
     }
 
     setStageActive('stg-done');
-    const failedMsg = finalData.status === 'partial' ? ' (some sections failed — retry from the transcript page)' : '';
-    document.getElementById('progTitle').textContent = finalData.status === 'partial' ? 'Transcription partially complete' : 'Transcription complete!';
-    document.getElementById('progDesc').textContent = (finalData.segments ? finalData.segments.length + ' segments · ' + finalData.provider : '') + failedMsg;
+    const isPartial = finalData.status === 'partial';
+    const isCancelled = finalData.status === 'cancelled';
+    const failedMsg = isPartial ? ' (some sections failed — retry from the transcript page)' : '';
+    document.getElementById('progTitle').textContent = isCancelled ? 'Transcription cancelled' : isPartial ? 'Transcription partially complete' : 'Transcription complete!';
+    document.getElementById('progDesc').textContent = isCancelled ? 'Resume from the transcript page to finish it later.' : (finalData.segments ? finalData.segments.length + ' segments · ' + finalData.provider : '') + failedMsg;
     document.getElementById('progCircle').style.strokeDashoffset = '0';
-    document.getElementById('progCircle').style.stroke = finalData.status === 'partial' ? 'var(--warning)' : 'var(--success)';
+    document.getElementById('progCircle').style.stroke = isCancelled ? 'var(--text-muted)' : isPartial ? 'var(--warning)' : 'var(--success)';
     document.getElementById('progCheck').style.display = 'block';
 
-    toast(finalData.status === 'partial' ? 'Transcription partially complete' : 'Transcription complete!', finalData.status === 'partial' ? 'error' : 'success');
+    toast(isCancelled ? 'Transcription cancelled' : isPartial ? 'Transcription partially complete' : 'Transcription complete!', isCancelled ? 'info' : isPartial ? 'error' : 'success');
     selectedFile = null;
     document.getElementById('txStartBtn').disabled = true;
 
@@ -991,6 +1033,7 @@ async function loadTranscriptDetail(id) {
     // Build header actions
     document.getElementById('hdrActions').innerHTML = `
       ${t.status === 'partial' ? `<button class="btn btn-sm" onclick="retryFailedChunks(${t.id})">Retry failed sections</button>` : ''}
+      ${t.status === 'cancelled' ? `<button class="btn btn-sm" onclick="resumeCancelledTranscript(${t.id})">Resume</button>` : ''}
       <button class="btn btn-sm btn-ghost" onclick="summarizeTranscript()">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:14px;height:14px"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
         Summarize
@@ -1604,6 +1647,18 @@ async function retryFailedChunks(id) {
     setTimeout(() => navigate('detail', id), 500);
   } catch (e) {
     toast('Retry failed: ' + (e.message || e), 'error');
+  }
+}
+
+async function resumeCancelledTranscript(id) {
+  try {
+    const r = await fetch(API + '/api/transcripts/' + id + '/resume', { method: 'POST' });
+    if (!r.ok) throw new Error(await r.text());
+    const body = await r.json();
+    toast('Resuming ' + body.resumed + ' section(s)...', 'success');
+    setTimeout(() => navigate('detail', id), 500);
+  } catch (e) {
+    toast('Resume failed: ' + (e.message || e), 'error');
   }
 }
 
