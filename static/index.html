@@ -625,6 +625,22 @@ svg{display:block;flex-shrink:0}
           <p style="font-size:11px;color:var(--text-muted);margin-top:8px">Backend: <span id="aboutBackend">FastAPI + SQLite</span></p>
         </div>
         <div class="set-card">
+          <h4>Audio & Chunking</h4>
+          <div class="cfg-f" style="margin-bottom:10px">
+            <label>Bitrate (kbps)</label>
+            <input type="number" id="setBitrate" style="width:100%;padding:7px 10px;font-size:12px;background:var(--bg-page);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text-primary);font-family:var(--font);outline:none">
+          </div>
+          <div class="cfg-f" style="margin-bottom:10px">
+            <label>Chunk size threshold (MB)</label>
+            <input type="number" id="setChunkThreshold" style="width:100%;padding:7px 10px;font-size:12px;background:var(--bg-page);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text-primary);font-family:var(--font);outline:none">
+          </div>
+          <div class="cfg-f" style="margin-bottom:16px">
+            <label>Max concurrent chunk uploads</label>
+            <input type="number" id="setMaxConcurrent" style="width:100%;padding:7px 10px;font-size:12px;background:var(--bg-page);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text-primary);font-family:var(--font);outline:none">
+          </div>
+          <button class="btn btn-sm btn-primary" onclick="saveAudioSettings()">Save</button>
+        </div>
+        <div class="set-card">
           <h4>Account</h4>
           <button class="btn btn-sm" onclick="logout()">Log out</button>
         </div>
@@ -1363,6 +1379,36 @@ async function loadTxModels() {
   }
 }
 
+async function loadAudioSettings() {
+  try {
+    const r = await fetch(API + '/api/settings');
+    if (!r.ok) return;
+    const s = await r.json();
+    document.getElementById('setBitrate').value = s.bitrate_kbps;
+    document.getElementById('setChunkThreshold').value = s.chunk_threshold_mb;
+    document.getElementById('setMaxConcurrent').value = s.max_concurrent_chunks;
+  } catch (e) {}
+}
+
+async function saveAudioSettings() {
+  try {
+    const body = {
+      bitrate_kbps: parseInt(document.getElementById('setBitrate').value, 10),
+      chunk_threshold_mb: parseInt(document.getElementById('setChunkThreshold').value, 10),
+      max_concurrent_chunks: parseInt(document.getElementById('setMaxConcurrent').value, 10),
+    };
+    const r = await fetch(API + '/api/settings', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!r.ok) throw new Error(await r.text());
+    toast('Settings saved', 'success');
+  } catch (e) {
+    toast('Failed to save settings: ' + (e.message || e), 'error');
+  }
+}
+
 /* ═══════════════════════════════════════════════════════
    THEME
    ═══════════════════════════════════════════════════════ */
@@ -1427,7 +1473,7 @@ document.querySelectorAll('.nav-item[data-page]').forEach(item => {
     const page = item.dataset.page;
     if (page === 'transcripts') { navigate(page); loadTranscripts(); }
     else if (page === 'voices') { navigate(page); loadVoices(); }
-    else if (page === 'settings') { navigate(page); loadSettings(); }
+    else if (page === 'settings') { navigate(page); loadSettings(); loadAudioSettings(); }
     else if (page === 'dashboard') { navigate(page); loadDashboard(); }
     else if (page === 'transcribe') { navigate(page); setTimeout(loadTxModels, 100); }
     else { navigate(page); }
