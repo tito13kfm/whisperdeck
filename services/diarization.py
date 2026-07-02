@@ -118,7 +118,7 @@ class DiarizationService:
 
         pipeline = Pipeline.from_pretrained(
             "pyannote/speaker-diarization-3.1",
-            use_auth_token=hf_token or os.environ.get("HUGGINGFACE_TOKEN", None),
+            token=hf_token or os.environ.get("HUGGINGFACE_TOKEN", None),
         )
 
         if num_speakers:
