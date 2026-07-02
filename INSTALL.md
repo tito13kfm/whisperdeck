@@ -14,8 +14,8 @@ winget install Gyan.FFmpeg
 ```
 or `choco install ffmpeg`. Verify with `ffmpeg -version` in a new terminal.
 
-(Not needed for the **Built-in** provider — it decodes locally with no
-upload step.)
+(Not needed for the **Built-in** or **Moonshine** providers — both decode
+locally with no upload step.)
 
 ## 1. Python
 
@@ -61,6 +61,22 @@ Transcribe page provider to **Built-in (Whisper Tiny)** and pick a bigger
 model (e.g. `large-v3`) from the model dropdown — but expect it to be slow
 on CPU. That path requires `pip install faster-whisper` (not in
 requirements.txt, since Groq is the recommended default).
+
+Alternatively, for offline/local transcription with meaningfully better
+accuracy than Built-in's `tiny` model, switch the Transcribe page provider
+to **Moonshine** instead. It runs a small on-device model (English-only)
+that beats Whisper Large on word-error-rate at a fraction of the parameter
+count, and needs no GPU. Setup:
+
+```
+.venv\Scripts\python.exe -m pip install moonshine-voice
+```
+
+(not in `requirements.txt`, same as `faster-whisper` — optional, install
+only if you want this provider). No API key needed. The model for your
+chosen size (`tiny`, `tiny-streaming`, `base` — default, `small-streaming`,
+`medium-streaming`) downloads automatically on first transcription and is
+cached for subsequent runs.
 
 ## 4. Diarization — recommended: pyannote.audio
 
