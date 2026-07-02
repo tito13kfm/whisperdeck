@@ -809,7 +809,8 @@ async function loadDashboard() {
       c.innerHTML = '<div class="empty-state" style="padding:30px 10px"><h3>No transcripts yet</h3><p style="font-size:12px">Upload audio to get started with transcription.</p></div>';
     } else {
       c.innerHTML = list.map(t => {
-        const statusClass = t.status === 'completed' ? 'status-done' : t.status === 'processing' ? 'status-processing' : 'status-error';
+        const sc = t.status === 'completed' ? 'var(--success-subtle)' : t.status === 'processing' ? 'var(--accent-subtle)' : t.status === 'cancelled' ? 'var(--warning-subtle)' : 'var(--error-subtle)';
+        const sc2 = t.status === 'completed' ? 'var(--success)' : t.status === 'processing' ? 'var(--accent)' : t.status === 'cancelled' ? 'var(--warning)' : 'var(--error)';
         let statusLabel = t.status === 'completed' ? 'Done' : t.status === 'processing' ? 'Processing' : t.status === 'cancelled' ? 'Cancelled' : 'Failed';
         if (t.status === 'processing' && t.queue_status) {
           if (t.queue_status.state === 'transcribing') statusLabel = t.queue_status.chunks_done + '/' + t.queue_status.chunks_total;
@@ -822,7 +823,7 @@ async function loadDashboard() {
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2"/></svg>
           </div>
           <div class="ci-body"><div class="ci-title">${escapeHtml(t.title)}</div><div class="ci-meta">${t.provider} · ${t.model} · ${timeAgo(t.created_at)}</div></div>
-          <span class="ci-status ${statusClass}">${statusLabel}</span>
+          <span class="ci-status" style="background:${sc};color:${sc2}">${statusLabel}</span>
           <span class="ci-badge">${minDur}</span>
         </div>`;
       }).join('');
@@ -1162,9 +1163,14 @@ async function loadTranscripts() {
       return;
     }
     c.innerHTML = list.map(t => {
-      const sc = t.status === 'completed' ? 'var(--success-subtle)' : t.status === 'processing' ? 'var(--accent-subtle)' : 'var(--error-subtle)';
-      const sc2 = t.status === 'completed' ? 'var(--success)' : t.status === 'processing' ? 'var(--accent)' : 'var(--error)';
-      const sl = t.status === 'completed' ? 'Done' : t.status === 'processing' ? 'Processing' : 'Failed';
+      const sc = t.status === 'completed' ? 'var(--success-subtle)' : t.status === 'processing' ? 'var(--accent-subtle)' : t.status === 'cancelled' ? 'var(--warning-subtle)' : 'var(--error-subtle)';
+      const sc2 = t.status === 'completed' ? 'var(--success)' : t.status === 'processing' ? 'var(--accent)' : t.status === 'cancelled' ? 'var(--warning)' : 'var(--error)';
+      let sl = t.status === 'completed' ? 'Done' : t.status === 'processing' ? 'Processing' : t.status === 'cancelled' ? 'Cancelled' : 'Failed';
+      if (t.status === 'processing' && t.queue_status) {
+        if (t.queue_status.state === 'transcribing') sl = t.queue_status.chunks_done + '/' + t.queue_status.chunks_total;
+        else if (t.queue_status.state === 'rate_limited') sl = 'Rate limited';
+        else if (t.queue_status.state === 'queued') sl = 'Queued';
+      }
       const md = t.duration_seconds ? Math.floor(t.duration_seconds/60)+'m' : '—';
       return `<div class="card-item" onclick="navigate('detail',${t.id})">
         <div class="ci-icon" style="background:${sc};color:${sc2}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2"/></svg></div>
