@@ -121,8 +121,9 @@ class DiarizationService:
                 "Install it with: pip install pyannote.audio torch"
             )
 
+        import torch
+        import soundfile as sf
         from pyannote.audio import Pipeline
-        from pyannote.core import Segment
 
         pipeline = Pipeline.from_pretrained(
             "pyannote/speaker-diarization-3.1",
@@ -132,10 +133,18 @@ class DiarizationService:
         if num_speakers:
             pipeline.instantiate({"clustering": {"threshold": 0.7}})
 
-        diarization = pipeline(audio_path, num_speakers=num_speakers)
+        # Load audio ourselves and hand pyannote a waveform tensor rather
+        # than a file path — pyannote's built-in decoder requires torchcodec,
+        # which needs FFmpeg's shared-library build; Windows installs
+        # commonly have the static "full_build" instead, so the decoder
+        # fails to load its native DLLs.
+        data, sample_rate = sf.read(audio_path, dtype="float32", always_2d=True)
+        waveform = torch.from_numpy(data.T)  # (channel, time)
+
+        output = pipeline({"waveform": waveform, "sample_rate": sample_rate}, num_speakers=num_speakers)
 
         result_segments = []
-        for turn, _, speaker in diarization.itertracks(yield_label=True):
+        for turn, _, speaker in output.speaker_diarization.itertracks(yield_label=True):
             result_segments.append(DiarizationSegment(
                 start=turn.start,
                 end=turn.end,
