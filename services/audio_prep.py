@@ -166,7 +166,13 @@ async def chunk_audio(
         result = subprocess.run(cmd, capture_output=True, text=True)
         if result.returncode != 0:
             raise AudioPrepError(f"ffmpeg chunk split failed: {result.stderr[-2000:]}")
-        return {"index": index, "path": chunk_path, "start_time": seg_start, "end_time": seg_end}
+        # Report the chunk's ACTUAL cut boundaries (including pre-roll
+        # overlap on non-first chunks), not the nominal segment boundaries —
+        # queue.merge_chunk_results offsets local segment timestamps by
+        # job.start_time, so this must be the real start of the audio file
+        # on disk or every downstream absolute timestamp drifts by
+        # overlap_seconds.
+        return {"index": index, "path": chunk_path, "start_time": cut_start, "end_time": cut_end}
 
     def _run_all():
         result = []

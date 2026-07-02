@@ -194,13 +194,13 @@ def _retry_eligible(job) -> bool:
 # has no other job's uncommitted dirty state. If you add a second
 # mutation after the await, or move the commit, you MUST commit before
 # any await or use a separate session per job instead.
-async def _run_chunk_job(db, job, provider_config: dict, provider_name: str) -> None:
+async def _run_chunk_job(db, job, provider_config: dict, provider_name: str, language: str) -> None:
     job.status = "running"
     job.attempts += 1
     db.commit()
     try:
         provider = get_provider(provider_name, provider_config)
-        result = await provider.transcribe(job.audio_path, language="en", temperature=0.0)
+        result = await provider.transcribe(job.audio_path, language=language, temperature=0.0)
         job.result_json = {
             "segments": [
                 {"start": s.start, "end": s.end, "text": s.text, "speaker": s.speaker, "confidence": s.confidence}
@@ -240,7 +240,14 @@ async def _finalize_if_done(db, transcript_id: int, diarization_service) -> None
     transcript.segments = segments
     transcript.full_text = full_text
     transcript.duration_seconds = max((j.end_time for j in jobs), default=0)
-    transcript.status = "partial" if any(j.status == "failed" for j in jobs) else "completed"
+    completed_count = sum(1 for j in jobs if j.status == "completed")
+    failed_count = sum(1 for j in jobs if j.status == "failed")
+    if failed_count == 0:
+        transcript.status = "completed"
+    elif completed_count == 0:
+        transcript.status = "failed"
+    else:
+        transcript.status = "partial"
     transcript.updated_at = datetime.datetime.utcnow()
 
     if transcript.diarize_requested and segments and transcript.audio_path:
@@ -324,7 +331,8 @@ async def queue_worker_tick(SessionLocal, diarization_service) -> None:
                 # this tick — safe only because _run_chunk_job commits before its await
                 # point (see the safety invariant comment on _run_chunk_job itself).
                 await asyncio.gather(*[
-                    _run_chunk_job(db, job, provider_config, transcript.provider) for job in dispatched
+                    _run_chunk_job(db, job, provider_config, transcript.provider, transcript.language)
+                    for job in dispatched
                 ])
 
             await _finalize_if_done(db, transcript_id, diarization_service)
