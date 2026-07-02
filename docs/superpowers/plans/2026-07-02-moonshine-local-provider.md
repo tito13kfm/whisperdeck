@@ -37,7 +37,7 @@
 - Consumes: `BaseProvider`, `TranscriptionResult`, `ProviderError`, `Segment` from `backends/base.py` (`backends/base.py:1-77`, already read — signatures confirmed above).
 - Produces: `MoonshineProvider` class, importable as `from .moonshine import MoonshineProvider`; registered under `PROVIDER_REGISTRY["moonshine"]`.
 
-- [ ] **Step 1: Write `backends/moonshine.py`**
+- [x] **Step 1: Write `backends/moonshine.py`**
 
 ```python
 """Moonshine local transcription provider — on-device ASR via moonshine-voice.
@@ -189,7 +189,7 @@ class MoonshineProvider(BaseProvider):
             }
 ```
 
-- [ ] **Step 2: Register in `backends/__init__.py`**
+- [x] **Step 2: Register in `backends/__init__.py`**
 
 Add the import (after the `builtin` import, `backends/__init__.py:18`):
 
@@ -236,7 +236,7 @@ __all__ = [
 ]
 ```
 
-- [ ] **Step 3: Treat Moonshine as local in `app.py`'s upload route**
+- [x] **Step 3: Treat Moonshine as local in `app.py`'s upload route**
 
 Add near the other module-level path constants (`app.py:37-47`):
 
@@ -268,19 +268,19 @@ to:
     if provider not in LOCAL_PROVIDERS and file_size > threshold_bytes:
 ```
 
-- [ ] **Step 4: Manual verification — provider loads and appears in the registry**
+- [x] **Step 4: Manual verification — provider loads and appears in the registry**
 
 Run: `.venv\Scripts\python.exe -c "from backends import list_providers, get_provider; print([p['id'] for p in list_providers()]); p = get_provider('moonshine', {}); print(p.model_name)"`
 
 Expected output: a list containing `'moonshine'`, and `base` printed on the next line (no traceback).
 
-- [ ] **Step 5: Manual verification — health check**
+- [x] **Step 5: Manual verification — health check**
 
 Run: `.venv\Scripts\python.exe -c "import asyncio; from backends import get_provider; p = get_provider('moonshine', {}); print(asyncio.run(p.check_health()))"`
 
 Expected output: `{'ok': True, 'model': 'base'}` (moonshine-voice is already installed in this venv from the spec investigation).
 
-- [ ] **Step 6: Manual verification — real transcription, first run (cold download) and second run (cached)**
+- [x] **Step 6: Manual verification — real transcription, first run (cold download) and second run (cached)**
 
 Find or record a short (5-10s) English `.wav` test file (reuse any existing sample under the repo, e.g. `moonshine_voice`'s bundled asset at `.venv\Lib\site-packages\moonshine_voice\assets\two_cities.wav` if no project sample exists). Run:
 
@@ -290,21 +290,21 @@ Find or record a short (5-10s) English `.wav` test file (reuse any existing samp
 
 Expected: first run prints download progress (or completes silently if `get_model_for_language`'s prefetch already cached it during earlier investigation this session), then prints `moonshine base en`, a non-empty transcript of recognizable English text, and a segment count > 0. Run the exact same command again — expected: no download activity (instant model load from cache), same transcript output.
 
-- [ ] **Step 7: Manual verification — MP3 input decodes correctly (moonshine now skips transcode, but must still handle non-WAV uploads users may pass directly to the API/tests)**
+- [x] **Step 7: Manual verification — MP3 input decodes correctly (moonshine now skips transcode, but must still handle non-WAV uploads users may pass directly to the API/tests)**
 
 Convert the same test wav to MP3 (`ffmpeg -i .venv\Lib\site-packages\moonshine_voice\assets\two_cities.wav two_cities_test.mp3`) and run the same transcribe one-liner against the `.mp3` path. Expected: succeeds, non-empty transcript (confirms `soundfile` 1.2.2's MP3 decode support handles the format even though moonshine no longer goes through `transcode_for_upload`).
 
-- [ ] **Step 8: Manual verification — `builtin` provider unaffected**
+- [x] **Step 8: Manual verification — `builtin` provider unaffected**
 
 Run: `.venv\Scripts\python.exe -c "from backends import get_provider; p = get_provider('builtin', {}); print(p.model_name, p.SUPPORTED_MODELS[:3])"`
 
 Expected: `tiny ['tiny', 'tiny.en', 'base']` — unchanged from before this task.
 
-- [ ] **Step 9: Manual verification — app.py still imports and starts cleanly**
+- [x] **Step 9: Manual verification — app.py still imports and starts cleanly**
 
 Run: `.venv\Scripts\python.exe -c "import app"` — expected: no traceback (confirms `LOCAL_PROVIDERS` and the two edited conditionals are syntactically and semantically sound).
 
-- [ ] **Step 10: Commit**
+- [x] **Step 10: Commit**
 
 ```bash
 git add backends/moonshine.py backends/__init__.py app.py
@@ -322,7 +322,7 @@ git commit -m "feat: add Moonshine local transcription provider"
 - Consumes: nothing (docs-only).
 - Produces: nothing consumed by later tasks.
 
-- [ ] **Step 1: Add a Moonshine subsection to `INSTALL.md`'s transcription section**
+- [x] **Step 1: Add a Moonshine subsection to `INSTALL.md`'s transcription section**
 
 Insert immediately after the existing "Built-in (Whisper Tiny)" paragraph, inside section `## 3. Transcription — recommended for noisy meetings / heavy accents` (`INSTALL.md:59-63`):
 
@@ -345,11 +345,11 @@ chosen size (`tiny`, `tiny-streaming`, `base` — default, `small-streaming`,
 cached for subsequent runs.
 ```
 
-- [ ] **Step 2: Manual verification**
+- [x] **Step 2: Manual verification**
 
 Open `INSTALL.md` and confirm the new subsection reads correctly in context (no broken markdown, fits the surrounding section's tone).
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add INSTALL.md
