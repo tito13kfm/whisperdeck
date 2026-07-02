@@ -10,6 +10,7 @@ DEFAULT_SETTINGS = {
     "bitrate_kbps": 128,
     "chunk_threshold_mb": 20,
     "max_concurrent_chunks": 4,
+    "hf_token": "",
 }
 
 

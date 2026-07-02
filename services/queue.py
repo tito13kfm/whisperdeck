@@ -253,9 +253,12 @@ async def _finalize_if_done(db, transcript_id: int, diarization_service) -> None
     if transcript.diarize_requested and segments and transcript.audio_path:
         try:
             if diarization_service._check_pyannote():
+                from services.settings import get_user_settings  # local import avoids a module-load cycle with app.py
+                user_settings = get_user_settings(db, transcript.user_id)
                 # num_speakers=None lets pyannote auto-detect the count.
                 result = await diarization_service.diarize_pyannote(
-                    transcript.audio_path, num_speakers=transcript.num_speakers
+                    transcript.audio_path, num_speakers=transcript.num_speakers,
+                    hf_token=user_settings.get("hf_token"),
                 )
             else:
                 # Heuristic fallback can't auto-detect — needs a real

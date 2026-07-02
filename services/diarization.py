@@ -100,8 +100,13 @@ class DiarizationService:
         self,
         audio_path: str,
         num_speakers: Optional[int] = None,
+        hf_token: Optional[str] = None,
     ) -> DiarizationResult:
-        """Diarize using pyannote.audio (requires torch + pyannote.audio installed)."""
+        """Diarize using pyannote.audio (requires torch + pyannote.audio installed).
+
+        hf_token is the caller's HuggingFace read token (pyannote's models
+        are gated). Falls back to the HUGGINGFACE_TOKEN env var if not
+        passed, for backwards compatibility with the old setup method."""
         if not self.pyannote_available:
             raise ImportError(
                 "pyannote.audio is not installed. "
@@ -113,7 +118,7 @@ class DiarizationService:
 
         pipeline = Pipeline.from_pretrained(
             "pyannote/speaker-diarization-3.1",
-            use_auth_token=os.environ.get("HUGGINGFACE_TOKEN", None),
+            use_auth_token=hf_token or os.environ.get("HUGGINGFACE_TOKEN", None),
         )
 
         if num_speakers:

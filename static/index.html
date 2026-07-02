@@ -644,6 +644,15 @@ svg{display:block;flex-shrink:0}
           <button class="btn btn-sm btn-primary" onclick="saveAudioSettings()">Save</button>
         </div>
         <div class="set-card">
+          <h4>Diarization</h4>
+          <div class="cfg-f" style="margin-bottom:6px">
+            <label>HuggingFace token</label>
+            <input type="password" id="setHfToken" placeholder="hf_..." style="width:100%;padding:7px 10px;font-size:12px;background:var(--bg-page);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text-primary);font-family:var(--font);outline:none">
+          </div>
+          <p style="font-size:11px;color:var(--text-muted);margin-bottom:10px">Required for pyannote speaker diarization. Accept the terms on <a href="https://huggingface.co/pyannote/speaker-diarization-3.1" target="_blank">pyannote/speaker-diarization-3.1</a> and <a href="https://huggingface.co/pyannote/segmentation-3.0" target="_blank">pyannote/segmentation-3.0</a>, then create a read token at <a href="https://huggingface.co/settings/tokens" target="_blank">huggingface.co/settings/tokens</a>.</p>
+          <button class="btn btn-sm btn-primary" onclick="saveHfToken()">Save</button>
+        </div>
+        <div class="set-card">
           <h4>Account</h4>
           <button class="btn btn-sm" onclick="logout()">Log out</button>
         </div>
@@ -1392,7 +1401,22 @@ async function loadAudioSettings() {
     document.getElementById('setBitrate').value = s.bitrate_kbps;
     document.getElementById('setChunkThreshold').value = s.chunk_threshold_mb;
     document.getElementById('setMaxConcurrent').value = s.max_concurrent_chunks;
+    document.getElementById('setHfToken').value = s.hf_token || '';
   } catch (e) {}
+}
+
+async function saveHfToken() {
+  try {
+    const r = await fetch(API + '/api/settings', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ hf_token: document.getElementById('setHfToken').value.trim() }),
+    });
+    if (!r.ok) throw new Error(await r.text());
+    toast('HuggingFace token saved', 'success');
+  } catch (e) {
+    toast('Failed to save token: ' + (e.message || e), 'error');
+  }
 }
 
 async function saveAudioSettings() {

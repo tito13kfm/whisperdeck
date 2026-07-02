@@ -438,7 +438,7 @@ async def transcribe_audio(
                 if diarization_service._check_pyannote():
                     # num_speakers=None lets pyannote auto-detect the count.
                     result = await diarization_service.diarize_pyannote(
-                        str(save_path), num_speakers=num_speakers
+                        str(save_path), num_speakers=num_speakers, hf_token=user_settings.get("hf_token")
                     )
                 else:
                     # Heuristic fallback can't auto-detect — needs a real
@@ -536,6 +536,8 @@ async def diarize_audio(
     file: UploadFile = File(...),
     num_speakers: int = Form(2),
     method: str = Form("heuristic"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     """Run speaker diarization on an audio file."""
     file_ext = os.path.splitext(file.filename or "audio.mp3")[1] or ".mp3"
@@ -548,8 +550,9 @@ async def diarize_audio(
 
     try:
         if method == "pyannote" and diarization_service._check_pyannote():
+            user_settings = get_user_settings(db, current_user.id)
             result = await diarization_service.diarize_pyannote(
-                str(save_path), num_speakers=num_speakers
+                str(save_path), num_speakers=num_speakers, hf_token=user_settings.get("hf_token")
             )
         else:
             result = await diarization_service.diarize_heuristic(
