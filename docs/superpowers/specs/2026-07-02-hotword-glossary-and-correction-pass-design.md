@@ -106,6 +106,22 @@ Behavior:
   `transcript.correction_error = str(e)`, leave `corrected_text` null. Do not
   raise — matches the existing diarization non-fatal pattern in `app.py`.
 
+Store which provider/model produced the current `corrected_text` in a new
+`Transcript.correction_model` column (e.g. `"groq/llama-3.3-70b-versatile"`),
+so the UI can show what generated the current correction and users can compare
+across reruns.
+
+**Manual re-run endpoint:** `POST /api/transcripts/{transcript_id}/correct`,
+mirroring the existing manual `POST /api/transcripts/{transcript_id}/summarize`
+route — same `provider`/`model` form fields, same `ProviderConfig` lookup
+pattern. Lets a user rerun correction against the same raw `full_text` with a
+different model at any time (transcript must already be `completed`/`partial`,
+same as summarize's status check), to compare which model/provider produces
+the best correction for their audio. Each rerun overwrites `corrected_text`
+and `correction_model` with the new result — `full_text` is never touched, so
+reruns are always working from the same untouched source, and are free to try
+as many models as the user has keys for.
+
 Called automatically once `transcript.status == "completed"`, gated by the
 `auto_correct` user setting (default `True`):
 
@@ -129,6 +145,7 @@ New columns on `Transcript`:
 ```python
 corrected_text = Column(Text, nullable=True)
 correction_error = Column(Text, nullable=True)
+correction_model = Column(String(128), nullable=True)  # e.g. "groq/llama-3.3-70b-versatile"
 ```
 
 `full_text` and `segments` remain the untouched, authoritative provider output.
@@ -154,7 +171,11 @@ the existing `PUT /api/settings` route, no new settings plumbing needed.
   toggle back to the raw `full_text`. When `correction_error` is present (and
   no `corrected_text`), show raw text with no error surfaced to the user
   (best-effort feature, silent on failure — consistent with diarization's
-  non-fatal failure handling).
+  non-fatal failure handling). Show `correction_model` alongside the corrected
+  text (small caption, e.g. "Corrected with groq/llama-3.3-70b-versatile") and
+  a "Try a different model" control (provider + model picker, same pattern as
+  the existing manual summarize control) that calls the new
+  `POST /api/transcripts/{id}/correct` endpoint.
 
 ## Error handling
 
@@ -177,3 +198,6 @@ the existing `PUT /api/settings` route, no new settings plumbing needed.
 - Manual: submit a `context_doc` with a distinctive name, confirm it lands in
   `hotword_entries` with `source="extracted"`, confirm it appears in the next
   correction pass's prompt.
+- Integration: `POST /api/transcripts/{id}/correct` with a different
+  provider/model than the automatic pass used, confirm `corrected_text` and
+  `correction_model` are overwritten and `full_text` is untouched.
