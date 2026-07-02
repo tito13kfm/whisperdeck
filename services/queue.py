@@ -442,6 +442,20 @@ async def _finalize_if_done(db, transcript_id: int, diarization_service) -> None
         except Exception as e:
             print(f"[queue] non-fatal diarization failure for transcript {transcript_id}: {e}")
 
+        # Diarization awaits above can take several seconds, during which
+        # a /cancel request on another request-handling coroutine (same
+        # event loop, separate db session) can commit transcript.status =
+        # "cancelled" in the DB while this function's in-memory `transcript`
+        # object still holds an uncommitted "completed"/"partial"/"failed".
+        # Re-read the committed status before this function's own commit —
+        # if a cancel landed in that window, discard the completion we just
+        # computed so we don't overwrite "cancelled" (last-write-wins would
+        # otherwise silently defeat the cancel, the same failure mode this
+        # fix closes for the non-diarization path).
+        db.expire(transcript, ["status"])
+        if transcript.status == "cancelled":
+            return
+
     db.commit()
 
 
