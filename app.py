@@ -416,6 +416,10 @@ async def transcribe_audio(
             title=title or file.filename,
             num_speakers=num_speakers,
         )
+        # Real processed size, not the raw upload size — the sum of all
+        # chunk files, since that's what actually gets sent to the provider.
+        transcript.processed_size_bytes = sum(os.path.getsize(c["path"]) for c in chunks)
+        db.commit()
         create_chunk_jobs(db, transcript.id, chunks)
         return _serialize_transcript(transcript)
 
@@ -431,6 +435,8 @@ async def transcribe_audio(
             model=model or provider_config.get("default_model"),
             temperature=temperature,
         )
+        transcript.processed_size_bytes = file_size
+        db.commit()
 
         # Run diarization if requested
         if diarize and transcript.segments:
