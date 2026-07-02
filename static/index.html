@@ -610,6 +610,19 @@ svg{display:block;flex-shrink:0}
           <h4><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></svg>Providers</h4>
           <p>Configure API keys for transcription backends. Keys are stored locally.</p>
           <div id="providerList"></div>
+          <div class="prov-item">
+            <div class="pv-icon" style="background:linear-gradient(135deg,#f59e0b,#d97706)">HF</div>
+            <div class="pv-info">
+              <div class="pv-name">HuggingFace</div>
+              <div class="pv-desc">Required for pyannote speaker diarization. Accept terms on <a href="https://huggingface.co/pyannote/speaker-diarization-3.1" target="_blank">pyannote/speaker-diarization-3.1</a> and <a href="https://huggingface.co/pyannote/segmentation-3.0" target="_blank">pyannote/segmentation-3.0</a>, then create a token at <a href="https://huggingface.co/settings/tokens" target="_blank">huggingface.co/settings/tokens</a>.</div>
+            </div>
+            <div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px">
+              <div class="pv-key">
+                <input type="password" id="setHfToken" placeholder="hf_..." onchange="saveHfToken()" style="width:150px">
+                <span class="ks off" id="ks-hftoken"></span>
+              </div>
+            </div>
+          </div>
         </div>
         <div class="set-card">
           <h4><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="9" y1="21" x2="9" y2="9"/></svg>General</h4>
@@ -642,15 +655,6 @@ svg{display:block;flex-shrink:0}
             <input type="number" id="setMaxConcurrent" style="width:100%;padding:7px 10px;font-size:12px;background:var(--bg-page);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text-primary);font-family:var(--font);outline:none">
           </div>
           <button class="btn btn-sm btn-primary" onclick="saveAudioSettings()">Save</button>
-        </div>
-        <div class="set-card">
-          <h4>Diarization</h4>
-          <div class="cfg-f" style="margin-bottom:6px">
-            <label>HuggingFace token</label>
-            <input type="password" id="setHfToken" placeholder="hf_..." style="width:100%;padding:7px 10px;font-size:12px;background:var(--bg-page);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text-primary);font-family:var(--font);outline:none">
-          </div>
-          <p style="font-size:11px;color:var(--text-muted);margin-bottom:10px">Required for pyannote speaker diarization. Accept the terms on <a href="https://huggingface.co/pyannote/speaker-diarization-3.1" target="_blank">pyannote/speaker-diarization-3.1</a> and <a href="https://huggingface.co/pyannote/segmentation-3.0" target="_blank">pyannote/segmentation-3.0</a>, then create a read token at <a href="https://huggingface.co/settings/tokens" target="_blank">huggingface.co/settings/tokens</a>.</p>
-          <button class="btn btn-sm btn-primary" onclick="saveHfToken()">Save</button>
         </div>
         <div class="set-card">
           <h4>Account</h4>
@@ -1276,6 +1280,7 @@ async function loadSettings() {
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:10px;height:10px"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
             ${zeroSetup ? 'Select model' : 'Fetch models'}
           </button>
+          <div id="model-wrap-${p.id}" style="font-size:10px;color:var(--text-muted)"></div>
         </div>
       </div>`;
     }).join('');
@@ -1291,6 +1296,10 @@ async function loadSettings() {
       const urlInput = document.getElementById('url-' + cfg.name);
       if (urlInput && cfg.api_url) {
         urlInput.value = cfg.api_url;
+      }
+      const modelWrap = document.getElementById('model-wrap-' + cfg.name);
+      if (modelWrap && cfg.default_model) {
+        modelWrap.textContent = 'Default: ' + cfg.default_model;
       }
     });
   } catch (e) {}
@@ -1330,14 +1339,15 @@ async function fetchProviderModels(name) {
   try {
     const r = await fetch(API + '/api/providers/' + name + '/models');
     const data = await r.json();
+    const wrap = document.getElementById('model-wrap-' + name);
     if (data.models && data.models.length > 0) {
+      const cfgR = await fetch(API + '/api/providers/' + name);
+      const cfg = await cfgR.json();
+      wrap.innerHTML = '<select onchange="saveDefaultModel(\'' + name + '\', this.value)" style="font-size:10px;padding:2px 4px;background:var(--bg-page);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text-primary)">' +
+        data.models.map(m =>
+          '<option value="' + escapeHtml(m) + '"' + (m === cfg.default_model ? ' selected' : '') + '>' + escapeHtml(m) + '</option>'
+        ).join('') + '</select>';
       toast(name + ': ' + data.models.length + ' models available', 'success');
-      // Show them in the transcribe model dropdown
-      const modelSelect = document.getElementById('txModel');
-      modelSelect.innerHTML = data.models.map(m =>
-        '<option value="' + escapeHtml(m) + '">' + escapeHtml(m) + '</option>'
-      ).join('');
-      navigate('transcribe');
     } else {
       toast(name + ': no models found', 'info');
     }
@@ -1346,6 +1356,19 @@ async function fetchProviderModels(name) {
   }
   btn.disabled = false;
   btn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:10px;height:10px"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg> Fetch models';
+}
+
+async function saveDefaultModel(name, model) {
+  try {
+    await fetch(API + '/api/providers/' + name, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ default_model: model }),
+    });
+    toast(name + ' default model set to ' + model, 'success');
+  } catch (e) {
+    toast('Failed to save default model: ' + (e.message || e), 'error');
+  }
 }
 
 async function loadTxModels() {
@@ -1384,8 +1407,9 @@ async function loadTxModels() {
   try {
     const r = await fetch(API + '/api/providers/' + provider + '/models');
     const data = await r.json();
+    const cfgForDefault = await fetch(API + '/api/providers/' + provider).then(r => r.json()).catch(() => ({}));
     modelSelect.innerHTML = data.models.map(m =>
-      '<option value="' + escapeHtml(m) + '">' + escapeHtml(m) + '</option>'
+      '<option value="' + escapeHtml(m) + '"' + (m === cfgForDefault.default_model ? ' selected' : '') + '>' + escapeHtml(m) + '</option>'
     ).join('');
     modelSelect.disabled = false;
   } catch (e) {
@@ -1402,17 +1426,20 @@ async function loadAudioSettings() {
     document.getElementById('setChunkThreshold').value = s.chunk_threshold_mb;
     document.getElementById('setMaxConcurrent').value = s.max_concurrent_chunks;
     document.getElementById('setHfToken').value = s.hf_token || '';
+    document.getElementById('ks-hftoken').className = 'ks ' + (s.hf_token ? 'on' : 'off');
   } catch (e) {}
 }
 
 async function saveHfToken() {
+  const val = document.getElementById('setHfToken').value.trim();
   try {
     const r = await fetch(API + '/api/settings', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ hf_token: document.getElementById('setHfToken').value.trim() }),
+      body: JSON.stringify({ hf_token: val }),
     });
     if (!r.ok) throw new Error(await r.text());
+    document.getElementById('ks-hftoken').className = 'ks ' + (val ? 'on' : 'off');
     toast('HuggingFace token saved', 'success');
   } catch (e) {
     toast('Failed to save token: ' + (e.message || e), 'error');
