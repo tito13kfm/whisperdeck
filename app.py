@@ -330,7 +330,7 @@ async def list_provider_models(name: str, db: Session = Depends(get_db), current
     except Exception as e:
         # Return defaults on failure
         default_map = {
-            "groq": ["whisper-large-v3", "whisper-large-v3-turbo", "distil-whisper-large-v3"],
+            "groq": ["whisper-large-v3-flash", "whisper-large-v3", "whisper-large-v3-turbo", "distil-whisper-large-v3"],
             "openai": ["whisper-1"],
             "replicate": ["varunp2k/whisper-large-v3-turbo", "openai/whisper"],
             "local": ["whisper-large-v3-turbo", "whisper-large-v3"],

@@ -61,8 +61,8 @@ def list_providers() -> list[dict]:
         {
             "id": "groq",
             "name": "Groq",
-            "description": "whisper-large-v3 · best accuracy on noisy/accented audio",
-            "default_model": "whisper-large-v3",
+            "description": "whisper-large-v3-flash · fast, strong accuracy on noisy/accented audio",
+            "default_model": "whisper-large-v3-flash",
             "needs_key": True,
             "key_prefix": "gsk_",
         },
