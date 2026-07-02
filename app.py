@@ -29,7 +29,7 @@ from services.transcription import TranscriptionService
 from services.diarization import DiarizationService
 from services.voice_id import VoiceIdentificationService
 from services.audio_prep import transcode_for_upload, AudioPrepError, chunk_audio
-from services.queue import create_chunk_jobs, retry_failed_chunks, queue_worker_loop, compute_queue_status
+from services.queue import create_chunk_jobs, retry_failed_chunks, queue_worker_loop, compute_queue_status, cancel_transcript_jobs, resume_cancelled_chunks
 from backends import list_providers, get_provider
 
 # ── App Setup ──────────────────────────────────────────────────────────────
@@ -535,6 +535,32 @@ async def retry_transcript_chunks(transcript_id: int, db: Session = Depends(get_
         raise HTTPException(status_code=404, detail="Transcript not found")
     count = retry_failed_chunks(db, transcript_id)
     return {"ok": True, "retried": count}
+
+
+@app.post("/api/transcripts/{transcript_id}/cancel")
+async def cancel_transcript(transcript_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    t = db.query(Transcript).filter(
+        Transcript.id == transcript_id, Transcript.user_id == current_user.id
+    ).first()
+    if not t:
+        raise HTTPException(status_code=404, detail="Transcript not found")
+    if t.status != "processing":
+        raise HTTPException(status_code=400, detail=f"Cannot cancel a transcript with status '{t.status}'")
+    count = cancel_transcript_jobs(db, transcript_id)
+    return {"ok": True, "cancelled": count}
+
+
+@app.post("/api/transcripts/{transcript_id}/resume")
+async def resume_transcript(transcript_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    t = db.query(Transcript).filter(
+        Transcript.id == transcript_id, Transcript.user_id == current_user.id
+    ).first()
+    if not t:
+        raise HTTPException(status_code=404, detail="Transcript not found")
+    if t.status != "cancelled":
+        raise HTTPException(status_code=400, detail=f"Cannot resume a transcript with status '{t.status}'")
+    count = resume_cancelled_chunks(db, transcript_id)
+    return {"ok": True, "resumed": count}
 
 
 # ── Diarization ───────────────────────────────────────────────────────────

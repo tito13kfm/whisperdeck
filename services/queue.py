@@ -272,6 +272,61 @@ def retry_failed_chunks(db, transcript_id: int) -> int:
     return len(failed)
 
 
+def cancel_transcript_jobs(db, transcript_id: int) -> int:
+    """Mark every still-pending job for this transcript as cancelled, so
+    the worker stops dispatching new work for it. Jobs already 'running'
+    are left alone — they're mid-flight to the provider and will finish
+    naturally; _finalize_if_done discards their result once they do (see
+    that function's cancelled-transcript branch). Returns how many
+    pending jobs were cancelled.
+
+    If nothing is left running after this call, the transcript is marked
+    cancelled immediately — otherwise the next tick's finalize pass
+    (queue_worker_tick, fixed in this same task to check ALL processing
+    transcripts) picks it up once the running job(s) finish."""
+    pending = (
+        db.query(TranscriptionJob)
+        .filter(TranscriptionJob.transcript_id == transcript_id, TranscriptionJob.status == "pending")
+        .all()
+    )
+    for job in pending:
+        job.status = "cancelled"
+    db.commit()
+
+    still_running = (
+        db.query(TranscriptionJob)
+        .filter(TranscriptionJob.transcript_id == transcript_id, TranscriptionJob.status == "running")
+        .count()
+    )
+    if still_running == 0:
+        transcript = db.query(Transcript).filter(Transcript.id == transcript_id).first()
+        if transcript:
+            transcript.status = "cancelled"
+            transcript.updated_at = datetime.datetime.utcnow()
+            db.commit()
+    return len(pending)
+
+
+def resume_cancelled_chunks(db, transcript_id: int) -> int:
+    """Reset every cancelled job for this transcript back to pending so
+    the worker picks it up again. Returns how many were reset."""
+    cancelled = (
+        db.query(TranscriptionJob)
+        .filter(TranscriptionJob.transcript_id == transcript_id, TranscriptionJob.status == "cancelled")
+        .all()
+    )
+    for job in cancelled:
+        job.status = "pending"
+        job.attempts = 0
+        job.error = None
+    if cancelled:
+        transcript = db.query(Transcript).filter(Transcript.id == transcript_id).first()
+        if transcript:
+            transcript.status = "processing"
+        db.commit()
+    return len(cancelled)
+
+
 def _retry_eligible(job) -> bool:
     if job.attempts >= MAX_ATTEMPTS:
         return False
@@ -328,6 +383,16 @@ async def _finalize_if_done(db, transcript_id: int, diarization_service) -> None
 
     transcript = db.query(Transcript).filter(Transcript.id == transcript_id).first()
     if not transcript:
+        return
+
+    if any(j.status == "cancelled" for j in jobs):
+        # Cancellation always wins: discard whatever any job produced
+        # (per the design's "result is simply discarded rather than
+        # merged") rather than partially merging results from jobs that
+        # happened to finish after cancel was requested.
+        transcript.status = "cancelled"
+        transcript.updated_at = datetime.datetime.utcnow()
+        db.commit()
         return
 
     segments, full_text = merge_chunk_results(jobs)
@@ -393,6 +458,18 @@ async def queue_worker_tick(SessionLocal, diarization_service) -> None:
         for job in pending:
             by_transcript.setdefault(job.transcript_id, []).append(job)
 
+        # Finalize-check every processing transcript, not just ones with
+        # pending jobs this tick. Needed for cancel: cancelling every
+        # pending job on a transcript that still has a job 'running'
+        # leaves it with zero pending jobs from then on, so it would never
+        # appear in by_transcript again — without this, it would never
+        # reach _finalize_if_done once that running job completes and
+        # would stay stuck at status='processing' forever.
+        processing_ids = {
+            row[0] for row in db.query(Transcript.id).filter(Transcript.status == "processing").all()
+        }
+        finalize_candidate_ids = set(by_transcript.keys()) | processing_ids
+
         for transcript_id, jobs in by_transcript.items():
             transcript = db.query(Transcript).filter(Transcript.id == transcript_id).first()
             if not transcript:
@@ -437,6 +514,14 @@ async def queue_worker_tick(SessionLocal, diarization_service) -> None:
                     for job in dispatched
                 ])
 
+            await _finalize_if_done(db, transcript_id, diarization_service)
+
+        for transcript_id in finalize_candidate_ids - set(by_transcript.keys()):
+            # Transcripts with no pending jobs this tick (e.g. everything
+            # still running from a prior tick, or already fully terminal
+            # apart from a status flip cancel_transcript_jobs deferred to
+            # here) still need a finalize check — see the comment above
+            # processing_ids for why this is necessary.
             await _finalize_if_done(db, transcript_id, diarization_service)
     finally:
         db.close()
