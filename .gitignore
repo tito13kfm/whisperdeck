@@ -6,3 +6,6 @@ run_out.log
 run_err.log
 test.mp4
 test_audio.mp3
+.claude/
+.serena/
+*.log
