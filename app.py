@@ -29,7 +29,7 @@ from services.transcription import TranscriptionService
 from services.diarization import DiarizationService
 from services.voice_id import VoiceIdentificationService
 from services.audio_prep import transcode_for_upload, AudioPrepError, chunk_audio
-from services.queue import create_chunk_jobs, retry_failed_chunks, queue_worker_loop
+from services.queue import create_chunk_jobs, retry_failed_chunks, queue_worker_loop, compute_queue_status
 from backends import list_providers, get_provider
 
 # ── App Setup ──────────────────────────────────────────────────────────────
@@ -119,7 +119,7 @@ def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
     return user
 
 
-def _serialize_transcript(t: Transcript) -> dict:
+def _serialize_transcript(db: Session, t: Transcript) -> dict:
     jobs = t.jobs or []
     job_progress = None
     if jobs:
@@ -145,6 +145,8 @@ def _serialize_transcript(t: Transcript) -> dict:
         "updated_at": t.updated_at.isoformat() if t.updated_at else None,
         "has_summary": t.summary is not None,
         "job_progress": job_progress,
+        "processed_size_bytes": t.processed_size_bytes,
+        "queue_status": compute_queue_status(db, t),
     }
 
 
@@ -421,7 +423,7 @@ async def transcribe_audio(
         transcript.processed_size_bytes = sum(os.path.getsize(c["path"]) for c in chunks)
         db.commit()
         create_chunk_jobs(db, transcript.id, chunks)
-        return _serialize_transcript(transcript)
+        return _serialize_transcript(db, transcript)
 
     try:
         transcript = await transcription_service.transcribe(
@@ -465,7 +467,7 @@ async def transcribe_audio(
                 # succeeds without speaker labels, but log so it's visible.
                 print(f"[diarization] non-fatal failure for transcript {transcript.id}: {e}")
 
-        return _serialize_transcript(transcript)
+        return _serialize_transcript(db, transcript)
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -481,7 +483,7 @@ async def list_transcripts(limit: int = 50, offset: int = 0, db: Session = Depen
         .limit(limit)
         .all()
     )
-    return [_serialize_transcript(t) for t in transcripts]
+    return [_serialize_transcript(db, t) for t in transcripts]
 
 
 @app.get("/api/transcripts/{transcript_id}")
@@ -491,7 +493,7 @@ async def get_transcript(transcript_id: int, db: Session = Depends(get_db), curr
     ).first()
     if not t:
         raise HTTPException(status_code=404, detail="Transcript not found")
-    return _serialize_transcript(t)
+    return _serialize_transcript(db, t)
 
 
 @app.delete("/api/transcripts/{transcript_id}")
@@ -521,7 +523,7 @@ async def update_transcript(transcript_id: int, data: dict = Body(...), db: Sess
         t.full_text = data["full_text"]
     t.updated_at = datetime.datetime.utcnow()
     db.commit()
-    return _serialize_transcript(t)
+    return _serialize_transcript(db, t)
 
 
 @app.post("/api/transcripts/{transcript_id}/retry-failed-chunks")

@@ -87,6 +87,100 @@ def has_budget(db, user_id: int, provider: str, additional_seconds: float) -> bo
     return (used_hour + additional_seconds) <= limits["ash"] and (used_day + additional_seconds) <= limits["asd"]
 
 
+def _oldest_contributing_timestamp(db, user_id: int, provider: str, window_seconds: int):
+    """Return the earliest updated_at among the rows compute_audio_seconds_used
+    would count for this user+provider within the trailing window_seconds —
+    i.e. the row whose usage will be the next to age out. Returns None if
+    nothing is currently contributing (budget isn't actually constrained)."""
+    cutoff = datetime.datetime.utcnow() - datetime.timedelta(seconds=window_seconds)
+
+    transcript_times = [
+        t.updated_at for t in db.query(Transcript).filter(
+            Transcript.user_id == user_id,
+            Transcript.provider == provider,
+            Transcript.status.in_(["completed", "partial"]),
+            Transcript.updated_at >= cutoff,
+        ).all()
+    ]
+    job_times = [
+        j.updated_at for j in (
+            db.query(TranscriptionJob)
+            .join(Transcript, TranscriptionJob.transcript_id == Transcript.id)
+            .filter(
+                Transcript.user_id == user_id,
+                Transcript.provider == provider,
+                Transcript.status.notin_(["completed", "partial"]),
+                TranscriptionJob.status.in_(["running", "completed"]),
+                TranscriptionJob.updated_at >= cutoff,
+            )
+            .all()
+        )
+    ]
+    all_times = transcript_times + job_times
+    return min(all_times) if all_times else None
+
+
+def estimate_resume_seconds(db, user_id: int, provider: str, additional_seconds: float) -> float:
+    """Best-effort estimate of when has_budget would next return True for a
+    job needing additional_seconds. Checks both the hourly (ash) and daily
+    (asd) windows — whichever is actually blocking — and returns how long
+    until the oldest row counted in that window ages out. Approximate: it
+    doesn't account for other jobs adding new usage before then, since this
+    is a UI estimate ("resuming in ~Nm"), not a scheduling guarantee."""
+    limits = PROVIDER_LIMITS.get(provider, DEFAULT_LIMITS)
+    now = datetime.datetime.utcnow()
+    candidates = []
+    for window_seconds, cap_key in ((3600, "ash"), (86400, "asd")):
+        used = compute_audio_seconds_used(db, user_id, provider, window_seconds)
+        if used + additional_seconds > limits[cap_key]:
+            oldest = _oldest_contributing_timestamp(db, user_id, provider, window_seconds)
+            if oldest:
+                expiry = oldest + datetime.timedelta(seconds=window_seconds)
+                candidates.append((expiry - now).total_seconds())
+    if not candidates:
+        return 0.0
+    return max(0.0, max(candidates))
+
+
+def compute_queue_status(db, transcript) -> Optional[dict]:
+    """Live status for a 'processing' transcript, computed on read (never
+    persisted) — tells the frontend WHY an upload looks like it's waiting:
+    actively transcribing a chunk, queued behind concurrency, or blocked on
+    the provider's rate-limit budget. Returns None once status isn't
+    'processing' anymore (terminal states carry their own meaning)."""
+    if transcript.status != "processing":
+        return None
+
+    jobs = db.query(TranscriptionJob).filter(TranscriptionJob.transcript_id == transcript.id).all()
+    if not jobs:
+        return None  # single-shot sync path never has job rows
+
+    chunks_done = sum(1 for j in jobs if j.status == "completed")
+    chunks_total = len(jobs)
+
+    if any(j.status == "running" for j in jobs):
+        return {"state": "transcribing", "chunks_done": chunks_done, "chunks_total": chunks_total}
+
+    pending = sorted((j for j in jobs if j.status == "pending"), key=lambda j: j.chunk_index)
+    if not pending:
+        # Everything left is "failed" awaiting its backoff window — not
+        # rate-limited, just waiting on the retry timer.
+        return {"state": "queued", "chunks_done": chunks_done, "chunks_total": chunks_total}
+
+    next_job = pending[0]
+    job_duration = next_job.end_time - next_job.start_time
+    if has_budget(db, transcript.user_id, transcript.provider, job_duration):
+        return {"state": "queued", "chunks_done": chunks_done, "chunks_total": chunks_total}
+
+    resume_in = estimate_resume_seconds(db, transcript.user_id, transcript.provider, job_duration)
+    return {
+        "state": "rate_limited",
+        "chunks_done": chunks_done,
+        "chunks_total": chunks_total,
+        "resume_in_seconds": round(resume_in),
+    }
+
+
 def _normalize(text: str) -> str:
     return " ".join(text.lower().split())
 
