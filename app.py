@@ -31,6 +31,7 @@ from services.voice_id import VoiceIdentificationService
 from services.audio_prep import transcode_for_upload, AudioPrepError, chunk_audio
 from services.queue import create_chunk_jobs, retry_failed_chunks, queue_worker_loop, compute_queue_status, cancel_transcript_jobs, resume_cancelled_chunks
 from services.hotwords import list_hotwords, add_hotword, delete_hotword
+from services.correction import extract_hotwords_from_doc, correct_transcript
 from backends import list_providers, get_provider
 
 # ── App Setup ──────────────────────────────────────────────────────────────
@@ -390,6 +391,7 @@ async def transcribe_audio(
     temperature: float = Form(0.0),
     diarize: bool = Form(False),
     num_speakers: Optional[int] = Form(None),
+    context_doc: Optional[str] = Form(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -429,6 +431,18 @@ async def transcribe_audio(
             "api_url": prov_cfg.api_url,
             "default_model": prov_cfg.default_model or "",
         }
+
+    if context_doc and context_doc.strip():
+        groq_cfg = db.query(ProviderConfig).filter(
+            ProviderConfig.user_id == current_user.id,
+            ProviderConfig.name == "groq",
+        ).first()
+        if groq_cfg and groq_cfg.api_key:
+            try:
+                await extract_hotwords_from_doc(db, current_user.id, context_doc, api_key=groq_cfg.api_key)
+            except Exception as e:
+                # Non-fatal: glossary-building side effect, never blocks transcription.
+                print(f"[correction] non-fatal hotword extraction failure: {e}")
 
     threshold_bytes = user_settings["chunk_threshold_mb"] * 1024 * 1024
     file_size = os.path.getsize(save_path)
