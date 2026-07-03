@@ -147,6 +147,9 @@ def _serialize_transcript(db: Session, t: Transcript) -> dict:
         "segments": t.segments or [],
         "speaker_count": t.speaker_count,
         "error": t.error,
+        "corrected_text": t.corrected_text,
+        "correction_error": t.correction_error,
+        "correction_model": t.correction_model,
         "created_at": t.created_at.isoformat() if t.created_at else None,
         "updated_at": t.updated_at.isoformat() if t.updated_at else None,
         "has_summary": t.summary is not None,
@@ -519,6 +522,19 @@ async def transcribe_audio(
                 # succeeds without speaker labels, but log so it's visible.
                 print(f"[diarization] non-fatal failure for transcript {transcript.id}: {e}")
 
+        # Post-hoc correction pass — best-effort, mirrors diarization's
+        # non-fatal handling. Uses groq by default, same as summarize().
+        if user_settings.get("auto_correct", True):
+            correction_cfg = db.query(ProviderConfig).filter(
+                ProviderConfig.user_id == current_user.id,
+                ProviderConfig.name == "groq",
+            ).first()
+            if correction_cfg and correction_cfg.api_key:
+                try:
+                    await correct_transcript(db, transcript, api_key=correction_cfg.api_key)
+                except Exception as e:
+                    print(f"[correction] non-fatal failure for transcript {transcript.id}: {e}")
+
         return _serialize_transcript(db, transcript)
 
     except Exception as e:
@@ -689,6 +705,34 @@ async def summarize_transcript(
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/transcripts/{transcript_id}/correct")
+async def correct_transcript_route(
+    transcript_id: int,
+    provider: str = Form("groq"),
+    model: str = Form("llama-3.3-70b-versatile"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Manually (re)run the correction pass, e.g. to try a different
+    provider/model against the same raw full_text."""
+    transcript = db.query(Transcript).filter(
+        Transcript.id == transcript_id, Transcript.user_id == current_user.id
+    ).first()
+    if not transcript:
+        raise HTTPException(status_code=404, detail="Transcript not found")
+    if transcript.status not in ("completed", "partial"):
+        raise HTTPException(status_code=400, detail=f"Transcript {transcript_id} is not completed")
+
+    prov_cfg = db.query(ProviderConfig).filter(
+        ProviderConfig.user_id == current_user.id,
+        ProviderConfig.name == provider,
+    ).first()
+    api_key = prov_cfg.api_key if prov_cfg else ""
+
+    await correct_transcript(db, transcript, api_key=api_key, provider_name=provider, model=model)
+    return _serialize_transcript(db, transcript)
 
 
 @app.get("/api/transcripts/{transcript_id}/summary")
