@@ -40,6 +40,9 @@ class Transcript(Base):
     diarize_requested = Column(Boolean, default=False)
     num_speakers = Column(Integer, nullable=True)  # None = auto-detect (pyannote only; heuristic fallback defaults to 2)
     processed_size_bytes = Column(Integer, nullable=True)  # post-transcode size (sum of chunk files if chunked) — NOT the raw upload size
+    corrected_text = Column(Text, nullable=True)
+    correction_error = Column(Text, nullable=True)
+    correction_model = Column(String(128), nullable=True)  # e.g. "groq/llama-3.3-70b-versatile"
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
 
@@ -64,6 +67,16 @@ class TranscriptionJob(Base):
     updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
 
     transcript = relationship("Transcript", back_populates="jobs")
+
+
+class HotwordEntry(Base):
+    __tablename__ = "hotword_entries"
+
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    term = Column(String(255), nullable=False)
+    source = Column(String(16), default="manual")  # "manual" | "extracted"
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
 
 
 class Summary(Base):
@@ -196,12 +209,12 @@ def init_db(db_path: str = "data/whisperdesk.db") -> tuple:
     migrated_tables = migrate_schema(engine)
     Base.metadata.create_all(engine)
     ensure_columns(engine, "users", {"settings": "JSON"})
-    ensure_columns(engine, "transcripts", {"audio_path": "TEXT", "diarize_requested": "BOOLEAN", "num_speakers": "INTEGER", "processed_size_bytes": "INTEGER"})
+    ensure_columns(engine, "transcripts", {"audio_path": "TEXT", "diarize_requested": "BOOLEAN", "num_speakers": "INTEGER", "processed_size_bytes": "INTEGER", "corrected_text": "TEXT", "correction_error": "TEXT", "correction_model": "TEXT"})
     SessionLocal = sessionmaker(bind=engine)
     return engine, SessionLocal, migrated_tables
 
 
 __all__ = [
-    "Base", "User", "Transcript", "Summary", "VoiceProfile", "ProviderConfig", "TranscriptionJob",
+    "Base", "User", "Transcript", "Summary", "VoiceProfile", "ProviderConfig", "TranscriptionJob", "HotwordEntry",
     "init_db", "migrate_schema", "backfill_user_id", "ensure_columns",
 ]

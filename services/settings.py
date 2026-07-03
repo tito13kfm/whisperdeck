@@ -15,6 +15,7 @@ DEFAULT_SETTINGS = {
     "chunk_threshold_mb": 20,
     "max_concurrent_chunks": 4,
     "hf_token": "",
+    "auto_correct": True,
 }
 
 
