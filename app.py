@@ -30,6 +30,7 @@ from services.diarization import DiarizationService
 from services.voice_id import VoiceIdentificationService
 from services.audio_prep import transcode_for_upload, AudioPrepError, chunk_audio
 from services.queue import create_chunk_jobs, retry_failed_chunks, queue_worker_loop, compute_queue_status, cancel_transcript_jobs, resume_cancelled_chunks
+from services.hotwords import list_hotwords, add_hotword, delete_hotword
 from backends import list_providers, get_provider
 
 # ── App Setup ──────────────────────────────────────────────────────────────
@@ -216,6 +217,39 @@ async def get_settings(db: Session = Depends(get_db), current_user: User = Depen
 @app.put("/api/settings")
 async def put_settings(data: dict = Body(...), db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     return update_user_settings(db, current_user.id, data)
+
+
+# ── Hotword Glossary ─────────────────────────────────────────────────────
+
+def _serialize_hotword(h) -> dict:
+    return {
+        "id": h.id,
+        "term": h.term,
+        "source": h.source,
+        "created_at": h.created_at.isoformat() if h.created_at else None,
+    }
+
+
+@app.get("/api/hotwords")
+async def get_hotwords(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    return [_serialize_hotword(h) for h in list_hotwords(db, current_user.id)]
+
+
+@app.post("/api/hotwords")
+async def create_hotword(data: dict = Body(...), db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    term = (data.get("term") or "").strip()
+    if not term:
+        raise HTTPException(status_code=400, detail="term is required")
+    entry = add_hotword(db, current_user.id, term)
+    return _serialize_hotword(entry)
+
+
+@app.delete("/api/hotwords/{hotword_id}")
+async def remove_hotword(hotword_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    deleted = delete_hotword(db, current_user.id, hotword_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Hotword not found")
+    return {"ok": True}
 
 
 # ── API Routes ────────────────────────────────────────────────────────────
