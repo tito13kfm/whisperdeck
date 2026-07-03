@@ -62,3 +62,12 @@ def test_delete_hotword_refuses_other_users_entry(db_session):
 def test_delete_hotword_returns_false_for_missing_id(db_session):
     user = _make_user(db_session)
     assert delete_hotword(db_session, user.id, 9999) is False
+
+
+def test_add_hotword_treats_percent_and_underscore_as_literal_characters(db_session):
+    user = _make_user(db_session)
+    aws = add_hotword(db_session, user.id, "AWS")
+    literal = add_hotword(db_session, user.id, "A%S")
+
+    assert literal.id != aws.id
+    assert {e.term for e in list_hotwords(db_session, user.id)} == {"AWS", "A%S"}

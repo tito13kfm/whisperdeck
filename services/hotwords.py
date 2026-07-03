@@ -1,6 +1,8 @@
 """Persistent per-user hotword glossary — manual entries plus terms
 auto-extracted from pasted meeting-context docs (see services/correction.py).
 Feeds the post-hoc correction pass, never the transcription-time prompt."""
+from sqlalchemy import func
+
 from database import HotwordEntry
 
 
@@ -16,7 +18,7 @@ def add_hotword(db, user_id: int, term: str, source: str = "manual") -> HotwordE
     existing = (
         db.query(HotwordEntry)
         .filter(HotwordEntry.user_id == user_id)
-        .filter(HotwordEntry.term.ilike(term))
+        .filter(func.lower(HotwordEntry.term) == term.lower())
         .first()
     )
     if existing:
