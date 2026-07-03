@@ -1154,7 +1154,11 @@ async function rerunCorrection() {
     const t = await r.json();
     currentDetailData = t;
     renderCorrected(t);
-    toast('Correction re-run complete', 'success');
+    if (t.correction_error) {
+      toast('Correction failed: ' + t.correction_error, 'error');
+    } else {
+      toast('Correction re-run complete', 'success');
+    }
   } catch (e) {
     toast('Correction failed: ' + (e.message || e), 'error');
   }
