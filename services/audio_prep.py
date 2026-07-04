@@ -22,7 +22,22 @@ class AudioPrepError(Exception):
     pass
 
 
+def _ffmpeg_bin() -> str:
+    """Resolve the ffmpeg binary: bundled copy (portable build) if
+    FFMPEG_DIR is set, otherwise PATH lookup (normal dev/installed use)."""
+    ffmpeg_dir = os.environ.get("FFMPEG_DIR")
+    return os.path.join(ffmpeg_dir, "ffmpeg.exe") if ffmpeg_dir else "ffmpeg"
+
+
+def _ffprobe_bin() -> str:
+    ffmpeg_dir = os.environ.get("FFMPEG_DIR")
+    return os.path.join(ffmpeg_dir, "ffprobe.exe") if ffmpeg_dir else "ffprobe"
+
+
 def ffmpeg_available() -> bool:
+    ffmpeg_dir = os.environ.get("FFMPEG_DIR")
+    if ffmpeg_dir:
+        return os.path.isfile(_ffmpeg_bin())
     return shutil.which("ffmpeg") is not None
 
 
@@ -52,7 +67,7 @@ async def transcode_for_upload(input_path: str, output_dir: str, bitrate_kbps: i
     output_path = os.path.join(output_dir, f"{base}_16k.mp3")
 
     cmd = [
-        "ffmpeg", "-y",
+        _ffmpeg_bin(), "-y",
         "-i", input_path,
         "-vn",
         "-ac", "1",
@@ -74,7 +89,7 @@ async def transcode_for_upload(input_path: str, output_dir: str, bitrate_kbps: i
 def get_audio_duration(audio_path: str) -> float:
     """Return the audio file's duration in seconds via ffprobe."""
     result = subprocess.run(
-        ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", audio_path],
+        [_ffprobe_bin(), "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", audio_path],
         capture_output=True, text=True,
     )
     if result.returncode != 0 or not result.stdout.strip():
@@ -95,7 +110,7 @@ def detect_silence_midpoints(audio_path: str, noise_db: str = "-30dB", min_durat
     """
     result = subprocess.run(
         [
-            "ffmpeg", "-i", audio_path,
+            _ffmpeg_bin(), "-i", audio_path,
             "-af", f"silencedetect=noise={noise_db}:d={min_duration}",
             "-f", "null", "-",
         ],
@@ -155,7 +170,7 @@ async def extract_clips_concat(
                 part = os.path.join(output_dir, f"{base}_seed_part{i}.wav")
                 result = subprocess.run(
                     [
-                        "ffmpeg", "-y", "-i", audio_path,
+                        _ffmpeg_bin(), "-y", "-i", audio_path,
                         "-ss", str(start), "-to", str(end),
                         "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le",
                         part,
@@ -172,7 +187,7 @@ async def extract_clips_concat(
                     # as escapes inside the quoted filename on Windows.
                     f.write(f"file '{os.path.abspath(p).replace(os.sep, '/')}'\n")
             result = subprocess.run(
-                ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", list_path, "-c", "copy", out_path],
+                [_ffmpeg_bin(), "-y", "-f", "concat", "-safe", "0", "-i", list_path, "-c", "copy", out_path],
                 capture_output=True, text=True,
             )
             if result.returncode != 0:
@@ -234,7 +249,7 @@ async def chunk_audio(
         cut_end = min(total_duration, seg_end + (overlap_seconds if seg_end < total_duration else 0))
         chunk_path = os.path.join(output_dir, f"{base}_chunk{index}.mp3")
         cmd = [
-            "ffmpeg", "-y",
+            _ffmpeg_bin(), "-y",
             "-i", audio_path,
             "-ss", str(cut_start),
             "-to", str(cut_end),
