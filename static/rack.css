@@ -90,6 +90,11 @@ button { font: inherit; }
 .t-mono { font-family: var(--f-mono); }
 .t-hint { font-size: 11.5px; color: var(--label-dim); }
 
+/* Raw hex below this point is intentional: ear seams, screws, key metal,
+   drilled rails, and reel hardware are the README's "hardware/semantic
+   constants" — physically the same in every faceplate era, so they are
+   never themed and stay as the prototype's literal values. */
+
 /* ── rack unit (faceplate card) ──
    Ear seams + screws are one verbatim gradient stack from the prototype:
    slot lines at 38°/−52° (left ear) and 12°/76° (right ear). */
