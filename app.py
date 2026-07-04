@@ -84,7 +84,7 @@ voice_id_service = VoiceIdentificationService(str(VOICES_DIR))
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     worker_task = asyncio.create_task(queue_worker_loop(SessionLocal, diarization_service))
-    llm_worker_task = asyncio.create_task(llm_worker_loop(SessionLocal, transcription_service))
+    llm_worker_task = asyncio.create_task(llm_worker_loop(SessionLocal, transcription_service, diarization_service))
     yield
     worker_task.cancel()
     llm_worker_task.cancel()
@@ -161,6 +161,9 @@ def _serialize_transcript(db: Session, t: Transcript) -> dict:
         "created_at": t.created_at.isoformat() if t.created_at else None,
         "updated_at": t.updated_at.isoformat() if t.updated_at else None,
         "has_summary": t.summary is not None,
+        # Gates the post-hoc re-transcribe/re-diarize buttons: needs the
+        # stored source file, not just a path that once existed.
+        "has_audio": bool(t.audio_path and os.path.exists(t.audio_path)),
         "job_progress": job_progress,
         "processed_size_bytes": t.processed_size_bytes,
         "queue_status": compute_queue_status(db, t),
@@ -396,30 +399,24 @@ async def list_provider_models(name: str, db: Session = Depends(get_db), current
 
 # ── Transcription ─────────────────────────────────────────────────────────
 
-@app.post("/api/transcribe")
-async def transcribe_audio(
-    file: UploadFile = File(...),
-    title: Optional[str] = Form(None),
-    provider: str = Form("groq"),
-    model: Optional[str] = Form(None),
-    language: str = Form("en"),
-    temperature: float = Form(0.0),
-    diarize: bool = Form(False),
-    num_speakers: Optional[int] = Form(None),
-    context_doc: Optional[str] = Form(None),
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    """Upload and transcribe an audio file."""
-    # Save uploaded file
-    file_ext = os.path.splitext(file.filename or "audio.mp3")[1] or ".mp3"
-    safe_name = f"{datetime.datetime.utcnow().strftime('%Y%m%d_%H%M%S')}_{hash(file.filename or 'audio')}{file_ext}"
-    save_path = UPLOAD_DIR / safe_name
-
-    with open(save_path, "wb") as f:
-        content = await file.read()
-        f.write(content)
-
+async def _run_transcription_pipeline(
+    db: Session,
+    current_user: User,
+    save_path: Path,
+    *,
+    filename: str,
+    title: Optional[str],
+    provider: str,
+    model: Optional[str],
+    language: str,
+    temperature: float,
+    diarize: bool,
+    num_speakers: Optional[int],
+) -> dict:
+    """Everything after the source audio is on disk: transcode decision,
+    chunk-vs-inline branch, inline diarization, auto-correct enqueue.
+    Shared by /api/transcribe (fresh upload) and
+    /api/transcripts/{id}/retranscribe (stored audio_path)."""
     user_settings = get_user_settings(db, current_user.id)
 
     # Normalize for cloud upload: strips video track, downsamples to 16kHz
@@ -463,18 +460,6 @@ async def transcribe_audio(
             "default_model": prov_cfg.default_model or "",
         }
 
-    if context_doc and context_doc.strip():
-        groq_cfg = db.query(ProviderConfig).filter(
-            ProviderConfig.user_id == current_user.id,
-            ProviderConfig.name == "groq",
-        ).first()
-        if groq_cfg and groq_cfg.api_key:
-            try:
-                await extract_hotwords_from_doc(db, current_user.id, context_doc, api_key=groq_cfg.api_key)
-            except Exception as e:
-                # Non-fatal: glossary-building side effect, never blocks transcription.
-                print(f"[correction] non-fatal hotword extraction failure: {e}")
-
     threshold_bytes = user_settings["chunk_threshold_mb"] * 1024 * 1024
     file_size = os.path.getsize(save_path)
 
@@ -511,13 +496,13 @@ async def transcribe_audio(
         transcript = transcription_service.create_transcript_stub(
             db,
             current_user.id,
-            filename=file.filename or "audio.mp3",
+            filename=filename,
             provider_name=provider,
             model=model or provider_config.get("default_model") or "",
             language=language,
             audio_path=str(save_path),
             diarize_requested=diarize,
-            title=title or file.filename,
+            title=title or filename,
             num_speakers=num_speakers,
         )
         # Real processed size, not the raw upload size — the sum of all
@@ -537,7 +522,7 @@ async def transcribe_audio(
             audio_path=str(save_path),
             provider_name=provider,
             provider_config=provider_config,
-            title=title or file.filename,
+            title=title or filename,
             language=language,
             model=model or provider_config.get("default_model"),
             temperature=temperature,
@@ -548,24 +533,14 @@ async def transcribe_audio(
         # Run diarization if requested
         if diarize and transcript.segments:
             try:
-                if diarization_service._check_pyannote():
-                    # num_speakers=None lets pyannote auto-detect the count.
-                    result = await diarization_service.diarize_pyannote(
-                        str(save_path), num_speakers=num_speakers, hf_token=user_settings.get("hf_token")
-                    )
-                else:
-                    # Heuristic fallback can't auto-detect — needs a real
-                    # count, default to 2 if the user left it blank.
-                    result = await diarization_service.diarize_heuristic(
-                        str(save_path),
-                        num_speakers=num_speakers or 2,
-                        segments=transcript.segments,
-                    )
-                merged = await diarization_service.combine_with_transcript(
-                    result, transcript.segments
+                merged, speaker_count = await diarization_service.diarize_and_merge(
+                    str(save_path),
+                    num_speakers=num_speakers,
+                    segments=transcript.segments,
+                    hf_token=user_settings.get("hf_token"),
                 )
                 transcript.segments = merged
-                transcript.speaker_count = result.speaker_count
+                transcript.speaker_count = speaker_count
                 db.commit()
             except Exception as e:
                 # Non-fatal: diarization enhancement failed. Transcript still
@@ -581,6 +556,55 @@ async def transcribe_audio(
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/transcribe")
+async def transcribe_audio(
+    file: UploadFile = File(...),
+    title: Optional[str] = Form(None),
+    provider: str = Form("groq"),
+    model: Optional[str] = Form(None),
+    language: str = Form("en"),
+    temperature: float = Form(0.0),
+    diarize: bool = Form(False),
+    num_speakers: Optional[int] = Form(None),
+    context_doc: Optional[str] = Form(None),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Upload and transcribe an audio file."""
+    # Save uploaded file
+    file_ext = os.path.splitext(file.filename or "audio.mp3")[1] or ".mp3"
+    safe_name = f"{datetime.datetime.utcnow().strftime('%Y%m%d_%H%M%S')}_{hash(file.filename or 'audio')}{file_ext}"
+    save_path = UPLOAD_DIR / safe_name
+
+    with open(save_path, "wb") as f:
+        content = await file.read()
+        f.write(content)
+
+    if context_doc and context_doc.strip():
+        groq_cfg = db.query(ProviderConfig).filter(
+            ProviderConfig.user_id == current_user.id,
+            ProviderConfig.name == "groq",
+        ).first()
+        if groq_cfg and groq_cfg.api_key:
+            try:
+                await extract_hotwords_from_doc(db, current_user.id, context_doc, api_key=groq_cfg.api_key)
+            except Exception as e:
+                # Non-fatal: glossary-building side effect, never blocks transcription.
+                print(f"[correction] non-fatal hotword extraction failure: {e}")
+
+    return await _run_transcription_pipeline(
+        db, current_user, save_path,
+        filename=file.filename or "audio.mp3",
+        title=title,
+        provider=provider,
+        model=model,
+        language=language,
+        temperature=temperature,
+        diarize=diarize,
+        num_speakers=num_speakers,
+    )
 
 
 @app.get("/api/transcripts")
@@ -671,6 +695,44 @@ async def resume_transcript(transcript_id: int, db: Session = Depends(get_db), c
         raise HTTPException(status_code=400, detail=f"Cannot resume a transcript with status '{t.status}'")
     count = resume_cancelled_chunks(db, transcript_id)
     return {"ok": True, "resumed": count}
+
+
+@app.post("/api/transcripts/{transcript_id}/retranscribe")
+async def retranscribe_transcript(
+    transcript_id: int,
+    provider: str = Form(...),
+    model: Optional[str] = Form(None),
+    language: Optional[str] = Form(None),
+    diarize: Optional[bool] = Form(None),
+    num_speakers: Optional[int] = Form(None),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Re-run transcription on the stored audio with a different
+    provider/model. Creates a NEW transcript row (the original is kept for
+    side-by-side comparison); unspecified options default to the source
+    transcript's values."""
+    t = db.query(Transcript).filter(
+        Transcript.id == transcript_id, Transcript.user_id == current_user.id
+    ).first()
+    if not t:
+        raise HTTPException(status_code=404, detail="Transcript not found")
+    if not (t.audio_path and os.path.exists(t.audio_path)):
+        raise HTTPException(
+            status_code=400,
+            detail="No stored audio for this transcript — it predates audio retention or the file was removed",
+        )
+    return await _run_transcription_pipeline(
+        db, current_user, Path(t.audio_path),
+        filename=t.filename,
+        title=t.title,
+        provider=provider,
+        model=model,
+        language=language if language is not None else t.language,
+        temperature=0.0,
+        diarize=diarize if diarize is not None else bool(t.diarize_requested),
+        num_speakers=num_speakers if num_speakers is not None else t.num_speakers,
+    )
 
 
 # ── Diarization ───────────────────────────────────────────────────────────
@@ -768,6 +830,67 @@ async def correct_transcript_route(
 
     job = enqueue_llm_job(db, current_user.id, transcript_id, "correction", provider, model)
     return {"job": serialize_llm_job(job)}
+
+
+@app.post("/api/transcripts/{transcript_id}/rediarize")
+async def rediarize_transcript(
+    transcript_id: int,
+    num_speakers: Optional[int] = Form(None),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Queue an in-place re-diarization of the stored audio — speaker labels
+    are merged onto the existing segments. num_speakers=None lets pyannote
+    auto-detect. Runs as a background job (watch the Queue screen)."""
+    t = db.query(Transcript).filter(
+        Transcript.id == transcript_id, Transcript.user_id == current_user.id
+    ).first()
+    if not t:
+        raise HTTPException(status_code=404, detail="Transcript not found")
+    if t.status not in ("completed", "partial"):
+        raise HTTPException(status_code=400, detail=f"Transcript {transcript_id} is not completed")
+    if not (t.audio_path and os.path.exists(t.audio_path)):
+        raise HTTPException(
+            status_code=400,
+            detail="No stored audio for this transcript — it predates audio retention or the file was removed",
+        )
+    # The job reads its parameters from the transcript row (LlmJob has no
+    # params column), so persist the requested count before enqueueing.
+    t.num_speakers = num_speakers
+    t.diarize_requested = True
+    db.commit()
+    job = enqueue_llm_job(db, current_user.id, transcript_id, "rediarize", "", "")
+    return {"job": serialize_llm_job(job)}
+
+
+@app.post("/api/transcripts/{transcript_id}/context")
+async def add_transcript_context(
+    transcript_id: int,
+    context_doc: str = Form(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Paste a meeting-context doc after the fact — extracts names/jargon
+    into the hotword glossary so a correction re-run can apply them.
+    Unlike the upload-time path (a silent side effect), this is an explicit
+    user action, so a missing key is an error the user can act on."""
+    t = db.query(Transcript).filter(
+        Transcript.id == transcript_id, Transcript.user_id == current_user.id
+    ).first()
+    if not t:
+        raise HTTPException(status_code=404, detail="Transcript not found")
+    if not context_doc.strip():
+        raise HTTPException(status_code=400, detail="Context document is empty")
+    groq_cfg = db.query(ProviderConfig).filter(
+        ProviderConfig.user_id == current_user.id,
+        ProviderConfig.name == "groq",
+    ).first()
+    if not (groq_cfg and groq_cfg.api_key):
+        raise HTTPException(status_code=400, detail="Context extraction needs a Groq API key (service panel)")
+    terms = await extract_hotwords_from_doc(
+        db, current_user.id, context_doc, api_key=groq_cfg.api_key
+    )
+    return {"terms": terms}
 
 
 @app.get("/api/correction-models/{provider}")

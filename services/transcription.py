@@ -82,6 +82,7 @@ class TranscriptionService:
             model=provider_config.get("default_model", ""),
             language=language,
             status="processing",
+            audio_path=audio_path,
         )
         db.add(transcript)
         db.commit()

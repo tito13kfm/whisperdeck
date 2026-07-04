@@ -47,6 +47,29 @@ class DiarizationService:
         except ImportError:
             return False
 
+    async def diarize_and_merge(
+        self,
+        audio_path: str,
+        num_speakers: Optional[int],
+        segments: list[dict],
+        hf_token: Optional[str] = None,
+    ) -> tuple[list[dict], int]:
+        """Best-available diarization (pyannote if installed, else the
+        pause-gap heuristic) merged onto existing transcript segments.
+        num_speakers=None lets pyannote auto-detect; the heuristic can't,
+        so it defaults to 2. Returns (merged_segments, speaker_count).
+        Raises on failure — callers decide whether that's fatal."""
+        if self._check_pyannote():
+            result = await self.diarize_pyannote(
+                audio_path, num_speakers=num_speakers, hf_token=hf_token
+            )
+        else:
+            result = await self.diarize_heuristic(
+                audio_path, num_speakers=num_speakers or 2, segments=segments
+            )
+        merged = await self.combine_with_transcript(result, segments)
+        return merged, result.speaker_count
+
     async def diarize_heuristic(
         self,
         audio_path: str,

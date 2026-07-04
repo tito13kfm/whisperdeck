@@ -1440,7 +1440,7 @@ function jobActions(j) {
   return acts.join('');
 }
 
-const KIND_LABELS = { transcription: 'TRANSCRIBE', correction: 'CORRECT', summary: 'SUMMARIZE' };
+const KIND_LABELS = { transcription: 'TRANSCRIBE', correction: 'CORRECT', summary: 'SUMMARIZE', rediarize: 'DIARIZE' };
 
 async function loadQueue() {
   const root = $('page-queue');
@@ -1699,12 +1699,18 @@ function renderDetail() {
       <h1 class="t-title" style="min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(t.title || t.filename || 'Untitled')}</h1>
       <div style="display:flex;gap:8px;flex-shrink:0">
         ${extraActs.join('')}
+        <button class="btn" style="font-size:12px;padding:7px 14px;border-color:var(--inset-edge)" data-dact="retranscribe" ${t.has_audio ? '' : 'disabled title="No stored audio for this transcript"'}>Re-transcribe</button>
+        <button class="btn" style="font-size:12px;padding:7px 14px;border-color:var(--inset-edge)" data-dact="rediarize" ${t.has_audio ? '' : 'disabled title="No stored audio for this transcript"'}>Re-diarize</button>
+        <button class="btn" style="font-size:12px;padding:7px 14px;border-color:var(--inset-edge)" data-dact="context">Add context</button>
         <button class="btn" style="font-size:12px;padding:7px 14px;border-color:var(--inset-edge)" data-dact="summarize" ${llmJobActive(t.summary_job) ? 'disabled title="Summary job already queued"' : ''}>Summarize</button>
         <button class="btn" style="font-size:12px;padding:7px 14px;border-color:var(--inset-edge)" data-dact="rerun" ${llmJobActive(t.correction_job) ? 'disabled title="Correction job already queued"' : ''}>Re-run correction</button>
         <button class="btn btn--red" style="font-size:12px;padding:7px 14px" data-dact="delete">Delete</button>
       </div>
     </div>
     <div id="rerun-picker" style="display:none;margin:0 36px 14px"></div>
+    <div id="retranscribe-picker" style="display:none;margin:0 36px 14px"></div>
+    <div id="rediarize-picker" style="display:none;margin:0 36px 14px"></div>
+    <div id="context-picker" style="display:none;margin:0 36px 14px"></div>
     <div class="unit" style="border-radius:3px;margin-bottom:14px;padding:14px 22px 14px 34px">
       <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:14px">
         <div style="font-size:12.5px"><div style="font-family:var(--f-mono);font-size:10px;text-transform:uppercase;letter-spacing:0.08em;color:var(--label-dim);margin-bottom:3px">Duration</div>${formatDur(t.duration_seconds)}</div>
@@ -1787,6 +1793,18 @@ async function detailAction(act) {
       toggleRerunPicker();
       return;
     }
+    if (act === 'retranscribe') {
+      toggleRetranscribePicker();
+      return;
+    }
+    if (act === 'rediarize') {
+      toggleRediarizePicker();
+      return;
+    }
+    if (act === 'context') {
+      toggleContextPicker();
+      return;
+    }
   } catch (e) { toast(e.message, 'error'); }
 }
 
@@ -1865,6 +1883,108 @@ async function rerunCorrection() {
     await loadTranscriptDetail(t.id);
   } catch (e) { toast(e.message, 'error'); }
 }
+
+/* ── post-hoc reprocess pickers (re-transcribe / re-diarize / context) ── */
+
+async function toggleRetranscribePicker() {
+  const box = $('retranscribe-picker');
+  if (box.style.display !== 'none') { box.style.display = 'none'; return; }
+  box.style.display = 'block';
+  let provs = [];
+  try { provs = await api('/api/providers'); } catch (e) { toast(e.message, 'error'); }
+  const usable = provs.filter(p => !p.needs_key || p.configured);
+  box.innerHTML = `
+    <div class="unit" style="padding:12px 34px;display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+      <span class="t-unit">Re-transcribe with</span>
+      <select id="retx-provider" class="inp" style="padding:6px 8px;font-size:12px">
+        ${usable.map(p => '<option value="' + escapeHtml(p.id) + '">' + escapeHtml(p.name) + '</option>').join('')}
+      </select>
+      <select id="retx-model" class="inp" style="padding:6px 8px;font-size:12px;min-width:230px"></select>
+      <button id="retx-go" class="btn btn--amber" style="font-size:12px;padding:7px 14px">Run</button>
+      <span style="font-size:11px;color:var(--label-dim)">Creates a new transcript — this one stays untouched.</span>
+    </div>`;
+  const fillModels = async () => {
+    const sel = $('retx-model');
+    sel.innerHTML = '<option value="">Loading…</option>';
+    try {
+      const r = await api('/api/providers/' + $('retx-provider').value + '/models');
+      const models = (r.models || []).map(m => typeof m === 'string' ? m : (m.id || m.name)).filter(Boolean);
+      sel.innerHTML = models.map(m => '<option value="' + escapeHtml(m) + '">' + escapeHtml(m) + '</option>').join('')
+        || '<option value="">Provider default</option>';
+    } catch { sel.innerHTML = '<option value="">Provider default</option>'; }
+  };
+  await fillModels();
+  $('retx-provider').addEventListener('change', fillModels);
+  $('retx-go').addEventListener('click', async () => {
+    const t = detailData;
+    const fd = new FormData();
+    fd.append('provider', $('retx-provider').value);
+    const model = $('retx-model').value;
+    if (model) fd.append('model', model);
+    try {
+      const nt = await api('/api/transcripts/' + t.id + '/retranscribe', { method: 'POST', body: fd });
+      toast('Re-transcription started — opened the new transcript', 'info');
+      refreshQueueBadge();
+      await loadTranscriptDetail(nt.id);
+    } catch (e) { toast(e.message, 'error'); }
+  });
+}
+
+async function toggleRediarizePicker() {
+  const box = $('rediarize-picker');
+  if (box.style.display !== 'none') { box.style.display = 'none'; return; }
+  box.style.display = 'block';
+  box.innerHTML = `
+    <div class="unit" style="padding:12px 34px;display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+      <span class="t-unit">Re-diarize</span>
+      <input id="rediar-speakers" class="inp" type="number" min="1" max="20" placeholder="auto"
+             title="Number of speakers — leave blank to auto-detect" style="padding:6px 8px;font-size:12px;width:90px">
+      <button id="rediar-go" class="btn btn--amber" style="font-size:12px;padding:7px 14px">Run</button>
+      <span style="font-size:11px;color:var(--label-dim)">Updates speaker labels in place; re-run correction afterwards if you use the corrected text.</span>
+    </div>`;
+  $('rediar-go').addEventListener('click', async () => {
+    const t = detailData;
+    const fd = new FormData();
+    const n = $('rediar-speakers').value.trim();
+    if (n) fd.append('num_speakers', n);
+    try {
+      await api('/api/transcripts/' + t.id + '/rediarize', { method: 'POST', body: fd });
+      toast('Re-diarization queued — watch the Queue screen', 'info');
+      box.style.display = 'none';
+      refreshQueueBadge();
+      await loadTranscriptDetail(t.id);
+    } catch (e) { toast(e.message, 'error'); }
+  });
+}
+
+async function toggleContextPicker() {
+  const box = $('context-picker');
+  if (box.style.display !== 'none') { box.style.display = 'none'; return; }
+  box.style.display = 'block';
+  box.innerHTML = `
+    <div class="unit" style="padding:12px 34px;display:flex;gap:12px;align-items:flex-start;flex-wrap:wrap">
+      <span class="t-unit" style="padding-top:7px">Meeting context</span>
+      <textarea id="ctx-doc" class="inp" rows="3" style="padding:7px 9px;flex:1;min-width:280px"
+                placeholder="Paste the agenda or jargon-heavy notes — names and terms get added to your term glossary."></textarea>
+      <button id="ctx-go" class="btn btn--amber" style="font-size:12px;padding:7px 14px">Extract terms</button>
+    </div>`;
+  $('ctx-go').addEventListener('click', async () => {
+    const t = detailData;
+    const doc = $('ctx-doc').value.trim();
+    if (!doc) { toast('Paste some context first', 'error'); return; }
+    const fd = new FormData();
+    fd.append('context_doc', doc);
+    try {
+      const r = await api('/api/transcripts/' + t.id + '/context', { method: 'POST', body: fd });
+      const n = (r.terms || []).length;
+      toast(n ? 'Added ' + n + ' term' + (n !== 1 ? 's' : '') + ' to your glossary' : 'No new terms found', 'info');
+      box.style.display = 'none';
+      // Applying the new terms takes a correction re-run — open that picker.
+      if (n && $('rerun-picker').style.display === 'none') toggleRerunPicker();
+    } catch (e) { toast(e.message, 'error'); }
+  });
+}
+
 /* ══════════════════ voice roster ══════════════════ */
 async function loadVoices() {
   const root = $('page-voices');
