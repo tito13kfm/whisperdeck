@@ -1685,17 +1685,23 @@ async function renameSpeaker(speaker) {
         body: JSON.stringify({ from: speaker, to: name }),
       });
       toast('Renamed ' + r.renamed + ' line' + (r.renamed !== 1 ? 's' : '') + ' to ' + name, 'info');
+      // The flags belong to the new label now, whatever enrollment does.
+      if (seedClips[speaker]) { seedClips[name] = seedClips[speaker]; delete seedClips[speaker]; }
     }
-    if (clips.length && window.confirm('Enroll ' + clips.length + ' flagged clip' + (clips.length !== 1 ? 's' : '') + ' as the voice seed for "' + name + '"?')) {
+  } catch (e) { toast(e.message, 'error'); return; }
+  // Enrollment failing (e.g. no embedding backend) must not hide a rename
+  // that already landed — refresh happens either way.
+  if (clips.length && window.confirm('Enroll ' + clips.length + ' flagged clip' + (clips.length !== 1 ? 's' : '') + ' as the voice seed for "' + name + '"?')) {
+    try {
       const p = await api('/api/transcripts/' + t.id + '/enroll-speaker', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name, clips }),
       });
       toast('Voice profile "' + p.name + '" saved to the roster', 'info');
-    }
-    delete seedClips[speaker];
-    await loadTranscriptDetail(t.id, { preserveQuery: true });
-  } catch (e) { toast(e.message, 'error'); }
+      delete seedClips[name]; // consumed; kept on failure so a retry can re-flag nothing
+    } catch (e) { toast(e.message, 'error'); }
+  }
+  await loadTranscriptDetail(t.id, { preserveQuery: true });
 }
 
 function llmJobActive(job) {
