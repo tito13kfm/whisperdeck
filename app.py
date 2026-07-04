@@ -833,6 +833,8 @@ async def enroll_speaker_from_transcript(
         sample_path = await extract_clips_concat(t.audio_path, clips, str(UPLOAD_DIR))
     except (AudioPrepError, KeyError, TypeError, ValueError) as e:
         raise HTTPException(status_code=400, detail=f"Could not extract seed clips: {e}")
+    profile_created_here = False
+    permanent_path = None
     try:
         profile = db.query(VoiceProfile).filter(
             VoiceProfile.user_id == current_user.id, VoiceProfile.name == name
@@ -845,6 +847,7 @@ async def enroll_speaker_from_transcript(
             )
             db.add(profile)
             db.commit()
+            profile_created_here = True
         permanent_path = VOICES_DIR / f"clip_{profile.id}_{datetime.datetime.utcnow().strftime('%Y%m%d_%H%M%S%f')}.wav"
         shutil.copyfile(sample_path, permanent_path)
         clip = voice_id_service.add_clip(db, profile.id, current_user.id, str(permanent_path),
@@ -859,6 +862,14 @@ async def enroll_speaker_from_transcript(
             "clip_id": clip.id,
         }
     except ValueError as e:
+        if permanent_path is not None:
+            try:
+                os.remove(permanent_path)
+            except OSError:
+                pass
+        if profile_created_here:
+            db.delete(profile)
+            db.commit()
         raise HTTPException(status_code=400, detail=str(e))
     finally:
         try:

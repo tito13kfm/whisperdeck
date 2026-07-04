@@ -182,6 +182,92 @@ def test_enroll_speaker_appends_clip_to_existing_profile_without_overwriting(cli
     assert os.path.exists(new_clip.audio_path)
 
 
+def test_enroll_speaker_new_profile_rolled_back_when_add_clip_fails(client, db_session, tmp_path):
+    """If add_clip fails for a brand-new speaker name, the just-created
+    empty VoiceProfile row must be rolled back and the permanent clip
+    copy must not be left behind in VOICES_DIR."""
+    from app import VOICES_DIR
+
+    t = _transcript(db_session, tmp_path)
+    sample = tmp_path / "seed.wav"
+    sample.write_bytes(b"wav")
+
+    before = set(os.listdir(VOICES_DIR)) if VOICES_DIR.exists() else set()
+
+    with patch("app.extract_clips_concat", AsyncMock(return_value=str(sample))), \
+         patch("app.voice_id_service.add_clip", side_effect=ValueError("boom")):
+        r = client.post(f"/api/transcripts/{t.id}/enroll-speaker",
+                        json={"name": "BrandNewSpeaker", "clips": [{"start": 0.0, "end": 2.0}]})
+    try:
+        assert r.status_code == 400
+        assert "boom" in r.json()["detail"]
+
+        db_session.expire_all()
+        profile = db_session.query(VoiceProfile).filter(
+            VoiceProfile.name == "BrandNewSpeaker"
+        ).first()
+        assert profile is None
+
+        after = set(os.listdir(VOICES_DIR)) if VOICES_DIR.exists() else set()
+        leftovers = after - before
+        assert leftovers == set()
+    finally:
+        # test isolation: remove anything the (possibly still-buggy) route left behind
+        after = set(os.listdir(VOICES_DIR)) if VOICES_DIR.exists() else set()
+        for name in after - before:
+            try:
+                os.remove(VOICES_DIR / name)
+            except OSError:
+                pass
+
+
+def test_enroll_speaker_existing_profile_not_deleted_when_add_clip_fails(client, db_session, tmp_path):
+    """If add_clip fails for a speaker that already had a VoiceProfile,
+    that pre-existing profile must survive — only profiles created by
+    this exact failed request should be cleaned up."""
+    from app import VOICES_DIR
+
+    t = _transcript(db_session, tmp_path)
+    user = _test_user(db_session)
+    profile = VoiceProfile(user_id=user.id, name="ExistingSpeaker", embedding=[0.1],
+                           embedding_model="MFCC fingerprint (librosa)",
+                           sample_count=1, notes="Seeded from transcript")
+    db_session.add(profile)
+    db_session.commit()
+    profile_id = profile.id
+
+    sample = tmp_path / "seed.wav"
+    sample.write_bytes(b"wav")
+
+    before = set(os.listdir(VOICES_DIR)) if VOICES_DIR.exists() else set()
+
+    with patch("app.extract_clips_concat", AsyncMock(return_value=str(sample))), \
+         patch("app.voice_id_service.add_clip", side_effect=ValueError("boom")):
+        r = client.post(f"/api/transcripts/{t.id}/enroll-speaker",
+                        json={"name": "ExistingSpeaker", "clips": [{"start": 0.0, "end": 2.0}]})
+    try:
+        assert r.status_code == 400
+        assert "boom" in r.json()["detail"]
+
+        db_session.expire_all()
+        still_there = db_session.query(VoiceProfile).filter(
+            VoiceProfile.id == profile_id
+        ).first()
+        assert still_there is not None
+        assert still_there.name == "ExistingSpeaker"
+
+        after = set(os.listdir(VOICES_DIR)) if VOICES_DIR.exists() else set()
+        leftovers = after - before
+        assert leftovers == set()
+    finally:
+        after = set(os.listdir(VOICES_DIR)) if VOICES_DIR.exists() else set()
+        for name in after - before:
+            try:
+                os.remove(VOICES_DIR / name)
+            except OSError:
+                pass
+
+
 def test_enroll_speaker_validation(client, db_session, tmp_path):
     t = _transcript(db_session, tmp_path)
     assert client.post(f"/api/transcripts/{t.id}/enroll-speaker",
