@@ -583,13 +583,16 @@ async def transcribe_audio(
         f.write(content)
 
     if context_doc and context_doc.strip():
-        groq_cfg = db.query(ProviderConfig).filter(
-            ProviderConfig.user_id == current_user.id,
-            ProviderConfig.name == "groq",
-        ).first()
-        if groq_cfg and groq_cfg.api_key:
+        from services.settings import resolve_provider_key
+        user_settings = get_user_settings(db, current_user.id)
+        extraction_provider = user_settings.get("correction_provider", "groq")
+        extraction_key, extraction_cfg = resolve_provider_key(db, current_user.id, extraction_provider)
+        if extraction_key or extraction_provider == "local":
             try:
-                await extract_hotwords_from_doc(db, current_user.id, context_doc, api_key=groq_cfg.api_key)
+                await extract_hotwords_from_doc(
+                    db, current_user.id, context_doc, api_key=extraction_key,
+                    provider_name=extraction_provider, provider_config=extraction_cfg,
+                )
             except Exception as e:
                 # Non-fatal: glossary-building side effect, never blocks transcription.
                 print(f"[correction] non-fatal hotword extraction failure: {e}")
@@ -1081,14 +1084,18 @@ async def add_transcript_context(
         raise HTTPException(status_code=404, detail="Transcript not found")
     if not context_doc.strip():
         raise HTTPException(status_code=400, detail="Context document is empty")
-    groq_cfg = db.query(ProviderConfig).filter(
-        ProviderConfig.user_id == current_user.id,
-        ProviderConfig.name == "groq",
-    ).first()
-    if not (groq_cfg and groq_cfg.api_key):
-        raise HTTPException(status_code=400, detail="Context extraction needs a Groq API key (service panel)")
+    from services.settings import resolve_provider_key
+    user_settings = get_user_settings(db, current_user.id)
+    extraction_provider = user_settings.get("correction_provider", "groq")
+    extraction_key, extraction_cfg = resolve_provider_key(db, current_user.id, extraction_provider)
+    if not extraction_key and extraction_provider != "local":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Context extraction needs a {extraction_provider.capitalize()} API key (service panel)",
+        )
     terms = await extract_hotwords_from_doc(
-        db, current_user.id, context_doc, api_key=groq_cfg.api_key
+        db, current_user.id, context_doc, api_key=extraction_key,
+        provider_name=extraction_provider, provider_config=extraction_cfg,
     )
     return {"terms": terms}
 
