@@ -104,6 +104,44 @@ def test_rename_validation(client, db_session):
     assert "No segments" in r.json()["detail"]
 
 
+# ── POST /segments/retag ──────────────────────────────────────────────────
+
+def test_retag_only_changes_selected_indices(client, db_session):
+    t = _transcript(db_session)
+    r = client.post(f"/api/transcripts/{t.id}/segments/retag",
+                    json={"indices": [0], "speaker": "Bob"})
+    assert r.status_code == 200
+    assert r.json()["retagged"] == 1
+    db_session.expire_all()
+    t2 = db_session.query(Transcript).filter(Transcript.id == t.id).first()
+    speakers = [s["speaker"] for s in t2.segments]
+    # index 0 retagged; index 2 (also originally SPEAKER_00) untouched
+    assert speakers == ["Bob", "SPEAKER_01", "SPEAKER_00"]
+
+
+def test_retag_leaves_corrected_text_untouched(client, db_session):
+    corrected = "SPEAKER_00: hello there\n\nSPEAKER_01: general kenobi"
+    t = _transcript(db_session, corrected_text=corrected)
+    r = client.post(f"/api/transcripts/{t.id}/segments/retag",
+                    json={"indices": [0], "speaker": "Bob"})
+    assert r.status_code == 200
+    db_session.expire_all()
+    t2 = db_session.query(Transcript).filter(Transcript.id == t.id).first()
+    assert t2.corrected_text == corrected
+
+
+def test_retag_validation(client, db_session):
+    t = _transcript(db_session)
+    assert client.post(f"/api/transcripts/{t.id}/segments/retag",
+                       json={"indices": [], "speaker": "Bob"}).status_code == 400
+    assert client.post(f"/api/transcripts/{t.id}/segments/retag",
+                       json={"indices": [0], "speaker": "  "}).status_code == 400
+    r = client.post(f"/api/transcripts/{t.id}/segments/retag",
+                    json={"indices": [99], "speaker": "Bob"})
+    assert r.status_code == 400
+    assert "out of range" in r.json()["detail"]
+
+
 # ── POST /enroll-speaker ───────────────────────────────────────────────────
 
 def test_enroll_speaker_happy_path(client, db_session, tmp_path):
@@ -120,13 +158,15 @@ def test_enroll_speaker_happy_path(client, db_session, tmp_path):
     db_session.commit()
 
     with patch("app.extract_clips_concat", fake_extract), \
-         patch("app.voice_id_service.enroll", return_value=profile) as fake_enroll:
+         patch("app.voice_id_service.add_clip") as fake_add_clip:
+        from database import VoiceClip
+        fake_add_clip.return_value = VoiceClip(id=1, voice_profile_id=profile.id)
         r = client.post(f"/api/transcripts/{t.id}/enroll-speaker",
                         json={"name": "Alice", "clips": [{"start": 0.0, "end": 2.0}]})
     assert r.status_code == 200
     assert r.json()["name"] == "Alice"
     fake_extract.assert_awaited_once()
-    fake_enroll.assert_called_once()
+    fake_add_clip.assert_called_once()
     assert not sample.exists()  # temp sample cleaned up
 
 
@@ -136,12 +176,134 @@ def test_enroll_speaker_cleans_up_when_enroll_fails(client, db_session, tmp_path
     sample.write_bytes(b"wav")
 
     with patch("app.extract_clips_concat", AsyncMock(return_value=str(sample))), \
-         patch("app.voice_id_service.enroll", side_effect=ValueError("no backend")):
+         patch("app.voice_id_service.add_clip", side_effect=ValueError("no backend")):
         r = client.post(f"/api/transcripts/{t.id}/enroll-speaker",
                         json={"name": "Alice", "clips": [{"start": 0.0, "end": 2.0}]})
     assert r.status_code == 400
     assert "no backend" in r.json()["detail"]
     assert not sample.exists()
+
+
+def test_enroll_speaker_appends_clip_to_existing_profile_without_overwriting(client, db_session, tmp_path):
+    t = _transcript(db_session, tmp_path)
+    user = _test_user(db_session)
+    from database import VoiceProfile, VoiceClip
+    profile = VoiceProfile(user_id=user.id, name="Alice", embedding=[9.0, 9.0],
+                           embedding_model="MFCC fingerprint (librosa)", sample_count=1)
+    db_session.add(profile)
+    db_session.commit()
+    # Back the pre-existing embedding with an actual clip row — add_clip's
+    # averaging is computed from VoiceClip rows, not the raw embedding field.
+    db_session.add(VoiceClip(voice_profile_id=profile.id, audio_path="/dev/null",
+                              embedding=[9.0, 9.0]))
+    db_session.commit()
+
+    sample = tmp_path / "seed.wav"
+    sample.write_bytes(b"wav")
+    fake_extract = AsyncMock(return_value=str(sample))
+
+    with patch("app.extract_clips_concat", fake_extract), \
+         patch("app.voice_id_service._extract_embedding", return_value=__import__("numpy").array([1.0, 3.0])):
+        r = client.post(f"/api/transcripts/{t.id}/enroll-speaker",
+                        json={"name": "Alice", "clips": [{"start": 0.0, "end": 2.0}]})
+    assert r.status_code == 200
+    db_session.expire_all()
+    refreshed = db_session.query(VoiceProfile).filter(VoiceProfile.id == profile.id).first()
+    # averaged with the existing [9.0, 9.0] embedding, not overwritten to [1.0, 3.0]
+    assert refreshed.embedding == [5.0, 6.0]
+    assert refreshed.sample_count == 2
+    # the new clip's audio must be a permanent copy, not the temp seed sample
+    # that the route deletes in its finally block — otherwise the clip is
+    # unplayable from the roster.
+    clip_id = r.json()["clip_id"]
+    new_clip = db_session.query(VoiceClip).filter(VoiceClip.id == clip_id).first()
+    assert os.path.exists(new_clip.audio_path)
+
+
+def test_enroll_speaker_new_profile_rolled_back_when_add_clip_fails(client, db_session, tmp_path):
+    """If add_clip fails for a brand-new speaker name, the just-created
+    empty VoiceProfile row must be rolled back and the permanent clip
+    copy must not be left behind in VOICES_DIR."""
+    from app import VOICES_DIR
+
+    t = _transcript(db_session, tmp_path)
+    sample = tmp_path / "seed.wav"
+    sample.write_bytes(b"wav")
+
+    before = set(os.listdir(VOICES_DIR)) if VOICES_DIR.exists() else set()
+
+    with patch("app.extract_clips_concat", AsyncMock(return_value=str(sample))), \
+         patch("app.voice_id_service.add_clip", side_effect=ValueError("boom")):
+        r = client.post(f"/api/transcripts/{t.id}/enroll-speaker",
+                        json={"name": "BrandNewSpeaker", "clips": [{"start": 0.0, "end": 2.0}]})
+    try:
+        assert r.status_code == 400
+        assert "boom" in r.json()["detail"]
+
+        db_session.expire_all()
+        profile = db_session.query(VoiceProfile).filter(
+            VoiceProfile.name == "BrandNewSpeaker"
+        ).first()
+        assert profile is None
+
+        after = set(os.listdir(VOICES_DIR)) if VOICES_DIR.exists() else set()
+        leftovers = after - before
+        assert leftovers == set()
+    finally:
+        # test isolation: remove anything the (possibly still-buggy) route left behind
+        after = set(os.listdir(VOICES_DIR)) if VOICES_DIR.exists() else set()
+        for name in after - before:
+            try:
+                os.remove(VOICES_DIR / name)
+            except OSError:
+                pass
+
+
+def test_enroll_speaker_existing_profile_not_deleted_when_add_clip_fails(client, db_session, tmp_path):
+    """If add_clip fails for a speaker that already had a VoiceProfile,
+    that pre-existing profile must survive — only profiles created by
+    this exact failed request should be cleaned up."""
+    from app import VOICES_DIR
+
+    t = _transcript(db_session, tmp_path)
+    user = _test_user(db_session)
+    profile = VoiceProfile(user_id=user.id, name="ExistingSpeaker", embedding=[0.1],
+                           embedding_model="MFCC fingerprint (librosa)",
+                           sample_count=1, notes="Seeded from transcript")
+    db_session.add(profile)
+    db_session.commit()
+    profile_id = profile.id
+
+    sample = tmp_path / "seed.wav"
+    sample.write_bytes(b"wav")
+
+    before = set(os.listdir(VOICES_DIR)) if VOICES_DIR.exists() else set()
+
+    with patch("app.extract_clips_concat", AsyncMock(return_value=str(sample))), \
+         patch("app.voice_id_service.add_clip", side_effect=ValueError("boom")):
+        r = client.post(f"/api/transcripts/{t.id}/enroll-speaker",
+                        json={"name": "ExistingSpeaker", "clips": [{"start": 0.0, "end": 2.0}]})
+    try:
+        assert r.status_code == 400
+        assert "boom" in r.json()["detail"]
+
+        db_session.expire_all()
+        still_there = db_session.query(VoiceProfile).filter(
+            VoiceProfile.id == profile_id
+        ).first()
+        assert still_there is not None
+        assert still_there.name == "ExistingSpeaker"
+
+        after = set(os.listdir(VOICES_DIR)) if VOICES_DIR.exists() else set()
+        leftovers = after - before
+        assert leftovers == set()
+    finally:
+        after = set(os.listdir(VOICES_DIR)) if VOICES_DIR.exists() else set()
+        for name in after - before:
+            try:
+                os.remove(VOICES_DIR / name)
+            except OSError:
+                pass
 
 
 def test_enroll_speaker_validation(client, db_session, tmp_path):

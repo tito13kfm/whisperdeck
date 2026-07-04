@@ -9,12 +9,14 @@ it, the runner re-reads it between batches).
 import asyncio
 import datetime
 
-from database import LlmJob, Transcript
+from database import LlmJob, Transcript, VoiceProfile
+from services.audio_prep import extract_clips_concat
+from services.voice_id import voice_id_service
 
 ACTIVE_STATUSES = ("pending", "running")
 _MAX_CONCURRENT_JOBS = 2
 
-VALID_KINDS = ("correction", "summary", "rediarize")
+VALID_KINDS = ("correction", "summary", "rediarize", "voice_match")
 
 
 def serialize_llm_job(job: LlmJob) -> dict:
@@ -141,7 +143,7 @@ async def run_llm_job(SessionLocal, job_id: int, transcription_service, diarizat
             return
 
         api_key, provider_config = None, None
-        if job.kind != "rediarize":  # rediarize is local compute — no LLM key involved
+        if job.kind not in ("rediarize", "voice_match"):  # local compute — no LLM key involved
             api_key, provider_config = resolve_provider_key(db, job.user_id, job.provider)
             if job.provider != "local" and not api_key:
                 _finish(db, job, "failed", f"no {job.provider} API key saved (see service panel)")
@@ -206,6 +208,52 @@ async def run_llm_job(SessionLocal, job_id: int, transcription_service, diarizat
                 _finish(db, job, "completed")
             except Exception as e:
                 _finish(db, job, "failed", str(e))
+        elif job.kind == "voice_match":
+            if voice_id_service._backend == "none":
+                _finish(db, job, "failed", "No voice embedding backend available")
+                return
+            if not (transcript.audio_path and os.path.exists(transcript.audio_path)):
+                _finish(db, job, "failed", "No stored audio for this transcript")
+                return
+            has_enrolled_voice = (
+                db.query(VoiceProfile)
+                .filter(VoiceProfile.user_id == job.user_id, VoiceProfile.embedding.isnot(None))
+                .first()
+                is not None
+            )
+            if not has_enrolled_voice:
+                _finish(db, job, "failed", "No enrolled voices with clips — add a clip to a roster profile first")
+                return
+            segments = transcript.segments or []
+            job.progress_total = len(segments)
+            job.progress_done = 0
+            db.commit()
+            skipped = 0
+            new_segments = list(segments)
+            for i, seg in enumerate(segments):
+                try:
+                    clip_path = await extract_clips_concat(
+                        transcript.audio_path, [{"start": seg["start"], "end": seg["end"]}],
+                        str(os.path.dirname(transcript.audio_path)),
+                    )
+                    try:
+                        matches = voice_id_service.identify(db, job.user_id, clip_path, threshold=0.65)
+                    finally:
+                        try:
+                            os.remove(clip_path)
+                        except OSError:
+                            pass
+                    if matches:
+                        new_segments[i] = {**seg, "speaker": matches[0]["name"]}
+                except Exception:
+                    skipped += 1
+                job.progress_done = i + 1
+                db.commit()
+            transcript.segments = new_segments
+            transcript.updated_at = datetime.datetime.utcnow()
+            db.commit()
+            error = f"{skipped} segment(s) skipped (extraction/embedding failed)" if skipped else None
+            _finish(db, job, "completed", error)
         else:
             _finish(db, job, "failed", f"Unknown job kind '{job.kind}'")
     except Exception as e:

@@ -22,12 +22,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 from sqlalchemy.orm import Session
 
-from database import init_db, backfill_user_id, Transcript, Summary, VoiceProfile, ProviderConfig, User, LlmJob
+from database import init_db, backfill_user_id, Transcript, Summary, VoiceProfile, VoiceClip, ProviderConfig, User, LlmJob
 from services.auth import get_or_create_fallback_user, create_user, authenticate_user
 from services.settings import get_user_settings, update_user_settings
 from services.transcription import TranscriptionService
 from services.diarization import DiarizationService
-from services.voice_id import VoiceIdentificationService
+from services.voice_id import voice_id_service
 from services.audio_prep import transcode_for_upload, AudioPrepError, chunk_audio, get_audio_duration, extract_clips_concat
 from services.queue import create_chunk_jobs, retry_failed_chunks, queue_worker_loop, compute_queue_status, cancel_transcript_jobs, resume_cancelled_chunks
 from services.hotwords import list_hotwords, add_hotword, delete_hotword
@@ -79,7 +79,6 @@ if migrated_tables:
 
 transcription_service = TranscriptionService(str(UPLOAD_DIR))
 diarization_service = DiarizationService()
-voice_id_service = VoiceIdentificationService(str(VOICES_DIR))
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -171,6 +170,7 @@ def _serialize_transcript(db: Session, t: Transcript) -> dict:
         # ("correction running — section X of Y") straight from these.
         "correction_job": serialize_llm_job(cj) if (cj := latest_job(db, t.id, "correction")) else None,
         "summary_job": serialize_llm_job(sj) if (sj := latest_job(db, t.id, "summary")) else None,
+        "voice_match_job": serialize_llm_job(vj) if (vj := latest_job(db, t.id, "voice_match")) else None,
     }
 
 
@@ -803,6 +803,44 @@ async def rename_transcript_speaker(
     return {"renamed": renamed, "transcript": _serialize_transcript(db, t)}
 
 
+@app.post("/api/transcripts/{transcript_id}/segments/retag")
+async def retag_transcript_segments(
+    transcript_id: int,
+    data: dict = Body(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Fix a chunk of mis-diarized lines by index, without touching other
+    segments that happen to share the same (correct) original label.
+    corrected_text is intentionally left untouched — there is no reliable
+    line-to-segment-index mapping once the LLM has reworded/merged lines."""
+    indices = data.get("indices") or []
+    speaker = (data.get("speaker") or "").strip()
+    if not indices or not speaker:
+        raise HTTPException(status_code=400, detail="'indices' (non-empty) and 'speaker' are required")
+
+    t = db.query(Transcript).filter(
+        Transcript.id == transcript_id, Transcript.user_id == current_user.id
+    ).first()
+    if not t:
+        raise HTTPException(status_code=404, detail="Transcript not found")
+
+    segments = t.segments or []
+    for i in indices:
+        if not isinstance(i, int) or i < 0 or i >= len(segments):
+            raise HTTPException(status_code=400, detail=f"Segment index {i} is out of range")
+
+    index_set = set(indices)
+    new_segments = [
+        {**seg, "speaker": speaker} if i in index_set else seg
+        for i, seg in enumerate(segments)
+    ]
+    t.segments = new_segments
+    t.updated_at = datetime.datetime.utcnow()
+    db.commit()
+    return {"retagged": len(index_set), "transcript": _serialize_transcript(db, t)}
+
+
 @app.post("/api/transcripts/{transcript_id}/enroll-speaker")
 async def enroll_speaker_from_transcript(
     transcript_id: int,
@@ -812,8 +850,9 @@ async def enroll_speaker_from_transcript(
 ):
     """Enroll a voice profile from transcript lines flagged as seeds.
     The clip time ranges are cut from the stored audio, concatenated into
-    one sample, and embedded — one enroll call, since re-enrolling a name
-    overwrites its embedding rather than averaging."""
+    one sample, and added as a clip on the named profile (creating it if
+    needed) — the profile's embedding is the mean of all its clips, so
+    repeated calls append and average rather than overwrite."""
     name = (data.get("name") or "").strip()
     clips = data.get("clips") or []
     if not name:
@@ -832,25 +871,49 @@ async def enroll_speaker_from_transcript(
         sample_path = await extract_clips_concat(t.audio_path, clips, str(UPLOAD_DIR))
     except (AudioPrepError, KeyError, TypeError, ValueError) as e:
         raise HTTPException(status_code=400, detail=f"Could not extract seed clips: {e}")
+    profile_created_here = False
+    permanent_path = None
     try:
-        profile = voice_id_service.enroll(
-            db, current_user.id, name=name, audio_path=sample_path,
-            notes=f"Seeded from transcript {t.id}",
-        )
+        profile = db.query(VoiceProfile).filter(
+            VoiceProfile.user_id == current_user.id, VoiceProfile.name == name
+        ).first()
+        if not profile:
+            profile = VoiceProfile(
+                user_id=current_user.id, name=name, embedding=None,
+                embedding_model=voice_id_service.backend_name, sample_count=0,
+                notes=f"Seeded from transcript {t.id}",
+            )
+            db.add(profile)
+            db.commit()
+            profile_created_here = True
+        permanent_path = VOICES_DIR / f"clip_{profile.id}_{datetime.datetime.utcnow().strftime('%Y%m%d_%H%M%S%f')}.wav"
+        shutil.copyfile(sample_path, permanent_path)
+        clip = voice_id_service.add_clip(db, profile.id, current_user.id, str(permanent_path),
+                                          source_transcript_id=t.id)
+        db.refresh(profile)
+        return {
+            "id": profile.id,
+            "name": profile.name,
+            "sample_count": profile.sample_count,
+            "embedding_model": profile.embedding_model,
+            "notes": profile.notes,
+            "clip_id": clip.id,
+        }
     except ValueError as e:
+        if permanent_path is not None:
+            try:
+                os.remove(permanent_path)
+            except OSError:
+                pass
+        if profile_created_here:
+            db.delete(profile)
+            db.commit()
         raise HTTPException(status_code=400, detail=str(e))
     finally:
         try:
             os.remove(sample_path)
         except OSError:
             pass
-    return {
-        "id": profile.id,
-        "name": profile.name,
-        "sample_count": profile.sample_count,
-        "embedding_model": profile.embedding_model,
-        "notes": profile.notes,
-    }
 
 
 # ── Diarization ───────────────────────────────────────────────────────────
@@ -978,6 +1041,25 @@ async def rediarize_transcript(
     t.diarize_requested = True
     db.commit()
     job = enqueue_llm_job(db, current_user.id, transcript_id, "rediarize", "", "")
+    return {"job": serialize_llm_job(job)}
+
+
+@app.post("/api/transcripts/{transcript_id}/voice-match")
+async def voice_match_transcript(
+    transcript_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Queue a background pass that relabels segments using the voice
+    roster — no re-clustering, just matching against enrolled voices."""
+    t = db.query(Transcript).filter(
+        Transcript.id == transcript_id, Transcript.user_id == current_user.id
+    ).first()
+    if not t:
+        raise HTTPException(status_code=404, detail="Transcript not found")
+    if not (t.audio_path and os.path.exists(t.audio_path)):
+        raise HTTPException(status_code=400, detail="No stored audio for this transcript")
+    job = enqueue_llm_job(db, current_user.id, transcript_id, "voice_match", "", "")
     return {"job": serialize_llm_job(job)}
 
 
@@ -1189,6 +1271,63 @@ async def delete_voice_profile(profile_id: int, db: Session = Depends(get_db), c
     if not ok:
         raise HTTPException(status_code=404, detail="Voice profile not found")
     return {"ok": True}
+
+
+@app.post("/api/voices/{profile_id}/clips")
+async def add_voice_clip(
+    profile_id: int,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Add one clip to an existing roster profile — recomputes the
+    profile's match embedding as the mean of all its clips."""
+    file_ext = os.path.splitext(file.filename or "clip.wav")[1] or ".wav"
+    safe_name = f"clip_{profile_id}_{datetime.datetime.utcnow().strftime('%Y%m%d_%H%M%S%f')}{file_ext}"
+    save_path = VOICES_DIR / safe_name
+    with open(save_path, "wb") as f:
+        f.write(await file.read())
+
+    try:
+        clip = voice_id_service.add_clip(db, profile_id, current_user.id, str(save_path))
+        return {"id": clip.id, "voice_profile_id": clip.voice_profile_id,
+                "created_at": clip.created_at.isoformat() if clip.created_at else None}
+    except ValueError as e:
+        try:
+            os.remove(save_path)
+        except OSError:
+            pass
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.delete("/api/voices/{profile_id}/clips/{clip_id}")
+async def delete_voice_clip(
+    profile_id: int, clip_id: int,
+    db: Session = Depends(get_db), current_user: User = Depends(get_current_user),
+):
+    ok = voice_id_service.remove_clip(db, profile_id, current_user.id, clip_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Clip not found")
+    return {"ok": True}
+
+
+@app.get("/api/voices/{profile_id}/clips/{clip_id}/audio")
+async def get_voice_clip_audio(
+    profile_id: int, clip_id: int,
+    db: Session = Depends(get_db), current_user: User = Depends(get_current_user),
+):
+    profile = db.query(VoiceProfile).filter(
+        VoiceProfile.id == profile_id, VoiceProfile.user_id == current_user.id
+    ).first()
+    if not profile:
+        raise HTTPException(status_code=404, detail="Voice profile not found")
+    clip = db.query(VoiceClip).filter(
+        VoiceClip.id == clip_id, VoiceClip.voice_profile_id == profile.id
+    ).first()
+    if not clip or not os.path.exists(clip.audio_path):
+        raise HTTPException(status_code=404, detail="Clip audio not found")
+    ext = os.path.splitext(clip.audio_path)[1].lower()
+    return FileResponse(clip.audio_path, media_type=_AUDIO_MIME.get(ext, "audio/wav"))
 
 
 # ── Frontend ──────────────────────────────────────────────────────────────
