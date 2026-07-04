@@ -9,3 +9,5 @@ test_audio.mp3
 .claude/
 .serena/
 *.log
+dist/
+scripts/.build-cache/
