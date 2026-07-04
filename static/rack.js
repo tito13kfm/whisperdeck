@@ -17,7 +17,9 @@ const S = {
   running: false,
   runningId: null,
   pct: 0,
-  stage: null,                // upload | transcribe | diarize | finalize
+  stage: null,                // upload (=Initialize) | transcribe | diarize | finalize
+  jobStartedAt: null,
+  indeterminate: false,       // running with no chunk data — show elapsed, not %
   jobDone: false,
   doneId: null,
   // settings state (persisted server-side)
@@ -237,7 +239,13 @@ function statusView(t) {
     case 'cancelled':
       color = AMBER; lit = 0; nix = pct + '%'; nixVariant = 'dim'; word = 'cancelled'; break;
     case 'processing':
-      if (qs.state === 'queued' || (!qs.state && pct === 0)) {
+      if (!qs.state && !(t.job_progress && t.job_progress.total)) {
+        // single-shot run: no chunk jobs exist, so there is no percent —
+        // show elapsed time instead of a frozen 0%
+        color = AMBER; lit = 1;
+        nix = t.created_at ? formatTime((Date.now() - new Date(t.created_at + 'Z').getTime()) / 1000) : '--:--';
+        word = 'working';
+      } else if (qs.state === 'queued') {
         color = null; lit = 0;
         nix = t.duration_seconds != null ? formatTime(t.duration_seconds) : '--:--';
         nixVariant = 'dim'; word = 'queued';
@@ -354,6 +362,7 @@ function transcriptMeta(t) {
   if (t.duration_seconds != null) parts.push(formatDur(t.duration_seconds));
   if (sv.word === 'done' && t.speaker_count) parts.push(t.speaker_count + ' speakers');
   if (sv.word === 'running') parts.push('transcribing…');
+  if (sv.word === 'working') parts.push('processing' + (t.duration_seconds ? ' ' + Math.round(t.duration_seconds / 60) + '-min recording' : '') + ' — no section data on this run');
   if (sv.word === 'waiting') parts.push('rate-limited — waiting');
   if (sv.word === 'queued') parts.push('awaiting turn');
   if (sv.word === 'failed' && t.error) parts.push(t.error);
@@ -906,7 +915,9 @@ function syncTranscribe() {
     dA.textContent = '● REC — mic' + (S.stereoLive ? ' (L) + system (R)' : ' only') + ' — press ● to stop';
     dA.style.color = RED;
   } else if (S.running) {
-    dA.textContent = 'Reading (' + S.pct + '%): ' + S.tapeName;
+    dA.textContent = S.indeterminate
+      ? 'Reading: ' + S.tapeName + ' — ' + formatTime((Date.now() - S.jobStartedAt) / 1000) + ' elapsed'
+      : 'Reading (' + S.pct + '%): ' + S.tapeName;
     dA.style.color = AMBER;
   } else if (S.tapeLoaded) {
     const mb = S.tapeFile ? ' · ' + (S.tapeFile.size / 1048576).toFixed(1) + ' MB' : '';
@@ -954,12 +965,25 @@ function syncTranscribe() {
   // meter row
   $('tx-meter').style.display = S.running ? '' : 'none';
   if (S.running) {
-    const lit = Math.round(S.pct / 100 * 11);
-    $('tx-meter-leds').innerHTML = [...Array(11)].map((_, i) => i < lit
-      ? '<span style="background:' + AMBER + ';box-shadow:0 0 4px ' + AMBER + '"></span>'
-      : '<span></span>').join('');
-    $('tx-meter-nix').outerHTML = '<span id="tx-meter-nix">' + nixie(S.pct + '%') + '</span>';
+    if (S.indeterminate) {
+      // no chunk data — one amber "working" cell + elapsed clock, never a fake %
+      $('tx-meter-leds').innerHTML = [...Array(11)].map((_, i) => i === 0
+        ? '<span style="background:' + AMBER + ';box-shadow:0 0 4px ' + AMBER + '"></span>'
+        : '<span></span>').join('');
+      $('tx-meter-nix').outerHTML = '<span id="tx-meter-nix">' + nixie(formatTime((Date.now() - S.jobStartedAt) / 1000)) + '</span>';
+    } else {
+      const lit = Math.round(S.pct / 100 * 11);
+      $('tx-meter-leds').innerHTML = [...Array(11)].map((_, i) => i < lit
+        ? '<span style="background:' + AMBER + ';box-shadow:0 0 4px ' + AMBER + '"></span>'
+        : '<span></span>').join('');
+      $('tx-meter-nix').outerHTML = '<span id="tx-meter-nix">' + nixie(S.pct + '%') + '</span>';
+    }
     $('tx-stages').innerHTML = stageLeds();
+    // Cancel is only real once the backend knows the transcript (chunked
+    // runs). A sync run in flight has nothing cancellable — say so.
+    const cancelBtn = $('tx-cancel');
+    cancelBtn.disabled = !S.runningId;
+    cancelBtn.title = S.runningId ? '' : "Quick local jobs can't be cancelled — this finishes on its own";
   }
 
   // signal path
@@ -1015,6 +1039,23 @@ function ejectTape() {
   syncTranscribe();
 }
 
+let txTicker = null;
+
+// 1s heartbeat while a job runs: keeps the elapsed readout moving on runs
+// with no chunk data, and flips Initialize→Transcribe on sync runs after
+// model warm-up (no observable signal exists inside a single blocking call —
+// 15s comfortably covers local model init).
+function startTxTicker() {
+  clearInterval(txTicker);
+  txTicker = setInterval(() => {
+    if (!S.running) { clearInterval(txTicker); txTicker = null; return; }
+    if (S.indeterminate && S.stage === 'upload' && Date.now() - S.jobStartedAt > 15000) {
+      S.stage = 'transcribe';
+    }
+    if (S.page === 'transcribe') syncTranscribe();
+  }, 1000);
+}
+
 async function startJob() {
   const prov = curProv();
   if (!S.tapeLoaded || S.running || !prov.ready || !S.tapeFile) return;
@@ -1037,16 +1078,22 @@ async function startJob() {
   S.jobDone = false;
   S.pct = 0;
   S.stage = 'upload';
+  S.jobStartedAt = Date.now();
+  S.indeterminate = false;
+  startTxTicker();
   syncTranscribe();
   try {
+    // Sync runs (short local files) block here until done; chunked runs
+    // return as soon as jobs are queued. Stage stays at Initialize until
+    // polling sees transcription actually moving.
     const initial = await api('/api/transcribe', { method: 'POST', body: form });
     S.runningId = initial.id;
-    S.stage = 'transcribe';
     syncTranscribe();
     const finalData = await pollTranscript(initial.id);
     S.running = false;
     S.stage = null;
     S.runningId = null;
+    S.indeterminate = false;
     if (finalData.status === 'cancelled') {
       toast('Transcription cancelled — resume from the channel bank', 'info');
       S.pct = 0;
@@ -1068,6 +1115,7 @@ async function startJob() {
     S.running = false;
     S.stage = null;
     S.runningId = null;
+    S.indeterminate = false;
     toast('Transcription failed: ' + e.message, 'error');
     syncTranscribe();
   }
@@ -1078,10 +1126,17 @@ async function pollTranscript(id) {
     const data = await api('/api/transcripts/' + id);
     const qs = data.queue_status;
     if (qs && qs.chunks_total) {
+      S.indeterminate = false;
       S.pct = Math.round(qs.chunks_done / qs.chunks_total * 100);
-      S.stage = qs.chunks_done >= qs.chunks_total ? (S.diarize ? 'diarize' : 'finalize') : 'transcribe';
+      if (qs.chunks_done >= qs.chunks_total) {
+        S.stage = S.diarize ? 'diarize' : 'finalize';
+      } else if (qs.state === 'transcribing' || qs.chunks_done > 0) {
+        S.stage = 'transcribe';
+      }
+      // else: chunks exist but nothing has run yet — still Initialize
     } else if (data.status === 'processing') {
-      S.stage = 'transcribe';
+      // no chunk jobs on this run — nothing to derive a percent from
+      S.indeterminate = true;
     }
     if (['completed', 'failed', 'partial', 'cancelled'].includes(data.status)) {
       if (data.status === 'failed') throw new Error(data.error || 'Transcription failed');
@@ -1093,10 +1148,17 @@ async function pollTranscript(id) {
 }
 
 async function cancelJob() {
-  if (!S.runningId) return;
+  if (!S.runningId) {
+    toast("Nothing to cancel yet — this run has no cancellable sections", 'info');
+    return;
+  }
   try {
-    await api('/api/transcripts/' + S.runningId + '/cancel', { method: 'POST' });
-    toast('Cancelling…', 'info');
+    const r = await api('/api/transcripts/' + S.runningId + '/cancel', { method: 'POST' });
+    if (r && r.cancelled === 0) {
+      toast('Nothing left to cancel — the running section finishes, then the job stops', 'info');
+    } else {
+      toast('Cancelling — ' + (r.cancelled ?? 0) + ' pending sections stopped', 'info');
+    }
   } catch (e) { toast(e.message, 'error'); }
 }
 

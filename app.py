@@ -28,7 +28,7 @@ from services.settings import get_user_settings, update_user_settings
 from services.transcription import TranscriptionService
 from services.diarization import DiarizationService
 from services.voice_id import VoiceIdentificationService
-from services.audio_prep import transcode_for_upload, AudioPrepError, chunk_audio
+from services.audio_prep import transcode_for_upload, AudioPrepError, chunk_audio, get_audio_duration
 from services.queue import create_chunk_jobs, retry_failed_chunks, queue_worker_loop, compute_queue_status, cancel_transcript_jobs, resume_cancelled_chunks
 from services.hotwords import list_hotwords, add_hotword, delete_hotword
 from services.correction import extract_hotwords_from_doc
@@ -37,7 +37,7 @@ from services.llm_jobs import (
     enqueue_llm_job, enqueue_auto_correction, serialize_llm_job, latest_job,
     cancel_llm_job, rerun_llm_job, llm_worker_loop,
 )
-from backends import list_providers, get_provider
+from backends import list_providers, get_provider, LOCAL_PROVIDERS
 
 # ── App Setup ──────────────────────────────────────────────────────────────
 
@@ -53,9 +53,10 @@ for d in [DATA_DIR, UPLOAD_DIR, TRANSCRIPT_DIR, VOICES_DIR]:
 
 SESSION_SECRET_PATH = DATA_DIR / ".session_secret"
 
-# Local providers run on-device with no upload size limit — skip the
-# ffmpeg transcode and background chunk-job path that remote providers need.
-LOCAL_PROVIDERS = ("builtin", "moonshine")
+# Local recordings longer than this run through the chunk-job pipeline
+# (real progress + cancel/resume) instead of one opaque blocking call.
+LOCAL_CHUNK_SECONDS = 300
+
 if SESSION_SECRET_PATH.exists():
     SESSION_SECRET = SESSION_SECRET_PATH.read_text().strip()
 else:
@@ -429,9 +430,17 @@ async def transcribe_audio(
     # produces webm/opus), in which case local providers need the ffmpeg
     # pass too or soundfile fails with "Format not recognised".
     local_readable_exts = {".wav", ".flac", ".ogg", ".mp3", ".aiff", ".aif"}
+    try:
+        raw_duration = get_audio_duration(str(save_path))
+    except Exception:
+        raw_duration = 0.0
     needs_transcode = (
         provider not in LOCAL_PROVIDERS
         or save_path.suffix.lower() not in local_readable_exts
+        # Long local recordings go through the chunk pipeline below, and
+        # chunk_audio stream-copies — it needs the transcoded mp3, not raw
+        # PCM (splitting a WAV into .mp3 chunk files fails in the muxer).
+        or raw_duration > LOCAL_CHUNK_SECONDS
     )
     if needs_transcode:
         try:
@@ -469,14 +478,33 @@ async def transcribe_audio(
     threshold_bytes = user_settings["chunk_threshold_mb"] * 1024 * 1024
     file_size = os.path.getsize(save_path)
 
-    if provider not in LOCAL_PROVIDERS and file_size > threshold_bytes:
-        # Over the size threshold: split into chunks and hand off to the
-        # background worker instead of transcribing inline. The request
-        # returns as soon as jobs are queued — see services/queue.py for
-        # dispatch/finalization and static/index.html's polling loop for
-        # how the frontend picks up the result.
+    try:
+        # Re-probe post-transcode (video tracks stripped, codec changed);
+        # falls back to the raw probe from above.
+        duration_seconds = get_audio_duration(str(save_path)) or raw_duration
+    except Exception:
+        duration_seconds = raw_duration
+
+    # Hosted providers chunk to stay under upload/rate limits. Local providers
+    # chunk long recordings purely for observability and control: each chunk is
+    # a TranscriptionJob, which is what gives the UI real percent progress and
+    # makes cancel/resume work. Short local files keep the inline path — chunk
+    # overhead is pointless for a voice memo. Model context is not harmed:
+    # Moonshine VAD-splits internally (trained on 10-55s segments) and Whisper
+    # works in 30s windows; chunk seams reuse the same silence-aware split +
+    # overlap dedupe as the hosted path.
+    hosted_chunked = provider not in LOCAL_PROVIDERS and file_size > threshold_bytes
+    local_chunked = provider in LOCAL_PROVIDERS and duration_seconds > LOCAL_CHUNK_SECONDS
+
+    if hosted_chunked or local_chunked:
+        if local_chunked:
+            # ~LOCAL_CHUNK_SECONDS of audio per chunk, derived from this
+            # file's actual byte rate.
+            target_chunk_bytes = int(file_size / duration_seconds * LOCAL_CHUNK_SECONDS)
+        else:
+            target_chunk_bytes = threshold_bytes
         try:
-            chunks = await chunk_audio(str(save_path), str(UPLOAD_DIR), target_chunk_bytes=threshold_bytes)
+            chunks = await chunk_audio(str(save_path), str(UPLOAD_DIR), target_chunk_bytes=target_chunk_bytes)
         except AudioPrepError as e:
             raise HTTPException(status_code=500, detail=str(e))
 
@@ -495,6 +523,9 @@ async def transcribe_audio(
         # Real processed size, not the raw upload size — the sum of all
         # chunk files, since that's what actually gets sent to the provider.
         transcript.processed_size_bytes = sum(os.path.getsize(c["path"]) for c in chunks)
+        # Known now from the ffprobe above — lets the UI say "48-min
+        # recording" before the first chunk lands.
+        transcript.duration_seconds = duration_seconds
         db.commit()
         create_chunk_jobs(db, transcript.id, chunks)
         return _serialize_transcript(db, transcript)

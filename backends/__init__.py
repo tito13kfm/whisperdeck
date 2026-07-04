@@ -29,6 +29,10 @@ PROVIDER_REGISTRY = {
 }
 
 
+# Providers that run on-device: no API key, no upload limits, no rate budget.
+LOCAL_PROVIDERS = ("builtin", "moonshine")
+
+
 def get_provider(name: str, config: dict) -> BaseProvider:
     """Factory: get a provider instance by name with the given config."""
     cls = PROVIDER_REGISTRY.get(name)

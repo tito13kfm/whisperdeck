@@ -11,6 +11,9 @@ from typing import Optional
 
 from .base import BaseProvider, TranscriptionResult, ProviderError
 
+# See _get_model — avoids reloading WhisperModel for every chunk job.
+_MODEL_CACHE: dict = {}
+
 
 class BuiltinProvider(BaseProvider):
     """Transcribe locally using faster-whisper with a downloaded Whisper model.
@@ -79,14 +82,23 @@ class BuiltinProvider(BaseProvider):
 
         os.makedirs(self.cache_dir, exist_ok=True)
 
-        self._model = WhisperModel(
-            self.model_name,
-            device=device,
-            compute_type=compute,
-            download_root=self.cache_dir,
-            cpu_threads=os.cpu_count() or 4,
-            num_workers=2,
-        )
+        # Process-wide cache — get_provider() makes a fresh provider per chunk
+        # job, and a WhisperModel load is expensive. Keyed by everything that
+        # changes the loaded artifact. Serial local dispatch (services/queue.py)
+        # keeps the shared instance uncontended.
+        cache_key = (self.model_name, device, compute)
+        cached = _MODEL_CACHE.get(cache_key)
+        if cached is None:
+            cached = WhisperModel(
+                self.model_name,
+                device=device,
+                compute_type=compute,
+                download_root=self.cache_dir,
+                cpu_threads=os.cpu_count() or 4,
+                num_workers=2,
+            )
+            _MODEL_CACHE[cache_key] = cached
+        self._model = cached
         return self._model
 
     async def transcribe(self, audio_path: str, **kwargs) -> TranscriptionResult:

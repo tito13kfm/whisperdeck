@@ -81,6 +81,11 @@ def compute_audio_seconds_used(db, user_id: int, provider: str, window_seconds: 
 def has_budget(db, user_id: int, provider: str, additional_seconds: float) -> bool:
     """True if submitting a job of additional_seconds would keep this user
     under both the hourly and daily audio-second budget for provider."""
+    from backends import LOCAL_PROVIDERS
+    if provider in LOCAL_PROVIDERS:
+        # On-device work has no rate limit to budget against — the DEFAULT_LIMITS
+        # fallback would nonsensically throttle local CPU inference.
+        return True
     limits = PROVIDER_LIMITS.get(provider, DEFAULT_LIMITS)
     used_hour = compute_audio_seconds_used(db, user_id, provider, 3600)
     used_day = compute_audio_seconds_used(db, user_id, provider, 86400)
@@ -529,7 +534,15 @@ async def queue_worker_tick(SessionLocal, diarization_service) -> None:
             if not transcript:
                 continue
             settings = get_user_settings(db, transcript.user_id)
-            concurrency_cap = settings["max_concurrent_chunks"]
+            from backends import LOCAL_PROVIDERS
+            if transcript.provider in LOCAL_PROVIDERS:
+                # Serial: local backends share one process-wide model instance
+                # (see backends/moonshine.py cache comment) whose thread-safety
+                # under concurrent calls is unverified, and parallel local
+                # inference would multiply RAM for no wall-clock win on CPU.
+                concurrency_cap = 1
+            else:
+                concurrency_cap = settings["max_concurrent_chunks"]
 
             already_running = (
                 db.query(TranscriptionJob)
