@@ -1604,7 +1604,7 @@ function segmentsHtml(t) {
         ${sg.speaker ? `<button data-seg-seed data-speaker="${escapeHtml(sg.speaker)}" data-start="${sg.start}" data-end="${sg.end}" title="${seeded ? 'Flagged as a voice seed — click to unflag' : 'Flag this line as a voice seed for enrollment'}" style="${segBtn};color:${seeded ? 'var(--nixie)' : 'var(--label-dim)'};${seeded ? 'border-color:var(--nixie);text-shadow:0 0 5px rgba(255,138,61,0.6)' : ''}">◈</button>` : ''}
       </div>`;
     const speakerLabel = sg.speaker
-      ? `<span data-seg-rename="${escapeHtml(sg.speaker)}" title="Rename this speaker everywhere (enrolls flagged seed clips)" style="font-family:var(--f-cond);font-weight:600;font-size:12.5px;text-transform:uppercase;letter-spacing:0.05em;cursor:pointer;border-bottom:1px dotted var(--label-dim)">${escapeHtml(sg.speaker)}</span>`
+      ? `<span data-seg-rename="${escapeHtml(sg.speaker)}" title="Rename this speaker everywhere" style="font-family:var(--f-cond);font-weight:600;font-size:12.5px;text-transform:uppercase;letter-spacing:0.05em;cursor:pointer;border-bottom:1px dotted var(--label-dim)">${escapeHtml(sg.speaker)}</span>`
       : `<span style="font-family:var(--f-cond);font-weight:600;font-size:12.5px;text-transform:uppercase;letter-spacing:0.05em">Speaker</span>`;
     return `
     <div style="display:flex;gap:16px;padding:12px 0;border-bottom:1px solid var(--seg-edge)">
@@ -1661,6 +1661,14 @@ function segPlay(btn) {
   btn.textContent = '■';
 }
 
+function syncEnrollMarkedBtn() {
+  const btn = $('enroll-marked-btn');
+  if (!btn) return;
+  const has = markedSpeakers().length > 0;
+  btn.disabled = !has;
+  btn.title = has ? '' : 'Flag a line with the ◈ button first';
+}
+
 function toggleSeed(btn) {
   const sp = btn.dataset.speaker;
   const start = parseFloat(btn.dataset.start), end = parseFloat(btn.dataset.end);
@@ -1669,39 +1677,75 @@ function toggleSeed(btn) {
   if (i >= 0) list.splice(i, 1); else list.push({ start, end });
   if (!list.length) delete seedClips[sp];
   renderDetailBody(); // rows render flag state straight from seedClips
+  syncEnrollMarkedBtn();
 }
 
 async function renameSpeaker(speaker) {
   const t = detailData;
   if (!t) return;
-  const clips = seedClips[speaker] || [];
   const name = (window.prompt('Rename "' + speaker + '" to:', speaker) || '').trim();
-  if (!name) return;
-  if (name === speaker && !clips.length) return;
+  if (!name || name === speaker) return;
   try {
-    if (name !== speaker) {
-      const r = await api('/api/transcripts/' + t.id + '/speakers/rename', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ from: speaker, to: name }),
-      });
-      toast('Renamed ' + r.renamed + ' line' + (r.renamed !== 1 ? 's' : '') + ' to ' + name, 'info');
-      // The flags belong to the new label now, whatever enrollment does.
-      if (seedClips[speaker]) { seedClips[name] = seedClips[speaker]; delete seedClips[speaker]; }
-    }
+    const r = await api('/api/transcripts/' + t.id + '/speakers/rename', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ from: speaker, to: name }),
+    });
+    toast('Renamed ' + r.renamed + ' line' + (r.renamed !== 1 ? 's' : '') + ' to ' + name, 'info');
+    if (seedClips[speaker]) { seedClips[name] = seedClips[speaker]; delete seedClips[speaker]; }
   } catch (e) { toast(e.message, 'error'); return; }
-  // Enrollment failing (e.g. no embedding backend) must not hide a rename
-  // that already landed — refresh happens either way.
-  if (clips.length && window.confirm('Enroll ' + clips.length + ' flagged clip' + (clips.length !== 1 ? 's' : '') + ' as the voice seed for "' + name + '"?')) {
+  await loadTranscriptDetail(t.id, { preserveQuery: true });
+}
+
+function markedSpeakers() {
+  return Object.keys(seedClips).filter(sp => (seedClips[sp] || []).length);
+}
+
+async function openEnrollMarkedModal() {
+  const speakers = markedSpeakers();
+  if (!speakers.length) { toast('No clips flagged — use the ◈ button on a line first', 'error'); return; }
+  let voices = [];
+  try { voices = await api('/api/voices'); } catch { /* picker still works with just "new name" */ }
+  const options = voices.map(v => `<option value="${escapeHtml(v.name)}">${escapeHtml(v.name)}</option>`).join('');
+  const speakerOptions = speakers.map(sp => `<option value="${escapeHtml(sp)}">${escapeHtml(sp)} (${seedClips[sp].length} clip${seedClips[sp].length !== 1 ? 's' : ''})</option>`).join('');
+  openModal(`
+    <div style="font-family:var(--f-cond);font-weight:700;font-size:16px;text-transform:uppercase;letter-spacing:0.04em;margin-bottom:12px">Enroll marked clips</div>
+    <div style="display:flex;flex-direction:column;gap:10px;margin-bottom:16px">
+      <div class="field" style="gap:4px">
+        <label class="t-label" style="font-size:12px">Flagged speaker</label>
+        <select class="inp" id="enroll-marked-speaker" style="font-size:12px;padding:7px 9px">${speakerOptions}</select>
+      </div>
+      <div class="field" style="gap:4px">
+        <label class="t-label" style="font-size:12px">Roster name</label>
+        <select class="inp" id="enroll-marked-existing" style="font-size:12px;padding:7px 9px">
+          <option value="">— New name —</option>${options}
+        </select>
+        <input class="inp" id="enroll-marked-new" type="text" placeholder="New speaker name" style="font-size:12px;padding:7px 9px;margin-top:6px">
+      </div>
+    </div>
+    <div style="display:flex;justify-content:flex-end;gap:8px">
+      <button class="btn" id="enroll-marked-cancel" style="font-size:12px;border-color:var(--inset-edge)">Cancel</button>
+      <button id="enroll-marked-go" style="font-family:var(--f-mono);font-size:11px;font-weight:700;background:${AMBER};color:var(--amber-ink);border:none;padding:8px 14px;border-radius:2px;cursor:pointer">Enroll</button>
+    </div>`);
+  $('enroll-marked-cancel').addEventListener('click', closeModal);
+  $('enroll-marked-go').addEventListener('click', async () => {
+    const sp = $('enroll-marked-speaker').value;
+    const existing = $('enroll-marked-existing').value;
+    const newName = $('enroll-marked-new').value.trim();
+    const name = existing || newName;
+    if (!name) { toast('Pick an existing name or type a new one', 'error'); return; }
+    const clips = seedClips[sp] || [];
     try {
-      const p = await api('/api/transcripts/' + t.id + '/enroll-speaker', {
+      const p = await api('/api/transcripts/' + detailData.id + '/enroll-speaker', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name, clips }),
       });
-      toast('Voice profile "' + p.name + '" saved to the roster', 'info');
-      delete seedClips[name]; // consumed; kept on failure so a retry can re-flag nothing
+      toast('Voice profile "' + p.name + '" now has ' + p.sample_count + ' clip' + (p.sample_count !== 1 ? 's' : ''), 'info');
+      delete seedClips[sp];
+      closeModal();
+      renderDetailBody();
+      syncEnrollMarkedBtn();
     } catch (e) { toast(e.message, 'error'); }
-  }
-  await loadTranscriptDetail(t.id, { preserveQuery: true });
+  });
 }
 
 function llmJobActive(job) {
@@ -1834,7 +1878,8 @@ function renderDetail() {
     </div>
     <div style="display:flex;gap:6px;align-items:flex-end;margin-bottom:14px;padding:0 36px">
       ${detailTabsHtml()}
-      <input id="detail-search" class="inp" type="text" placeholder="Search transcript…" value="${escapeHtml(S.query)}" style="margin-left:auto;font-size:12px;width:220px;padding:8px 10px">
+      <button id="enroll-marked-btn" class="btn" style="margin-left:auto;font-size:11px;padding:6px 12px;border-color:var(--inset-edge)" ${markedSpeakers().length ? '' : 'disabled title="Flag a line with the ◈ button first"'}>Enroll marked clips</button>
+      <input id="detail-search" class="inp" type="text" placeholder="Search transcript…" value="${escapeHtml(S.query)}" style="font-size:12px;width:220px;padding:8px 10px">
     </div>
     <div id="detail-body"></div>`;
 
@@ -1849,6 +1894,8 @@ function renderDetail() {
     if (S.detailTab !== 'transcript') { S.detailTab = 'transcript'; renderDetail(); $('detail-search').focus(); }
     else renderDetailBody();
   });
+  const enrollMarkedBtn = $('enroll-marked-btn');
+  if (enrollMarkedBtn) enrollMarkedBtn.addEventListener('click', openEnrollMarkedModal);
   root.querySelectorAll('[data-dact]').forEach(b => b.addEventListener('click', () => detailAction(b.dataset.dact)));
   // Delegated: segment rows re-render on search/poll, the container doesn't.
   $('detail-body').addEventListener('click', detailBodyClick);
