@@ -210,6 +210,12 @@ class VoiceIdentificationService:
         return results
 
     def list_profiles(self, db, user_id: int) -> list[dict]:
+        profiles = (
+            db.query(VoiceProfile)
+            .filter(VoiceProfile.user_id == user_id)
+            .order_by(VoiceProfile.name)
+            .all()
+        )
         return [
             {
                 "id": p.id,
@@ -218,11 +224,19 @@ class VoiceIdentificationService:
                 "embedding_model": p.embedding_model,
                 "notes": p.notes,
                 "created_at": p.created_at.isoformat() if p.created_at else None,
+                "clips": [
+                    {
+                        "id": c.id,
+                        "created_at": c.created_at.isoformat() if c.created_at else None,
+                        "source_transcript_id": c.source_transcript_id,
+                    }
+                    for c in db.query(VoiceClip)
+                    .filter(VoiceClip.voice_profile_id == p.id)
+                    .order_by(VoiceClip.created_at)
+                    .all()
+                ],
             }
-            for p in db.query(VoiceProfile)
-            .filter(VoiceProfile.user_id == user_id)
-            .order_by(VoiceProfile.name)
-            .all()
+            for p in profiles
         ]
 
     def delete_profile(self, db, user_id: int, profile_id: int) -> bool:

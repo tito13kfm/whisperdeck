@@ -22,7 +22,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 from sqlalchemy.orm import Session
 
-from database import init_db, backfill_user_id, Transcript, Summary, VoiceProfile, ProviderConfig, User, LlmJob
+from database import init_db, backfill_user_id, Transcript, Summary, VoiceProfile, VoiceClip, ProviderConfig, User, LlmJob
 from services.auth import get_or_create_fallback_user, create_user, authenticate_user
 from services.settings import get_user_settings, update_user_settings
 from services.transcription import TranscriptionService
@@ -1189,6 +1189,63 @@ async def delete_voice_profile(profile_id: int, db: Session = Depends(get_db), c
     if not ok:
         raise HTTPException(status_code=404, detail="Voice profile not found")
     return {"ok": True}
+
+
+@app.post("/api/voices/{profile_id}/clips")
+async def add_voice_clip(
+    profile_id: int,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Add one clip to an existing roster profile — recomputes the
+    profile's match embedding as the mean of all its clips."""
+    file_ext = os.path.splitext(file.filename or "clip.wav")[1] or ".wav"
+    safe_name = f"clip_{profile_id}_{datetime.datetime.utcnow().strftime('%Y%m%d_%H%M%S%f')}{file_ext}"
+    save_path = VOICES_DIR / safe_name
+    with open(save_path, "wb") as f:
+        f.write(await file.read())
+
+    try:
+        clip = voice_id_service.add_clip(db, profile_id, current_user.id, str(save_path))
+        return {"id": clip.id, "voice_profile_id": clip.voice_profile_id,
+                "created_at": clip.created_at.isoformat() if clip.created_at else None}
+    except ValueError as e:
+        try:
+            os.remove(save_path)
+        except OSError:
+            pass
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.delete("/api/voices/{profile_id}/clips/{clip_id}")
+async def delete_voice_clip(
+    profile_id: int, clip_id: int,
+    db: Session = Depends(get_db), current_user: User = Depends(get_current_user),
+):
+    ok = voice_id_service.remove_clip(db, profile_id, current_user.id, clip_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Clip not found")
+    return {"ok": True}
+
+
+@app.get("/api/voices/{profile_id}/clips/{clip_id}/audio")
+async def get_voice_clip_audio(
+    profile_id: int, clip_id: int,
+    db: Session = Depends(get_db), current_user: User = Depends(get_current_user),
+):
+    profile = db.query(VoiceProfile).filter(
+        VoiceProfile.id == profile_id, VoiceProfile.user_id == current_user.id
+    ).first()
+    if not profile:
+        raise HTTPException(status_code=404, detail="Voice profile not found")
+    clip = db.query(VoiceClip).filter(
+        VoiceClip.id == clip_id, VoiceClip.voice_profile_id == profile.id
+    ).first()
+    if not clip or not os.path.exists(clip.audio_path):
+        raise HTTPException(status_code=404, detail="Clip audio not found")
+    ext = os.path.splitext(clip.audio_path)[1].lower()
+    return FileResponse(clip.audio_path, media_type=_AUDIO_MIME.get(ext, "audio/wav"))
 
 
 # ── Frontend ──────────────────────────────────────────────────────────────

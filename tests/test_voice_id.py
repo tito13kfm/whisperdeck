@@ -1,5 +1,6 @@
 """VoiceIdentificationService backend robustness: classifier caching,
 fallback chain when the primary backend fails, and surfaced error detail."""
+import io
 import sys
 import types
 import numpy as np
@@ -225,3 +226,72 @@ def test_identify_skips_profiles_with_no_embedding(tmp_path, monkeypatch, db_ses
     results = svc.identify(db_session, user.id, str(probe))
 
     assert results == []  # no crash, no match — the empty profile is skipped
+
+
+def test_list_voices_includes_clips(client, db_session, tmp_path, monkeypatch):
+    user = _test_user(db_session)
+    profile = _profile(db_session, user.id)
+    from services import voice_id as voice_id_module
+    monkeypatch.setattr("app.voice_id_service._extract_embedding", lambda path: np.array([1.0, 2.0]))
+    clip_file = tmp_path / "c.wav"
+    clip_file.write_bytes(b"wav")
+    import app as app_module
+    app_module.voice_id_service.add_clip(db_session, profile.id, user.id, str(clip_file))
+
+    r = client.get("/api/voices")
+    assert r.status_code == 200
+    body = next(v for v in r.json() if v["id"] == profile.id)
+    assert len(body["clips"]) == 1
+    assert "id" in body["clips"][0] and "created_at" in body["clips"][0]
+
+
+def test_add_clip_route_happy_path(client, db_session, tmp_path, monkeypatch):
+    user = _test_user(db_session)
+    profile = _profile(db_session, user.id)
+    monkeypatch.setattr("app.voice_id_service._extract_embedding", lambda path: np.array([1.0, 2.0]))
+
+    r = client.post(
+        f"/api/voices/{profile.id}/clips",
+        files={"file": ("clip.wav", io.BytesIO(b"wav bytes"), "audio/wav")},
+    )
+    assert r.status_code == 200
+    assert r.json()["voice_profile_id"] == profile.id
+
+
+def test_add_clip_route_404_for_missing_profile(client, db_session):
+    r = client.post(
+        "/api/voices/999999/clips",
+        files={"file": ("clip.wav", io.BytesIO(b"wav bytes"), "audio/wav")},
+    )
+    assert r.status_code == 400  # add_clip raises ValueError("...not found")
+
+
+def test_delete_clip_route(client, db_session, tmp_path, monkeypatch):
+    user = _test_user(db_session)
+    profile = _profile(db_session, user.id)
+    monkeypatch.setattr("app.voice_id_service._extract_embedding", lambda path: np.array([1.0, 2.0]))
+    import app as app_module
+    clip_file = tmp_path / "c.wav"
+    clip_file.write_bytes(b"wav")
+    clip = app_module.voice_id_service.add_clip(db_session, profile.id, user.id, str(clip_file))
+
+    r = client.delete(f"/api/voices/{profile.id}/clips/{clip.id}")
+    assert r.status_code == 200
+    assert r.json()["ok"] is True
+
+    r2 = client.delete(f"/api/voices/{profile.id}/clips/{clip.id}")
+    assert r2.status_code == 404
+
+
+def test_clip_audio_route_serves_file(client, db_session, tmp_path, monkeypatch):
+    user = _test_user(db_session)
+    profile = _profile(db_session, user.id)
+    monkeypatch.setattr("app.voice_id_service._extract_embedding", lambda path: np.array([1.0, 2.0]))
+    import app as app_module
+    clip_file = tmp_path / "c.wav"
+    clip_file.write_bytes(b"real wav bytes")
+    clip = app_module.voice_id_service.add_clip(db_session, profile.id, user.id, str(clip_file))
+
+    r = client.get(f"/api/voices/{profile.id}/clips/{clip.id}/audio")
+    assert r.status_code == 200
+    assert r.content == b"real wav bytes"
