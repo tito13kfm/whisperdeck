@@ -27,7 +27,7 @@ from services.auth import get_or_create_fallback_user, create_user, authenticate
 from services.settings import get_user_settings, update_user_settings
 from services.transcription import TranscriptionService
 from services.diarization import DiarizationService
-from services.voice_id import VoiceIdentificationService
+from services.voice_id import voice_id_service
 from services.audio_prep import transcode_for_upload, AudioPrepError, chunk_audio, get_audio_duration, extract_clips_concat
 from services.queue import create_chunk_jobs, retry_failed_chunks, queue_worker_loop, compute_queue_status, cancel_transcript_jobs, resume_cancelled_chunks
 from services.hotwords import list_hotwords, add_hotword, delete_hotword
@@ -79,7 +79,6 @@ if migrated_tables:
 
 transcription_service = TranscriptionService(str(UPLOAD_DIR))
 diarization_service = DiarizationService()
-voice_id_service = VoiceIdentificationService(str(VOICES_DIR))
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):

@@ -322,3 +322,6 @@ class VoiceIdentificationService:
         if norm_a == 0 or norm_b == 0:
             return 0.0
         return float(np.dot(a, b) / (norm_a * norm_b))
+
+
+voice_id_service = VoiceIdentificationService()
