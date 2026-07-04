@@ -57,6 +57,10 @@ foreach ($item in @("app.py", "backends", "services", "database", "static", "req
     Copy-Item (Join-Path $RepoRoot $item) $AppDest -Recurse -Force
 }
 
+Write-Host "[*] Cleaning __pycache__ and .pyc files..."
+Get-ChildItem -Recurse -Path $AppDest -Include __pycache__ -Directory | Remove-Item -Recurse -Force
+Get-ChildItem -Recurse -Path $AppDest -Include *.pyc -File | Remove-Item -Force
+
 Write-Host "[*] Writing launcher and README..."
 $LauncherTemplate = Get-Content (Join-Path $RepoRoot "scripts\portable-template\WhisperDeck.bat.template") -Raw
 $LauncherTemplate.Replace("__PORT__", "9781") | Set-Content -Path (Join-Path $BuildDir "WhisperDeck.bat") -NoNewline
