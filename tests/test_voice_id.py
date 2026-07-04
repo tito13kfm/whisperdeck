@@ -187,6 +187,32 @@ def test_remove_last_clip_zeroes_profile(tmp_path, monkeypatch, db_session):
     assert profile.sample_count == 0
 
 
+def test_delete_profile_removes_clip_files_and_rows(tmp_path, monkeypatch, db_session):
+    from services.voice_id import VoiceIdentificationService
+    svc = VoiceIdentificationService(voices_dir=str(tmp_path / "voices"))
+    values = iter([np.array([0.0, 0.0]), np.array([2.0, 4.0])])
+    monkeypatch.setattr(svc, "_extract_embedding", lambda path: next(values))
+
+    user = _test_user(db_session)
+    profile = _profile(db_session, user.id)
+    clip_paths = []
+    clip_ids = []
+    for i in range(2):
+        clip_file = tmp_path / f"clip{i}.wav"
+        clip_file.write_bytes(b"wav")
+        clip = svc.add_clip(db_session, profile.id, user.id, str(clip_file))
+        clip_paths.append(clip_file)
+        clip_ids.append(clip.id)
+
+    ok = svc.delete_profile(db_session, user.id, profile.id)
+    assert ok is True
+
+    for clip_file in clip_paths:
+        assert not clip_file.exists()
+    remaining = db_session.query(VoiceClip).filter(VoiceClip.id.in_(clip_ids)).all()
+    assert remaining == []
+
+
 def test_identify_skips_profiles_with_no_embedding(tmp_path, monkeypatch, db_session):
     from services.voice_id import VoiceIdentificationService
     svc = VoiceIdentificationService(voices_dir=str(tmp_path / "voices"))

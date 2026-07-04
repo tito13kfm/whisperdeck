@@ -231,6 +231,13 @@ class VoiceIdentificationService:
         ).first()
         if not p:
             return False
+        clips = db.query(VoiceClip).filter(VoiceClip.voice_profile_id == p.id).all()
+        for clip in clips:
+            try:
+                os.remove(clip.audio_path)
+            except OSError:
+                pass
+            db.delete(clip)
         db.delete(p)
         db.commit()
         return True
