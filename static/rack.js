@@ -420,7 +420,7 @@ async function loadDashboard() {
   }
 }
 /* ══════════════════ transcribe: instruments (verbatim from prototype logic) ══════════════════ */
-const INST = { dt: 0, raf: null, vuMeters: {}, scopeInit: false, driveOverride: null };
+const INST = { dt: 0, raf: null, vuMeters: {}, scopeInit: false, driveMic: null, driveSys: null };
 
 function instrumentsActive() { return S.running || S.capturing; }
 
@@ -428,8 +428,9 @@ function drawVU(canvas, key) {
   const ctx = canvas.getContext('2d');
   const w = canvas.width, h = canvas.height;
   const m = INST.vuMeters[key] || (INST.vuMeters[key] = { v: 0, target: 0, next: 0 });
-  // driveOverride: live-capture analyser level (0..1) once Phase 8 wires it
-  const drive = instrumentsActive() ? (INST.driveOverride ?? 0.75) : 0.03;
+  // during live capture the drive is the real analyser level for this channel
+  const override = key === 'mic' ? INST.driveMic : INST.driveSys;
+  const drive = instrumentsActive() ? (override ?? 0.75) : 0.03;
   if (INST.dt > m.next) {
     m.target = Math.min(1, drive * (0.3 + Math.random() * 0.7) + (Math.random() < 0.1 ? 0.2 * drive : 0));
     m.next = INST.dt + 0.12 + Math.random() * 0.32;
@@ -555,6 +556,13 @@ function startInstruments() {
   const loop = () => {
     if (S.page !== 'transcribe') { INST.raf = null; return; }
     INST.dt += 0.016;
+    if (S.capturing) {
+      INST.driveMic = analyserLevel(CAP.micAn);
+      INST.driveSys = CAP.sysAn ? analyserLevel(CAP.sysAn) : 0;
+    } else {
+      INST.driveMic = null;
+      INST.driveSys = null;
+    }
     const scope = $('inst-scope'), vm = $('inst-vu-mic'), vs = $('inst-vu-sys');
     if (scope) drawScope(scope);
     if (vm) drawVU(vm, 'mic');
@@ -796,10 +804,14 @@ function wireTranscribe() {
   wireTranscribeDrop();
   $('key-eject').addEventListener('click', () => {
     if (S.running) { toast('Job in progress — cancel first', 'info'); return; }
+    if (S.capturing) { toast('Recording — press ● to stop first', 'info'); return; }
     if (S.tapeLoaded) ejectTape(); else $('file-input').click();
   });
   $('key-play-a').addEventListener('click', startJob);
-  $('key-rec').addEventListener('click', openRecModal);
+  $('key-rec').addEventListener('click', () => {
+    if (S.capturing) stopLiveCapture();
+    else if (!S.running) openRecModal();
+  });
   $('key-open-done').addEventListener('click', () => {
     if (S.doneId) navigate('detail', S.doneId);
   });
@@ -871,7 +883,7 @@ function syncTranscribe() {
 
   // deck A window: drop zone vs reels
   const winA = $('deck-a-window');
-  const wantReels = S.tapeLoaded;
+  const wantReels = S.tapeLoaded || S.capturing;
   if (wantReels && !winA.querySelector('.deck-window')) winA.innerHTML = reelsSvg('decka');
   if (!wantReels && !winA.querySelector('.deck-drop')) {
     winA.innerHTML = `
@@ -881,14 +893,17 @@ function syncTranscribe() {
       </button>`;
     wireTranscribeDrop();
   }
-  const spin = motionAllowed() && S.running;
+  const spin = motionAllowed() && (S.running || S.capturing);
   document.querySelectorAll('.decka-reel').forEach(g => g.style.animation = spin ? 'reel-spin 2.4s linear infinite' : 'none');
   const spinB = motionAllowed() && S.running && S.stage === 'finalize';
   document.querySelectorAll('.deckb-reel').forEach(g => g.style.animation = spinB ? 'reel-spin 2.4s linear infinite' : 'none');
 
   // deck statuses
   const dA = $('deck-a-status');
-  if (S.running) {
+  if (S.capturing) {
+    dA.textContent = '● REC — mic' + (S.stereoLive ? ' (L) + system (R)' : ' only') + ' — press ● to stop';
+    dA.style.color = RED;
+  } else if (S.running) {
     dA.textContent = 'Reading (' + S.pct + '%): ' + S.tapeName;
     dA.style.color = AMBER;
   } else if (S.tapeLoaded) {
@@ -922,6 +937,10 @@ function syncTranscribe() {
     el.style.background = ledColor || 'var(--edge)';
     el.style.boxShadow = ledColor ? '0 0 5px ' + GREEN : 'none';
   });
+  const recLed = $('key-rec-led');
+  recLed.style.background = S.capturing ? RED : 'var(--edge)';
+  recLed.style.boxShadow = S.capturing ? '0 0 5px ' + RED : 'none';
+  $('key-rec').title = S.capturing ? 'Stop recording' : 'Live capture — asks before recording';
 
   // arm strip
   $('tx-arm-text').textContent = S.running
@@ -1099,8 +1118,111 @@ function openRecModal() {
   });
 }
 
-function startLiveCapture() {
-  toast('Live capture arrives in Phase 8', 'info');
+/* ══════════════════ live capture ══════════════════
+   Mic → left channel, system audio (display capture) → right channel.
+   STEREO lamp lights only when both tracks are genuinely live.
+   Recording stays client-side; it loads Deck A as a tape when stopped. */
+const CAP = { rec: null, chunks: [], mic: null, disp: null, actx: null, micAn: null, sysAn: null, buf: null };
+
+function analyserLevel(an) {
+  if (!an) return 0;
+  an.getByteTimeDomainData(CAP.buf);
+  let sum = 0;
+  for (let i = 0; i < CAP.buf.length; i++) {
+    const d = (CAP.buf[i] - 128) / 128;
+    sum += d * d;
+  }
+  // RMS scaled so normal speech drives the needle into the upper half
+  return Math.min(1, Math.sqrt(sum / CAP.buf.length) * 4);
+}
+
+async function startLiveCapture() {
+  if (S.capturing || S.running) return;
+  let mic;
+  try {
+    mic = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch {
+    toast('Microphone permission denied — nothing was recorded', 'error');
+    return;
+  }
+  let disp = null;
+  if (navigator.mediaDevices.getDisplayMedia) {
+    try {
+      const d = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
+      if (d.getAudioTracks().length) {
+        disp = d;
+        d.getVideoTracks().forEach(t => t.stop()); // audio only — no video is kept
+      } else {
+        d.getTracks().forEach(t => t.stop());
+        toast('No system audio in that share — recording mic only', 'info');
+      }
+    } catch {
+      toast('System audio declined — recording mic only', 'info');
+    }
+  }
+
+  const actx = new AudioContext();
+  const dest = actx.createMediaStreamDestination();
+  const merger = actx.createChannelMerger(2);
+  merger.connect(dest);
+  CAP.buf = new Uint8Array(256);
+
+  const micSrc = actx.createMediaStreamSource(mic);
+  CAP.micAn = actx.createAnalyser();
+  CAP.micAn.fftSize = 256;
+  micSrc.connect(CAP.micAn);
+  micSrc.connect(merger, 0, 0);
+
+  CAP.sysAn = null;
+  if (disp) {
+    const sysSrc = actx.createMediaStreamSource(disp);
+    CAP.sysAn = actx.createAnalyser();
+    CAP.sysAn.fftSize = 256;
+    sysSrc.connect(CAP.sysAn);
+    sysSrc.connect(merger, 0, 1);
+  }
+
+  const mime = MediaRecorder.isTypeSupported('audio/webm;codecs=opus') ? 'audio/webm;codecs=opus' : 'audio/webm';
+  const rec = new MediaRecorder(dest.stream, { mimeType: mime });
+  CAP.chunks = [];
+  rec.ondataavailable = (e) => { if (e.data.size) CAP.chunks.push(e.data); };
+  rec.onstop = finishLiveCapture;
+  rec.start(1000);
+
+  CAP.rec = rec;
+  CAP.mic = mic;
+  CAP.disp = disp;
+  CAP.actx = actx;
+  S.capturing = true;
+  S.stereoLive = !!disp;
+  syncTranscribe();
+  toast(disp ? 'Recording mic + system audio' : 'Recording mic only', 'info');
+}
+
+function stopLiveCapture() {
+  if (!S.capturing || !CAP.rec) return;
+  CAP.rec.stop(); // finishLiveCapture runs from onstop
+}
+
+function finishLiveCapture() {
+  const blob = new Blob(CAP.chunks, { type: 'audio/webm' });
+  [CAP.mic, CAP.disp].forEach(s => s && s.getTracks().forEach(t => t.stop()));
+  if (CAP.actx) CAP.actx.close();
+  CAP.rec = null; CAP.mic = null; CAP.disp = null; CAP.actx = null;
+  CAP.micAn = null; CAP.sysAn = null;
+  S.capturing = false;
+  S.stereoLive = false;
+  INST.driveMic = null;
+  INST.driveSys = null;
+  const now = new Date();
+  const stamp = String(now.getHours()).padStart(2, '0') + String(now.getMinutes()).padStart(2, '0');
+  if (blob.size > 0) {
+    loadTape(new File([blob], 'live_capture_' + stamp + '.webm', { type: 'audio/webm' }));
+    toast('Capture loaded onto Deck A — press START to transcribe');
+  } else {
+    toast('Nothing was recorded', 'info');
+    syncTranscribe();
+  }
 }
 /* ══════════════════ channel bank ══════════════════ */
 let bankPollTimer = null;
