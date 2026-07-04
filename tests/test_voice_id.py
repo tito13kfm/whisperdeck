@@ -1,13 +1,14 @@
 """VoiceIdentificationService backend robustness: classifier caching,
 fallback chain when the primary backend fails, and surfaced error detail."""
 import io
+import os
 import sys
 import types
 import numpy as np
 import pytest
 
 from database import User, VoiceProfile, VoiceClip
-from services.voice_id import VoiceIdentificationService
+from services.voice_id import VoiceIdentificationService, voice_id_service
 
 
 def _test_user(db_session):
@@ -295,3 +296,11 @@ def test_clip_audio_route_serves_file(client, db_session, tmp_path, monkeypatch)
     r = client.get(f"/api/voices/{profile.id}/clips/{clip.id}/audio")
     assert r.status_code == 200
     assert r.content == b"real wav bytes"
+
+
+def test_singleton_voices_dir_is_absolute_and_cwd_independent():
+    """The module-level singleton's default voices_dir must resolve to an
+    absolute path rooted at the project directory, not a path relative to
+    whatever the process's current working directory happens to be."""
+    assert os.path.isabs(voice_id_service.voices_dir)
+    assert voice_id_service.voices_dir.replace("\\", "/").endswith("data/voices")

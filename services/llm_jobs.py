@@ -9,7 +9,7 @@ it, the runner re-reads it between batches).
 import asyncio
 import datetime
 
-from database import LlmJob, Transcript
+from database import LlmJob, Transcript, VoiceProfile
 from services.audio_prep import extract_clips_concat
 from services.voice_id import voice_id_service
 
@@ -214,6 +214,15 @@ async def run_llm_job(SessionLocal, job_id: int, transcription_service, diarizat
                 return
             if not (transcript.audio_path and os.path.exists(transcript.audio_path)):
                 _finish(db, job, "failed", "No stored audio for this transcript")
+                return
+            has_enrolled_voice = (
+                db.query(VoiceProfile)
+                .filter(VoiceProfile.user_id == job.user_id, VoiceProfile.embedding.isnot(None))
+                .first()
+                is not None
+            )
+            if not has_enrolled_voice:
+                _finish(db, job, "failed", "No enrolled voices with clips — add a clip to a roster profile first")
                 return
             segments = transcript.segments or []
             job.progress_total = len(segments)

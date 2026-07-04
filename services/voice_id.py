@@ -9,15 +9,21 @@ import json
 import datetime
 import hashlib
 import numpy as np
+from pathlib import Path
 from typing import Optional
 
 from database import VoiceProfile, VoiceClip
+
+# app.py's BASE_DIR (Path(__file__).parent.resolve()) is the project root;
+# this file lives one level down in services/, so parent.parent gets back
+# to the same root without importing app.py (which would be circular).
+_DEFAULT_VOICES_DIR = str(Path(__file__).resolve().parent.parent / "data" / "voices")
 
 
 class VoiceIdentificationService:
     """Enroll known speakers and identify speakers in audio."""
 
-    def __init__(self, voices_dir: str = "data/voices"):
+    def __init__(self, voices_dir: str = _DEFAULT_VOICES_DIR):
         self.voices_dir = voices_dir
         os.makedirs(voices_dir, exist_ok=True)
         self._backend = self._detect_backend()

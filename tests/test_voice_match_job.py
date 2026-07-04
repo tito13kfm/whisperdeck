@@ -3,7 +3,7 @@ leaves low-confidence segments untouched, tolerates per-segment failures."""
 import asyncio
 from unittest.mock import patch
 
-from database import Transcript, User
+from database import Transcript, User, VoiceProfile
 from services.llm_jobs import enqueue_llm_job, run_llm_job
 
 
@@ -24,6 +24,16 @@ def _user(db_session, name="matcher"):
     return user
 
 
+def _enrolled_profile(db_session, user, name="Alice"):
+    profile = VoiceProfile(
+        user_id=user.id, name=name, embedding=[0.1, 0.2, 0.3],
+        embedding_model="test", sample_count=1,
+    )
+    db_session.add(profile)
+    db_session.commit()
+    return profile
+
+
 def _transcript_with_segments(db_session, user, tmp_path, segments):
     audio = tmp_path / "a.mp3"
     audio.write_bytes(b"fake")
@@ -36,6 +46,7 @@ def _transcript_with_segments(db_session, user, tmp_path, segments):
 
 def test_voice_match_relabels_confident_segments_only(db_session, tmp_path):
     user = _user(db_session)
+    _enrolled_profile(db_session, user)
     segments = [
         {"start": 0.0, "end": 1.0, "text": "hi", "speaker": "SPEAKER_00"},
         {"start": 1.0, "end": 2.0, "text": "bye", "speaker": "SPEAKER_01"},
@@ -87,6 +98,31 @@ def test_voice_match_fails_fast_with_no_backend(db_session, tmp_path):
     assert "backend" in job.error.lower()
 
 
+def test_voice_match_fails_fast_with_empty_roster(db_session, tmp_path):
+    """No VoiceProfile rows (or none with an embedding) for this user — the
+    job should fail before extracting audio for a single segment."""
+    user = _user(db_session)
+    segments = [
+        {"start": 0.0, "end": 1.0, "text": "hi", "speaker": "SPEAKER_00"},
+        {"start": 1.0, "end": 2.0, "text": "bye", "speaker": "SPEAKER_01"},
+    ]
+    t = _transcript_with_segments(db_session, user, tmp_path, segments)
+    job = enqueue_llm_job(db_session, user.id, t.id, "voice_match", "", "")
+    job.status = "running"
+    db_session.commit()
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("extract_clips_concat should not be called with an empty roster")
+
+    factory = lambda: _NoCloseSession(db_session)
+    with patch("services.llm_jobs.extract_clips_concat", fail_if_called):
+        asyncio.run(run_llm_job(factory, job.id, transcription_service=None))
+
+    db_session.refresh(job)
+    assert job.status == "failed"
+    assert job.error == "No enrolled voices with clips — add a clip to a roster profile first"
+
+
 def test_voice_match_fails_when_audio_missing(db_session):
     user = _user(db_session)
     t = Transcript(user_id=user.id, title="d", filename="d.mp3", status="completed",
@@ -108,6 +144,7 @@ def test_voice_match_fails_when_audio_missing(db_session):
 
 def test_voice_match_skips_segment_on_extraction_failure_without_failing_job(db_session, tmp_path):
     user = _user(db_session)
+    _enrolled_profile(db_session, user)
     segments = [
         {"start": 0.0, "end": 1.0, "text": "hi", "speaker": "SPEAKER_00"},
         {"start": 1.0, "end": 2.0, "text": "bye", "speaker": "SPEAKER_01"},
