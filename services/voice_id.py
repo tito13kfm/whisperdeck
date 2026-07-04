@@ -11,7 +11,7 @@ import hashlib
 import numpy as np
 from typing import Optional
 
-from database import VoiceProfile
+from database import VoiceProfile, VoiceClip
 
 
 class VoiceIdentificationService:
@@ -59,7 +59,14 @@ class VoiceIdentificationService:
         audio_path: str,
         notes: str = "",
     ) -> VoiceProfile:
-        """Enroll a speaker by name from an audio sample."""
+        """Enroll a speaker by name from an audio sample — creates the
+        profile if it doesn't exist yet, then adds this sample as its
+        first clip.
+
+        Embedding extraction is validated before any db access so a failed
+        extraction never mutates state (and never requires a real db when
+        extraction fails outright — see
+        test_enroll_error_includes_underlying_reason_when_all_backends_fail)."""
         embedding = self._extract_embedding(audio_path)
         if embedding is None:
             if self._backend == "none":
@@ -75,28 +82,105 @@ class VoiceIdentificationService:
                 f"dependencies (e.g. torch, torchaudio) are working correctly.{reason}"
             )
 
-        existing = db.query(VoiceProfile).filter(
+        profile = db.query(VoiceProfile).filter(
             VoiceProfile.user_id == user_id, VoiceProfile.name == name
         ).first()
-        if existing:
-            existing.embedding = embedding.tolist() if isinstance(embedding, np.ndarray) else embedding
-            existing.sample_count += 1
-            existing.notes = notes or existing.notes
-            existing.updated_at = datetime.datetime.utcnow()
-            profile = existing
-        else:
+        if not profile:
             profile = VoiceProfile(
-                user_id=user_id,
-                name=name,
-                embedding=embedding.tolist() if isinstance(embedding, np.ndarray) else embedding,
-                embedding_model=self.backend_name,
-                sample_count=1,
-                notes=notes,
+                user_id=user_id, name=name, embedding=None,
+                embedding_model=self.backend_name, sample_count=0, notes=notes,
             )
             db.add(profile)
+            db.commit()
+        elif notes:
+            profile.notes = notes
+            db.commit()
 
-        db.commit()
+        self._persist_clip(db, profile, audio_path, embedding)
+        db.refresh(profile)
         return profile
+
+    def add_clip(
+        self,
+        db,
+        profile_id: int,
+        user_id: int,
+        audio_path: str,
+        source_transcript_id: Optional[int] = None,
+    ) -> VoiceClip:
+        """Add one clip to an existing profile and recompute the profile's
+        match embedding as the mean of all its clips."""
+        profile = db.query(VoiceProfile).filter(
+            VoiceProfile.id == profile_id, VoiceProfile.user_id == user_id
+        ).first()
+        if not profile:
+            raise ValueError(f"Voice profile {profile_id} not found")
+
+        embedding = self._extract_embedding(audio_path)
+        if embedding is None:
+            reason = f" ({self._last_backend_error})" if self._last_backend_error else ""
+            raise ValueError(
+                f"Voice embedding extraction failed using the {self.backend_name} "
+                f"backend.{reason}"
+            )
+
+        return self._persist_clip(db, profile, audio_path, embedding, source_transcript_id)
+
+    def _persist_clip(
+        self,
+        db,
+        profile: VoiceProfile,
+        audio_path: str,
+        embedding,
+        source_transcript_id: Optional[int] = None,
+    ) -> VoiceClip:
+        """Shared by enroll() and add_clip(): write the VoiceClip row for an
+        already-extracted embedding and recompute the profile's mean
+        embedding. Kept separate from add_clip so enroll() doesn't have to
+        run embedding extraction twice."""
+        clip = VoiceClip(
+            voice_profile_id=profile.id,
+            audio_path=audio_path,
+            embedding=embedding.tolist() if isinstance(embedding, np.ndarray) else embedding,
+            source_transcript_id=source_transcript_id,
+        )
+        db.add(clip)
+        db.commit()
+        self._recompute_profile_embedding(db, profile)
+        return clip
+
+    def remove_clip(self, db, profile_id: int, user_id: int, clip_id: int) -> bool:
+        profile = db.query(VoiceProfile).filter(
+            VoiceProfile.id == profile_id, VoiceProfile.user_id == user_id
+        ).first()
+        if not profile:
+            return False
+        clip = db.query(VoiceClip).filter(
+            VoiceClip.id == clip_id, VoiceClip.voice_profile_id == profile.id
+        ).first()
+        if not clip:
+            return False
+        try:
+            os.remove(clip.audio_path)
+        except OSError:
+            pass
+        db.delete(clip)
+        db.commit()
+        self._recompute_profile_embedding(db, profile)
+        return True
+
+    def _recompute_profile_embedding(self, db, profile: VoiceProfile) -> None:
+        clips = db.query(VoiceClip).filter(VoiceClip.voice_profile_id == profile.id).all()
+        if not clips:
+            profile.embedding = None
+            profile.sample_count = 0
+        else:
+            stacked = np.array([c.embedding for c in clips])
+            profile.embedding = np.mean(stacked, axis=0).tolist()
+            profile.sample_count = len(clips)
+        profile.embedding_model = self.backend_name
+        profile.updated_at = datetime.datetime.utcnow()
+        db.commit()
 
     def identify(self, db, user_id: int, audio_path: str, threshold: float = 0.65) -> list[dict]:
         """Identify a speaker from an audio sample. Returns ranked candidates."""
@@ -110,6 +194,8 @@ class VoiceIdentificationService:
 
         results = []
         for profile in profiles:
+            if profile.embedding is None:
+                continue
             stored = np.array(profile.embedding)
             similarity = self._cosine_similarity(probe_embedding, stored)
             if similarity >= threshold:

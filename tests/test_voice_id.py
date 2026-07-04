@@ -5,7 +5,17 @@ import types
 import numpy as np
 import pytest
 
+from database import User, VoiceProfile, VoiceClip
 from services.voice_id import VoiceIdentificationService
+
+
+def _test_user(db_session):
+    user = db_session.query(User).filter(User.username == "testuser").first()
+    if not user:
+        user = User(username="testuser", password_hash="x", password_salt="y")
+        db_session.add(user)
+        db_session.commit()
+    return user
 
 
 def _svc(tmp_path):
@@ -77,3 +87,115 @@ def test_enroll_error_includes_underlying_reason_when_all_backends_fail(tmp_path
         svc.enroll(db=None, user_id=1, name="Alice", audio_path="fake.wav")
 
     assert "torchcodec incompatibility" in str(exc_info.value)
+
+
+def _profile(db_session, user_id, name="Alice"):
+    p = VoiceProfile(user_id=user_id, name=name, embedding=None, sample_count=0)
+    db_session.add(p)
+    db_session.commit()
+    return p
+
+
+def test_add_clip_creates_row_and_sets_profile_embedding_to_its_value(tmp_path, monkeypatch, db_session):
+    from services.voice_id import VoiceIdentificationService
+    svc = VoiceIdentificationService(voices_dir=str(tmp_path / "voices"))
+    monkeypatch.setattr(svc, "_extract_embedding", lambda path: np.array([1.0, 2.0, 3.0]))
+
+    user = _test_user(db_session)
+    profile = _profile(db_session, user.id)
+    clip_file = tmp_path / "clip1.wav"
+    clip_file.write_bytes(b"wav")
+
+    clip = svc.add_clip(db_session, profile.id, user.id, str(clip_file))
+
+    assert clip.id is not None
+    assert clip.voice_profile_id == profile.id
+    db_session.refresh(profile)
+    assert profile.embedding == [1.0, 2.0, 3.0]
+    assert profile.sample_count == 1
+
+
+def test_add_clip_averages_embedding_across_multiple_clips(tmp_path, monkeypatch, db_session):
+    from services.voice_id import VoiceIdentificationService
+    svc = VoiceIdentificationService(voices_dir=str(tmp_path / "voices"))
+    values = iter([np.array([0.0, 0.0]), np.array([2.0, 4.0])])
+    monkeypatch.setattr(svc, "_extract_embedding", lambda path: next(values))
+
+    user = _test_user(db_session)
+    profile = _profile(db_session, user.id)
+    for i in range(2):
+        clip_file = tmp_path / f"clip{i}.wav"
+        clip_file.write_bytes(b"wav")
+        svc.add_clip(db_session, profile.id, user.id, str(clip_file))
+
+    db_session.refresh(profile)
+    assert profile.embedding == [1.0, 2.0]
+    assert profile.sample_count == 2
+
+
+def test_add_clip_raises_when_extraction_fails(tmp_path, monkeypatch, db_session):
+    from services.voice_id import VoiceIdentificationService
+    svc = VoiceIdentificationService(voices_dir=str(tmp_path / "voices"))
+    monkeypatch.setattr(svc, "_extract_embedding", lambda path: None)
+
+    user = _test_user(db_session)
+    profile = _profile(db_session, user.id)
+    clip_file = tmp_path / "bad.wav"
+    clip_file.write_bytes(b"wav")
+
+    with pytest.raises(ValueError):
+        svc.add_clip(db_session, profile.id, user.id, str(clip_file))
+
+
+def test_remove_clip_recomputes_embedding_from_remaining(tmp_path, monkeypatch, db_session):
+    from services.voice_id import VoiceIdentificationService
+    svc = VoiceIdentificationService(voices_dir=str(tmp_path / "voices"))
+    values = iter([np.array([0.0, 0.0]), np.array([2.0, 4.0])])
+    monkeypatch.setattr(svc, "_extract_embedding", lambda path: next(values))
+
+    user = _test_user(db_session)
+    profile = _profile(db_session, user.id)
+    clips = []
+    for i in range(2):
+        clip_file = tmp_path / f"clip{i}.wav"
+        clip_file.write_bytes(b"wav")
+        clips.append(svc.add_clip(db_session, profile.id, user.id, str(clip_file)))
+
+    ok = svc.remove_clip(db_session, profile.id, user.id, clips[0].id)
+    assert ok is True
+
+    db_session.refresh(profile)
+    assert profile.embedding == [2.0, 4.0]
+    assert profile.sample_count == 1
+
+
+def test_remove_last_clip_zeroes_profile(tmp_path, monkeypatch, db_session):
+    from services.voice_id import VoiceIdentificationService
+    svc = VoiceIdentificationService(voices_dir=str(tmp_path / "voices"))
+    monkeypatch.setattr(svc, "_extract_embedding", lambda path: np.array([1.0, 1.0]))
+
+    user = _test_user(db_session)
+    profile = _profile(db_session, user.id)
+    clip_file = tmp_path / "only.wav"
+    clip_file.write_bytes(b"wav")
+    clip = svc.add_clip(db_session, profile.id, user.id, str(clip_file))
+
+    svc.remove_clip(db_session, profile.id, user.id, clip.id)
+
+    db_session.refresh(profile)
+    assert profile.embedding is None
+    assert profile.sample_count == 0
+
+
+def test_identify_skips_profiles_with_no_embedding(tmp_path, monkeypatch, db_session):
+    from services.voice_id import VoiceIdentificationService
+    svc = VoiceIdentificationService(voices_dir=str(tmp_path / "voices"))
+    user = _test_user(db_session)
+    _profile(db_session, user.id, name="Empty")  # embedding=None, no clips
+    monkeypatch.setattr(svc, "_extract_embedding", lambda path: np.array([1.0, 0.0]))
+
+    probe = tmp_path / "probe.wav"
+    probe.write_bytes(b"wav")
+    results = svc.identify(db_session, user.id, str(probe))
+
+    assert results == []  # no crash, no match — the empty profile is skipped
