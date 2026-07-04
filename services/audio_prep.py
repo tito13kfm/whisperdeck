@@ -110,6 +110,84 @@ def detect_silence_midpoints(audio_path: str, noise_db: str = "-30dB", min_durat
     return midpoints
 
 
+async def extract_clips_concat(
+    audio_path: str,
+    clips: list[dict],
+    output_dir: str,
+    max_total_seconds: float = 30.0,
+) -> str:
+    """Extract the given {start, end} time ranges and join them into one
+    16kHz mono wav, returned as a path the caller must delete when done.
+
+    Used to build a single voice-enrollment sample from transcript lines
+    flagged as seeds. Every clip is re-encoded to the same wav format,
+    which is what makes the concat demuxer's -c copy join safe. Total
+    audio is capped at max_total_seconds — the embedding backends only
+    look at the first ~30s anyway.
+    """
+    if not ffmpeg_available():
+        raise AudioPrepError("ffmpeg is not installed or not on PATH. See INSTALL.md.")
+
+    duration = get_audio_duration(audio_path)
+    base = os.path.splitext(os.path.basename(audio_path))[0]
+
+    selected = []
+    total = 0.0
+    for clip in clips:
+        start = max(0.0, float(clip["start"]))
+        end = min(duration, float(clip["end"]))
+        if end <= start:
+            continue
+        if total >= max_total_seconds:
+            break
+        end = min(end, start + (max_total_seconds - total))
+        selected.append((start, end))
+        total += end - start
+    if not selected:
+        raise AudioPrepError("No usable clip ranges (empty or outside the audio)")
+
+    def _run():
+        part_paths = []
+        list_path = os.path.join(output_dir, f"{base}_seed_list.txt")
+        out_path = os.path.join(output_dir, f"{base}_seed.wav")
+        try:
+            for i, (start, end) in enumerate(selected):
+                part = os.path.join(output_dir, f"{base}_seed_part{i}.wav")
+                result = subprocess.run(
+                    [
+                        "ffmpeg", "-y", "-i", audio_path,
+                        "-ss", str(start), "-to", str(end),
+                        "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le",
+                        part,
+                    ],
+                    capture_output=True, text=True,
+                )
+                if result.returncode != 0:
+                    raise AudioPrepError(f"ffmpeg clip extract failed: {result.stderr[-2000:]}")
+                part_paths.append(part)
+
+            with open(list_path, "w", encoding="utf-8") as f:
+                for p in part_paths:
+                    # Forward slashes: the concat demuxer parses backslashes
+                    # as escapes inside the quoted filename on Windows.
+                    f.write(f"file '{os.path.abspath(p).replace(os.sep, '/')}'\n")
+            result = subprocess.run(
+                ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", list_path, "-c", "copy", out_path],
+                capture_output=True, text=True,
+            )
+            if result.returncode != 0:
+                raise AudioPrepError(f"ffmpeg clip concat failed: {result.stderr[-2000:]}")
+            return out_path
+        finally:
+            for p in part_paths + [list_path]:
+                try:
+                    os.remove(p)
+                except OSError:
+                    pass
+
+    return await asyncio.to_thread(_run)
+
+
 async def chunk_audio(
     audio_path: str,
     output_dir: str,
