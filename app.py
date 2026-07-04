@@ -399,30 +399,24 @@ async def list_provider_models(name: str, db: Session = Depends(get_db), current
 
 # ── Transcription ─────────────────────────────────────────────────────────
 
-@app.post("/api/transcribe")
-async def transcribe_audio(
-    file: UploadFile = File(...),
-    title: Optional[str] = Form(None),
-    provider: str = Form("groq"),
-    model: Optional[str] = Form(None),
-    language: str = Form("en"),
-    temperature: float = Form(0.0),
-    diarize: bool = Form(False),
-    num_speakers: Optional[int] = Form(None),
-    context_doc: Optional[str] = Form(None),
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    """Upload and transcribe an audio file."""
-    # Save uploaded file
-    file_ext = os.path.splitext(file.filename or "audio.mp3")[1] or ".mp3"
-    safe_name = f"{datetime.datetime.utcnow().strftime('%Y%m%d_%H%M%S')}_{hash(file.filename or 'audio')}{file_ext}"
-    save_path = UPLOAD_DIR / safe_name
-
-    with open(save_path, "wb") as f:
-        content = await file.read()
-        f.write(content)
-
+async def _run_transcription_pipeline(
+    db: Session,
+    current_user: User,
+    save_path: Path,
+    *,
+    filename: str,
+    title: Optional[str],
+    provider: str,
+    model: Optional[str],
+    language: str,
+    temperature: float,
+    diarize: bool,
+    num_speakers: Optional[int],
+) -> dict:
+    """Everything after the source audio is on disk: transcode decision,
+    chunk-vs-inline branch, inline diarization, auto-correct enqueue.
+    Shared by /api/transcribe (fresh upload) and
+    /api/transcripts/{id}/retranscribe (stored audio_path)."""
     user_settings = get_user_settings(db, current_user.id)
 
     # Normalize for cloud upload: strips video track, downsamples to 16kHz
@@ -466,18 +460,6 @@ async def transcribe_audio(
             "default_model": prov_cfg.default_model or "",
         }
 
-    if context_doc and context_doc.strip():
-        groq_cfg = db.query(ProviderConfig).filter(
-            ProviderConfig.user_id == current_user.id,
-            ProviderConfig.name == "groq",
-        ).first()
-        if groq_cfg and groq_cfg.api_key:
-            try:
-                await extract_hotwords_from_doc(db, current_user.id, context_doc, api_key=groq_cfg.api_key)
-            except Exception as e:
-                # Non-fatal: glossary-building side effect, never blocks transcription.
-                print(f"[correction] non-fatal hotword extraction failure: {e}")
-
     threshold_bytes = user_settings["chunk_threshold_mb"] * 1024 * 1024
     file_size = os.path.getsize(save_path)
 
@@ -514,13 +496,13 @@ async def transcribe_audio(
         transcript = transcription_service.create_transcript_stub(
             db,
             current_user.id,
-            filename=file.filename or "audio.mp3",
+            filename=filename,
             provider_name=provider,
             model=model or provider_config.get("default_model") or "",
             language=language,
             audio_path=str(save_path),
             diarize_requested=diarize,
-            title=title or file.filename,
+            title=title or filename,
             num_speakers=num_speakers,
         )
         # Real processed size, not the raw upload size — the sum of all
@@ -540,7 +522,7 @@ async def transcribe_audio(
             audio_path=str(save_path),
             provider_name=provider,
             provider_config=provider_config,
-            title=title or file.filename,
+            title=title or filename,
             language=language,
             model=model or provider_config.get("default_model"),
             temperature=temperature,
@@ -584,6 +566,55 @@ async def transcribe_audio(
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/transcribe")
+async def transcribe_audio(
+    file: UploadFile = File(...),
+    title: Optional[str] = Form(None),
+    provider: str = Form("groq"),
+    model: Optional[str] = Form(None),
+    language: str = Form("en"),
+    temperature: float = Form(0.0),
+    diarize: bool = Form(False),
+    num_speakers: Optional[int] = Form(None),
+    context_doc: Optional[str] = Form(None),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Upload and transcribe an audio file."""
+    # Save uploaded file
+    file_ext = os.path.splitext(file.filename or "audio.mp3")[1] or ".mp3"
+    safe_name = f"{datetime.datetime.utcnow().strftime('%Y%m%d_%H%M%S')}_{hash(file.filename or 'audio')}{file_ext}"
+    save_path = UPLOAD_DIR / safe_name
+
+    with open(save_path, "wb") as f:
+        content = await file.read()
+        f.write(content)
+
+    if context_doc and context_doc.strip():
+        groq_cfg = db.query(ProviderConfig).filter(
+            ProviderConfig.user_id == current_user.id,
+            ProviderConfig.name == "groq",
+        ).first()
+        if groq_cfg and groq_cfg.api_key:
+            try:
+                await extract_hotwords_from_doc(db, current_user.id, context_doc, api_key=groq_cfg.api_key)
+            except Exception as e:
+                # Non-fatal: glossary-building side effect, never blocks transcription.
+                print(f"[correction] non-fatal hotword extraction failure: {e}")
+
+    return await _run_transcription_pipeline(
+        db, current_user, save_path,
+        filename=file.filename or "audio.mp3",
+        title=title,
+        provider=provider,
+        model=model,
+        language=language,
+        temperature=temperature,
+        diarize=diarize,
+        num_speakers=num_speakers,
+    )
 
 
 @app.get("/api/transcripts")
