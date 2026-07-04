@@ -1588,7 +1588,265 @@ async function runIdentify() {
     }
   } catch (e) { toast(e.message, 'error'); }
 }
-function loadSettingsPage() { $('page-settings').innerHTML = '<div class="empty-unit">Service panel — coming in Phase 7</div>'; }
+/* ══════════════════ rear service panel ══════════════════ */
+const JACK_DEFS = [
+  { id: 'groq', name: 'Groq', desc: 'Hosted Whisper — recommended default', placeholder: 'gsk_…', action: 'Fetch models', kind: 'key' },
+  { id: 'openai', name: 'OpenAI', desc: 'whisper-1 hosted transcription', placeholder: 'sk-…', action: 'Fetch models', kind: 'key' },
+  { id: 'replicate', name: 'Replicate', desc: 'Hosted whisper-large-v3-turbo', placeholder: 'r8_…', action: 'Fetch models', kind: 'key' },
+  { id: 'openrouter', name: 'OpenRouter', desc: 'Unified model gateway', placeholder: 'sk-or-…', action: 'Fetch models', kind: 'key' },
+  { id: 'local', name: 'Local / Custom', desc: 'Whisper.cpp, Ollama, or any OpenAI-compatible URL', placeholder: 'http://localhost:8080/v1', action: 'Test', kind: 'url' },
+  { id: 'hf', name: 'HuggingFace', desc: 'Required for pyannote speaker diarization', placeholder: 'hf_…', action: 'Verify', kind: 'hf' },
+];
+
+function jackRow(j, connected) {
+  return `
+  <div style="display:flex;align-items:center;gap:16px;padding:10px 0;border-bottom:1px solid var(--edge)">
+    <div style="width:22px;height:22px;border-radius:50%;background:radial-gradient(circle at 40% 35%,#3A3D41,#131518 65%);border:2px solid #4A4E53;box-shadow:inset 0 0 6px rgba(0,0,0,0.9);flex-shrink:0"></div>
+    <div style="flex:1;min-width:0">
+      <div style="font-family:var(--f-cond);font-weight:600;font-size:13.5px;text-transform:uppercase;letter-spacing:0.05em">${escapeHtml(j.name)}</div>
+      <div style="font-size:11.5px;color:var(--label-dim)">${escapeHtml(j.desc)}</div>
+    </div>
+    <input type="${j.kind === 'url' ? 'text' : 'password'}" id="jack-input-${j.id}" placeholder="${escapeHtml(j.placeholder)}"
+      style="font-family:var(--f-mono);font-size:11.5px;background:var(--input);border:1px solid var(--input-edge);color:var(--label);padding:7px 9px;border-radius:2px;width:${j.kind === 'url' ? 190 : 170}px">
+    <button id="jack-act-${j.id}" style="font-family:var(--f-mono);font-size:9.5px;background:none;border:1px solid #3A3D41;color:var(--label-dim);padding:5px 9px;border-radius:2px;cursor:pointer;text-transform:uppercase">${escapeHtml(j.action)}</button>
+    <div style="display:flex;flex-direction:column;align-items:center;gap:3px;width:64px">
+      <div class="led-dot" id="jack-led-${j.id}" style="${connected ? 'background:' + GREEN + ';box-shadow:0 0 5px ' + GREEN : ''}"></div>
+      <div style="font-family:var(--f-mono);font-size:8.5px;text-transform:uppercase;color:var(--label-dim)" id="jack-state-${j.id}">${connected ? 'linked' : 'open'}</div>
+    </div>
+  </div>`;
+}
+
+function setJackLed(id, connected) {
+  const led = $('jack-led-' + id), st = $('jack-state-' + id);
+  led.style.background = connected ? GREEN : 'var(--edge)';
+  led.style.boxShadow = connected ? '0 0 5px ' + GREEN : 'none';
+  st.textContent = connected ? 'linked' : 'open';
+}
+
+async function loadSettingsPage() {
+  const root = $('page-settings');
+  let provs, settings, health, status;
+  try {
+    [provs, settings, health, status] = await Promise.all([
+      api('/api/providers'), api('/api/settings'), api('/api/health'), api('/api/status'),
+    ]);
+  } catch (e) { toast(e.message, 'error'); return; }
+  const provMap = Object.fromEntries(provs.map(p => [p.id, p]));
+  const connected = {
+    groq: !!(provMap.groq && provMap.groq.configured),
+    openai: !!(provMap.openai && provMap.openai.configured),
+    replicate: !!(provMap.replicate && provMap.replicate.configured),
+    openrouter: !!(provMap.openrouter && provMap.openrouter.configured),
+    local: !!(provMap.local && provMap.local.configured),
+    hf: !!(settings.hf_token),
+  };
+
+  root.innerHTML = `
+    <div class="page-head">
+      <h1 class="t-title">Rear service panel</h1>
+      <div style="font-family:var(--f-mono);font-size:10px;color:var(--label-dim);text-transform:uppercase;letter-spacing:0.1em">Setup controls — not needed during normal use</div>
+    </div>
+
+    <div class="t-cap" style="font-size:10.5px;letter-spacing:0.14em;margin:0 0 8px 36px">Credential jacks — keys stay on this machine</div>
+    <div class="unit unit--svc" style="padding:8px 22px 8px 34px">
+      ${JACK_DEFS.map(j => jackRow(j, connected[j.id])).join('')}
+    </div>
+
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:30px">
+      <div>
+        <div class="t-cap" style="font-size:10.5px;letter-spacing:0.14em;margin:0 0 8px 36px">Term glossary</div>
+        <div class="unit unit--svc" style="border-radius:3px;padding:16px 30px;height:100%">
+          <div style="font-size:11.5px;color:var(--label-dim);margin-bottom:10px">Names and jargon the correction pass should recognize. Added by hand or auto-extracted from a pasted meeting context.</div>
+          <div style="display:flex;gap:8px;margin-bottom:12px">
+            <input id="hotword-new" type="text" placeholder="Add a term…" style="flex:1;font-family:var(--f-mono);font-size:11.5px;background:var(--input);border:1px solid var(--input-edge);color:var(--label);padding:7px 9px;border-radius:2px;min-width:0">
+            <button id="hotword-add" style="font-family:var(--f-cond);font-weight:600;font-size:12px;text-transform:uppercase;background:var(--input);border:1px solid var(--input-edge);color:var(--label);padding:6px 14px;border-radius:2px;cursor:pointer">Add</button>
+          </div>
+          <div id="hotword-rows"></div>
+        </div>
+      </div>
+      <div>
+        <div class="t-cap" style="font-size:10.5px;letter-spacing:0.14em;margin:0 0 8px 36px">Audio prep &amp; chunking</div>
+        <div class="unit unit--svc" style="border-radius:3px;padding:16px 30px;height:100%;display:flex;flex-direction:column;gap:12px">
+          ${[['audio-bitrate', 'Upload bitrate', 'KBPS', settings.bitrate_kbps],
+             ['audio-chunk', 'Split files over', 'MB', settings.chunk_threshold_mb],
+             ['audio-parallel', 'Parallel uploads', 'MAX', settings.max_concurrent_chunks]].map(([id, label, unit, val]) => `
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:10px">
+            <label class="t-label" for="${id}">${label}</label>
+            <div style="display:flex;align-items:center;gap:6px">
+              <input id="${id}" type="text" value="${escapeHtml(String(val))}" style="font-family:var(--f-mono);font-size:11.5px;background:var(--input);border:1px solid var(--input-edge);color:var(--label);padding:6px 8px;border-radius:2px;width:56px;text-align:right">
+              <span style="font-family:var(--f-mono);font-size:9.5px;color:var(--label-dim)">${unit}</span>
+            </div>
+          </div>`).join('')}
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:10px">
+            <label class="t-label">Auto-correct after transcribe</label>
+            <button id="audio-autocorrect" class="tog ${settings.auto_correct ? 'on' : ''}" style="background:none;border:none;cursor:pointer;padding:0">
+              <span class="tog-plate" style="width:26px;height:40px"><span class="tog-track" style="width:12px;height:27px"><span class="tog-paddle" style="height:11px;top:${settings.auto_correct ? '1px' : '15px'}"></span></span></span>
+            </button>
+          </div>
+          <button id="audio-save" style="font-family:var(--f-cond);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:0.03em;background:var(--input);border:1px solid var(--input-edge);color:var(--label);padding:8px 14px;border-radius:2px;cursor:pointer;margin-top:auto">Save audio settings</button>
+        </div>
+      </div>
+    </div>
+
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:30px">
+      <div>
+        <div class="t-cap" style="font-size:10.5px;letter-spacing:0.14em;margin:0 0 8px 36px">Environment readout</div>
+        <div class="unit unit--svc" style="border-radius:3px;padding:16px 30px;display:flex;align-items:center;gap:16px;height:100%">
+          <div style="background:var(--nixie-bg);border:1px solid var(--nixie-edge);border-radius:3px;padding:8px 12px;box-shadow:inset 0 0 10px rgba(0,0,0,0.85);font-family:var(--f-tube);font-size:14px;color:var(--nixie);text-shadow:0 0 3px var(--nixie),0 0 9px rgba(255,138,61,0.5);letter-spacing:0.1em">V${escapeHtml(health.version || '?')} · LOCAL</div>
+          <div style="font-family:var(--f-mono);font-size:10.5px;color:var(--label-dim);line-height:1.7;text-transform:uppercase">FastAPI + SQLite<br>Diarization: ${health.diarization_backend ? 'ML ready (pyannote)' : 'basic (heuristic)'}<br>Voice ID: ${escapeHtml(String(health.voice_id_backend || '—'))}</div>
+        </div>
+      </div>
+      <div>
+        <div class="t-cap" style="font-size:10.5px;letter-spacing:0.14em;margin:0 0 8px 36px">Maintenance — guarded</div>
+        <div class="unit unit--svc" style="border-radius:3px;padding:14px 30px;height:100%">
+          <div style="background:repeating-linear-gradient(45deg,${AMBER} 0 10px,#141518 10px 20px);padding:3px;border-radius:2px">
+            <div style="background:var(--svc);border-radius:1px;padding:12px 16px;display:flex;align-items:center;justify-content:space-between;gap:12px">
+              <div style="font-family:var(--f-mono);font-size:10px;color:var(--label-dim);text-transform:uppercase;letter-spacing:0.06em">Ends this operator session</div>
+              <button id="svc-logout" style="font-family:var(--f-cond);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:0.03em;background:var(--input);border:1px solid var(--red);color:var(--red);padding:7px 16px;border-radius:2px;cursor:pointer">Log out</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div style="margin-top:30px">
+      <div class="t-cap" style="font-size:10.5px;letter-spacing:0.14em;margin:0 0 8px 36px">Faceplate</div>
+      <div class="unit unit--svc" style="border-radius:3px;padding:16px 34px;display:flex;align-items:center;gap:44px;flex-wrap:wrap">
+        <button class="ctl" id="ctl-theme" title="Faceplate era — chassis colors only; hardware stays true">
+          <span class="knob-plate"><span class="knob-grip" id="knob-theme"></span></span>
+          <span class="stack"><span class="name">Faceplate</span>${vfd('', 'vfd-theme')}</span>
+        </button>
+        <button class="ctl" id="ctl-phosphor" title="Oscilloscope trace color">
+          <span class="knob-plate"><span class="knob-grip" id="knob-phosphor"></span></span>
+          <span class="stack"><span class="name">Phosphor</span>${vfd('', 'vfd-phosphor')}</span>
+        </button>
+        <button class="ctl" id="ctl-motion" title="Reel spin and marquee animation">
+          <span class="tog" id="tog-motion"><span class="tog-plate"><span class="tog-track"><span class="tog-paddle"></span></span></span></span>
+          <span class="stack"><span class="name">Motion</span>${vfd('', 'vfd-motion')}</span>
+        </button>
+        <div style="font-family:var(--f-mono);font-size:10px;color:var(--label-faint);text-transform:uppercase;letter-spacing:0.06em;margin-left:auto">Saved on this browser</div>
+      </div>
+    </div>`;
+
+  renderHotwordRows();
+  syncFaceplate();
+
+  // credential jacks
+  JACK_DEFS.forEach(j => {
+    $('jack-act-' + j.id).addEventListener('click', async () => {
+      const val = $('jack-input-' + j.id).value.trim();
+      try {
+        if (j.kind === 'hf') {
+          if (val) await api('/api/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ hf_token: val }) });
+          const s = await api('/api/settings');
+          setJackLed('hf', !!s.hf_token);
+          toast(s.hf_token ? 'HuggingFace token saved' : 'No token on file', s.hf_token ? 'ok' : 'info');
+          return;
+        }
+        if (val) {
+          const body = j.kind === 'url' ? { api_url: val } : { api_key: val };
+          await api('/api/providers/' + j.id, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+        }
+        const r = await api('/api/providers/' + j.id + '/models');
+        const n = (r.models || []).length;
+        setJackLed(j.id, true);
+        toast(j.name + ': ' + n + ' models available' + (r.live ? '' : ' (cached list)'));
+        S.providers = []; // refetch on next transcribe visit
+      } catch (e) {
+        setJackLed(j.id, false);
+        toast(j.name + ': ' + e.message, 'error');
+      }
+    });
+  });
+
+  // glossary
+  $('hotword-add').addEventListener('click', addHotword);
+  $('hotword-new').addEventListener('keydown', (e) => { if (e.key === 'Enter') addHotword(); });
+
+  // audio prep
+  $('audio-autocorrect').addEventListener('click', () => {
+    const tog = $('audio-autocorrect');
+    const on = !tog.classList.contains('on');
+    tog.classList.toggle('on', on);
+    tog.querySelector('.tog-paddle').style.top = on ? '1px' : '15px';
+  });
+  $('audio-save').addEventListener('click', async () => {
+    const body = {
+      bitrate_kbps: parseInt($('audio-bitrate').value, 10) || 128,
+      chunk_threshold_mb: parseInt($('audio-chunk').value, 10) || 20,
+      max_concurrent_chunks: parseInt($('audio-parallel').value, 10) || 4,
+      auto_correct: $('audio-autocorrect').classList.contains('on'),
+    };
+    try {
+      await api('/api/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      S.autoCorrect = body.auto_correct;
+      toast('Audio settings saved');
+    } catch (e) { toast(e.message, 'error'); }
+  });
+
+  $('svc-logout').addEventListener('click', logout);
+
+  // faceplate prefs
+  $('ctl-theme').addEventListener('click', () => {
+    const i = (THEME_ORDER.indexOf(S.theme) + 1) % THEME_ORDER.length;
+    applyTheme(THEME_ORDER[i]);
+    syncFaceplate();
+  });
+  $('ctl-phosphor').addEventListener('click', () => {
+    const i = (PHOSPHORS.findIndex(p => p.value === S.phosphor) + 1) % PHOSPHORS.length;
+    applyPhosphor(PHOSPHORS[i].value);
+    syncFaceplate();
+  });
+  $('ctl-motion').addEventListener('click', () => {
+    applyMotion(!S.motion);
+    syncFaceplate();
+  });
+}
+
+function syncFaceplate() {
+  if (!$('knob-theme')) return;
+  const ti = Math.max(0, THEME_ORDER.indexOf(S.theme));
+  const pi = Math.max(0, PHOSPHORS.findIndex(p => p.value === S.phosphor));
+  $('knob-theme').style.transform = 'rotate(' + (-60 + ti * 24) + 'deg)';
+  $('knob-phosphor').style.transform = 'rotate(' + (-60 + pi * 24) + 'deg)';
+  setVfd('vfd-theme', S.theme);
+  setVfd('vfd-phosphor', PHOSPHORS[pi] ? PHOSPHORS[pi].name : '—');
+  $('tog-motion').classList.toggle('on', S.motion);
+  setVfd('vfd-motion', S.motion ? 'ON' : 'OFF');
+}
+
+async function renderHotwordRows() {
+  let words;
+  try { words = await api('/api/hotwords'); } catch (e) { toast(e.message, 'error'); return; }
+  const box = $('hotword-rows');
+  if (!box) return;
+  box.innerHTML = words.length ? words.map(h => `
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;padding:6px 0;border-bottom:1px solid var(--edge)">
+      <div style="display:flex;align-items:center;gap:8px;min-width:0">
+        <span style="font-family:var(--f-mono);font-size:12px">${escapeHtml(h.term)}</span>
+        <span style="font-family:var(--f-mono);font-size:8.5px;color:var(--label-dim);border:1px solid var(--edge);border-radius:2px;padding:1px 5px;text-transform:uppercase">${escapeHtml(h.source || 'manual')}</span>
+      </div>
+      <button data-hwdel="${h.id}" title="Remove term" style="background:none;border:none;color:var(--red);cursor:pointer;font-size:13px;padding:0 4px">×</button>
+    </div>`).join('')
+    : '<div style="font-family:var(--f-mono);font-size:10.5px;color:var(--label-faint);padding:8px 0">No terms yet.</div>';
+  box.querySelectorAll('[data-hwdel]').forEach(b => b.addEventListener('click', async () => {
+    try {
+      await api('/api/hotwords/' + b.dataset.hwdel, { method: 'DELETE' });
+      renderHotwordRows();
+    } catch (e) { toast(e.message, 'error'); }
+  }));
+}
+
+async function addHotword() {
+  const inp = $('hotword-new');
+  const term = inp.value.trim();
+  if (!term) return;
+  try {
+    await api('/api/hotwords', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ term }) });
+    inp.value = '';
+    renderHotwordRows();
+  } catch (e) { toast(e.message, 'error'); }
+}
 
 /* ══════════════════ init ══════════════════ */
 document.addEventListener('DOMContentLoaded', () => {
