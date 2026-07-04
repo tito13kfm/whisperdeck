@@ -419,7 +419,689 @@ async function loadDashboard() {
     toast(e.message, 'error');
   }
 }
-function renderTranscribe() { $('page-transcribe').innerHTML = '<div class="empty-unit">Transcribe — coming in Phase 5</div>'; }
+/* ══════════════════ transcribe: instruments (verbatim from prototype logic) ══════════════════ */
+const INST = { dt: 0, raf: null, vuMeters: {}, scopeInit: false, driveOverride: null };
+
+function instrumentsActive() { return S.running || S.capturing; }
+
+function drawVU(canvas, key) {
+  const ctx = canvas.getContext('2d');
+  const w = canvas.width, h = canvas.height;
+  const m = INST.vuMeters[key] || (INST.vuMeters[key] = { v: 0, target: 0, next: 0 });
+  // driveOverride: live-capture analyser level (0..1) once Phase 8 wires it
+  const drive = instrumentsActive() ? (INST.driveOverride ?? 0.75) : 0.03;
+  if (INST.dt > m.next) {
+    m.target = Math.min(1, drive * (0.3 + Math.random() * 0.7) + (Math.random() < 0.1 ? 0.2 * drive : 0));
+    m.next = INST.dt + 0.12 + Math.random() * 0.32;
+  }
+  m.v += (m.target - m.v) * (m.target > m.v ? 0.3 : 0.06);
+
+  const g = ctx.createLinearGradient(0, 0, 0, h);
+  g.addColorStop(0, '#F3E9C9');
+  g.addColorStop(1, '#E0D2A8');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, w, h);
+  const lamp = ctx.createRadialGradient(w / 2, h * 0.15, 8, w / 2, h * 0.15, w * 0.7);
+  lamp.addColorStop(0, instrumentsActive() ? 'rgba(255,196,110,0.26)' : 'rgba(255,196,110,0.10)');
+  lamp.addColorStop(1, 'rgba(255,196,110,0)');
+  ctx.fillStyle = lamp;
+  ctx.fillRect(0, 0, w, h);
+
+  const cx = w / 2, cy = h * 1.28;
+  const rA = Math.min(h * 0.98, (w / 2 - 8 - h * 0.1) / 0.75 - h * 0.135);
+  const start = -Math.PI * 0.27, end = Math.PI * 0.27;
+
+  ctx.strokeStyle = '#2A241A';
+  ctx.lineWidth = Math.max(1, h * 0.012);
+  ctx.beginPath();
+  ctx.arc(cx, cy, rA, start - Math.PI / 2, end - Math.PI / 2);
+  ctx.stroke();
+
+  const redStart = start + (end - start) * 0.76;
+  ctx.strokeStyle = '#C03A2E';
+  ctx.lineWidth = Math.max(2, h * 0.028);
+  ctx.beginPath();
+  ctx.arc(cx, cy, rA + h * 0.022, redStart - Math.PI / 2, end - Math.PI / 2);
+  ctx.stroke();
+
+  const labels = [['-20', 0], ['-10', 0.22], ['-7', 0.34], ['-5', 0.45], ['-3', 0.57], ['-1', 0.68], ['0', 0.76], ['+1', 0.85], ['+3', 1]];
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.font = 'bold ' + Math.round(h * 0.082) + 'px Barlow, sans-serif';
+  labels.forEach((pair) => {
+    const f = pair[1];
+    const ca = start + (end - start) * f - Math.PI / 2;
+    const col = f >= 0.76 ? '#C03A2E' : '#2A241A';
+    ctx.strokeStyle = col;
+    ctx.lineWidth = Math.max(1, h * 0.013);
+    ctx.beginPath();
+    ctx.moveTo(cx + Math.cos(ca) * (rA - h * 0.05), cy + Math.sin(ca) * (rA - h * 0.05));
+    ctx.lineTo(cx + Math.cos(ca) * (rA + h * 0.05), cy + Math.sin(ca) * (rA + h * 0.05));
+    ctx.stroke();
+    ctx.fillStyle = col;
+    const lw2 = ctx.measureText(pair[0]).width / 2;
+    const lx = Math.max(lw2 + 2, Math.min(w - lw2 - 2, cx + Math.cos(ca) * (rA + h * 0.135)));
+    ctx.fillText(pair[0], lx, cy + Math.sin(ca) * (rA + h * 0.135));
+  });
+
+  ctx.fillStyle = '#2A241A';
+  ctx.font = 'bold ' + Math.round(h * 0.15) + 'px Barlow, sans-serif';
+  ctx.fillText('VU', cx, h * 0.66);
+
+  const na = start + (end - start) * m.v - Math.PI / 2;
+  ctx.strokeStyle = '#1A150D';
+  ctx.lineWidth = Math.max(1.5, h * 0.018);
+  ctx.shadowColor = 'rgba(0,0,0,0.35)';
+  ctx.shadowBlur = 3;
+  ctx.beginPath();
+  ctx.moveTo(cx + Math.cos(na) * h * 0.14, cy + Math.sin(na) * h * 0.14);
+  ctx.lineTo(cx + Math.cos(na) * (rA + h * 0.035), cy + Math.sin(na) * (rA + h * 0.035));
+  ctx.stroke();
+  ctx.shadowBlur = 0;
+  ctx.strokeStyle = 'rgba(0,0,0,0.28)';
+  ctx.lineWidth = 2;
+  ctx.strokeRect(1, 1, w - 2, h - 2);
+}
+
+function drawScope(canvas) {
+  const ctx = canvas.getContext('2d');
+  const w = canvas.width, h = canvas.height;
+  if (!INST.scopeInit) {
+    ctx.fillStyle = '#03140B';
+    ctx.fillRect(0, 0, w, h);
+    INST.scopeInit = true;
+  }
+  ctx.fillStyle = 'rgba(3,20,11,0.20)';
+  ctx.fillRect(0, 0, w, h);
+  ctx.strokeStyle = 'rgba(70,255,158,0.07)';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(0, h / 2);
+  ctx.lineTo(w, h / 2);
+  ctx.moveTo(w / 2, 0);
+  ctx.lineTo(w / 2, h);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.arc(w / 2, h / 2, w * 0.33, 0, Math.PI * 2);
+  ctx.stroke();
+
+  const t = INST.dt;
+  const act = instrumentsActive() ? 1 : 0.1;
+  const phosphor = S.phosphor;
+  const traces = [
+    { f1: 2.1, f2: 5.3, a: h * 0.17, sp: 1.6, off: 0 },
+    { f1: 3.2, f2: 7.9, a: h * 0.11, sp: -2.2, off: h * 0.07 },
+    { f1: 1.3, f2: 11.0, a: h * 0.07, sp: 3.1, off: -h * 0.09 },
+  ];
+  ctx.lineWidth = 1.4;
+  ctx.shadowColor = phosphor;
+  ctx.shadowBlur = 6;
+  ctx.strokeStyle = phosphor;
+  traces.forEach((tr) => {
+    ctx.beginPath();
+    for (let x = 0; x <= w; x += 2) {
+      const p = (x / w) * Math.PI * 2;
+      const y = h / 2 + (tr.off + Math.sin(p * tr.f1 + t * tr.sp) * tr.a + Math.sin(p * tr.f2 - t * tr.sp * 1.7) * tr.a * 0.45) * act;
+      if (x === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+  });
+  ctx.shadowBlur = 0;
+}
+
+function startInstruments() {
+  if (INST.raf) return;
+  const loop = () => {
+    if (S.page !== 'transcribe') { INST.raf = null; return; }
+    INST.dt += 0.016;
+    const scope = $('inst-scope'), vm = $('inst-vu-mic'), vs = $('inst-vu-sys');
+    if (scope) drawScope(scope);
+    if (vm) drawVU(vm, 'mic');
+    if (vs) drawVU(vs, 'sys');
+    INST.raf = requestAnimationFrame(loop);
+  };
+  INST.raf = requestAnimationFrame(loop);
+}
+
+/* ══════════════════ transcribe screen ══════════════════ */
+async function ensureProviders() {
+  if (S.providers.length) return;
+  const provs = await api('/api/providers');
+  S.providers = provs.map(p => ({
+    id: p.id,
+    name: p.name,
+    ready: !p.needs_key || p.configured,
+    needsKey: p.needs_key,
+    statusText: p.name + (!p.needs_key ? ' · local · ready' : (p.configured ? ' · key connected · ready' : ' · no key — see service panel')),
+    models: [p.default_model].filter(Boolean),
+    modelsFetched: false,
+  }));
+}
+
+async function fetchModelsFor(idx) {
+  const p = S.providers[idx];
+  if (!p || p.modelsFetched) return;
+  try {
+    const r = await api('/api/providers/' + p.id + '/models');
+    const models = (r.models || []).map(m => typeof m === 'string' ? m : (m.id || m.name)).filter(Boolean);
+    if (models.length) p.models = models;
+    p.modelsFetched = true;
+  } catch { /* keep default model */ }
+}
+
+function curProv() { return S.providers[S.providerIdx] || { name: '—', models: ['—'], ready: false, statusText: '—' }; }
+function curModel() { const p = curProv(); return p.models[S.modelIdx % p.models.length] || '—'; }
+
+function deckKey(id, symbol, cap, state, title) {
+  // state: 'active' | 'disabled' | 'inert' | {led:color}
+  const inert = state === 'inert';
+  const disabled = state === 'disabled';
+  return `
+  <div class="key-stack">
+    <div class="led" id="${id}-led"></div>
+    <button class="key${inert ? ' inert' : ''}" id="${id}" ${disabled ? 'disabled' : ''} title="${escapeHtml(title)}">${symbol}</button>
+    <div class="cap">${cap}</div>
+  </div>`;
+}
+
+function reelsSvg(idPrefix) {
+  const reel = (r1, y1, y2) => `
+    <svg viewBox="0 0 50 50" style="display:block;width:100%;height:100%">
+      <circle cx="25" cy="25" r="${r1}" fill="none" stroke="#27292C" stroke-width="2"></circle>
+      <g class="${idPrefix}-reel" style="transform-origin:25px 25px">
+        <circle cx="25" cy="25" r="6" fill="#3D4045" stroke="#1E1F21"></circle>
+        <line x1="25" y1="${y1}" x2="25" y2="${y2}" stroke="#1E1F21" stroke-width="2"></line>
+        <line x1="${y1}" y1="25" x2="${y2}" y2="25" stroke="#1E1F21" stroke-width="2"></line>
+      </g>
+    </svg>`;
+  return `
+  <div class="deck-window">
+    <div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:space-between;padding:0 12px">
+      <div style="width:50px;height:50px;flex-shrink:0">${reel(15, 11, 39)}</div>
+      <div style="width:30px;height:1.5px;background:#4A4030"></div>
+      <div style="width:50px;height:50px;flex-shrink:0">${reel(21, 8, 42)}</div>
+    </div>
+  </div>`;
+}
+
+async function renderTranscribe() {
+  const root = $('page-transcribe');
+  try { await ensureProviders(); } catch (e) { toast(e.message, 'error'); }
+  await fetchModelsFor(S.providerIdx);
+  const prov = curProv();
+
+  root.innerHTML = `
+    <div class="page-head">
+      <h1 class="t-title">Transcribe</h1>
+      <div class="page-status" id="tx-prov-status"></div>
+    </div>
+
+    <!-- deck unit (4U) -->
+    <div class="unit" style="padding:18px 20px 14px">
+      <div style="display:grid;grid-template-columns:1fr auto 1fr;gap:18px;align-items:stretch;padding:0 14px">
+        <div style="display:flex;flex-direction:column;gap:10px;min-width:0">
+          <div class="t-unit" style="text-align:center">Deck A · Input</div>
+          <div id="deck-a-window">
+            <button class="deck-drop" id="deck-drop">
+              <span style="font-family:var(--f-mono);font-size:10.5px;color:var(--label-dim);letter-spacing:0.06em">DROP AUDIO HERE — OR CLICK TO BROWSE</span>
+              <span style="font-family:var(--f-mono);font-size:9px;color:var(--label-faint);letter-spacing:0.04em">MP3 · WAV · M4A · FLAC · OGG · MP4</span>
+            </button>
+          </div>
+          <div id="deck-a-status" style="font-family:var(--f-mono);font-size:10px;color:var(--label-dim);text-align:center;padding:0 4px;min-height:26px;line-height:1.3">No media loaded</div>
+          <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:4px;justify-items:center">
+            ${deckKey('key-rew-a', '◀◀', 'Rew', 'inert', 'Rewind — no mapped action')}
+            ${deckKey('key-play-a', '▶', 'Play', 'disabled', 'Load media first')}
+            ${deckKey('key-ff-a', '▶▶', 'FF', 'inert', 'Fast-forward — no mapped action')}
+            ${deckKey('key-rec', '●', 'Rec', 'active', 'Live capture — asks before recording')}
+            ${deckKey('key-eject', '⏏', 'Eject', 'active', 'Eject / swap file')}
+          </div>
+        </div>
+        <div style="width:1px;background:var(--edge);align-self:stretch;margin:4px 0"></div>
+        <div style="display:flex;flex-direction:column;gap:10px;min-width:0">
+          <div class="t-unit" style="text-align:center">Deck B · Output</div>
+          <div id="deck-b-window">${reelsSvg('deckb')}</div>
+          <div id="deck-b-status" style="font-family:var(--f-mono);font-size:10px;color:var(--label-dim);text-align:center;padding:0 4px;min-height:26px;line-height:1.3">Idle — output writes here</div>
+          <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:4px;justify-items:center">
+            ${deckKey('key-rew-b', '◀◀', 'Rew', 'inert', 'Rewind — no mapped action')}
+            ${deckKey('key-play-b', '▶', 'Play', 'disabled', 'Preview voice sample — available in Voice roster')}
+            ${deckKey('key-ff-b', '▶▶', 'FF', 'inert', 'Fast-forward — no mapped action')}
+            <div style="visibility:hidden"><button tabindex="-1" aria-hidden="true" class="key"></button></div>
+            ${deckKey('key-open-done', '⏹', 'Stop/Eject', 'active', 'Open finished transcript')}
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- display bridge -->
+    <div class="unit" style="display:flex;align-items:center;gap:16px;padding:12px 40px">
+      <div style="display:flex;flex-direction:column;align-items:center;gap:4px">
+        <div style="width:106px;height:106px;background:#0A0C0A;border-radius:9px;border:2px solid var(--edge);box-shadow:inset 0 0 16px rgba(0,0,0,0.9);display:flex;align-items:center;justify-content:center">
+          <div style="width:92px;height:92px;border-radius:50%;overflow:hidden;background:#03140B;box-shadow:inset 0 0 18px rgba(0,0,0,0.85)">
+            <canvas id="inst-scope" width="92" height="92" style="display:block;width:92px;height:92px"></canvas>
+          </div>
+        </div>
+        <div class="t-cap-sm">Input scope</div>
+      </div>
+      <div style="display:flex;flex-direction:column;align-items:center;gap:4px;flex:1;min-width:0">
+        <div style="width:100%;max-width:250px;height:104px;border-radius:5px;border:2px solid var(--edge);overflow:hidden;box-shadow:0 1px 2px rgba(0,0,0,0.5)">
+          <canvas id="inst-vu-mic" width="250" height="104" style="display:block;width:100%;height:104px"></canvas>
+        </div>
+        <div class="t-cap-sm">Mic · L</div>
+      </div>
+      <div style="display:flex;flex-direction:column;align-items:center;gap:4px;flex:1;min-width:0">
+        <div style="width:100%;max-width:250px;height:104px;border-radius:5px;border:2px solid var(--edge);overflow:hidden;box-shadow:0 1px 2px rgba(0,0,0,0.5)">
+          <canvas id="inst-vu-sys" width="250" height="104" style="display:block;width:100%;height:104px"></canvas>
+        </div>
+        <div class="t-cap-sm">System · R</div>
+      </div>
+      <div style="display:flex;flex-direction:column;align-items:center;gap:10px">
+        <span class="vfd--vert" id="inst-monitor">STANDBY</span>
+        <div style="display:flex;flex-direction:column;align-items:center;gap:4px" title="Lights only when mic (L) and system (R) are both present">
+          <span class="led-dot" id="inst-stereo-lamp"></span>
+          <span style="font-family:var(--f-mono);font-size:7.5px;text-transform:uppercase;letter-spacing:0.08em;color:var(--label-dim)">Stereo</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- meter row (running only) -->
+    <div class="unit" id="tx-meter" style="display:none">
+      <div style="display:flex;align-items:center;gap:22px;padding:14px 26px;flex-wrap:wrap">
+        <div id="tx-meter-leds" class="bargraph" style="height:16px;flex:1;min-width:180px"></div>
+        <span id="tx-meter-nix"></span>
+        <div style="display:flex;gap:18px" id="tx-stages"></div>
+        <button class="btn btn--red" id="tx-cancel">✕ Cancel — resumable later</button>
+      </div>
+    </div>
+
+    <!-- signal path -->
+    <div class="unit">
+      <div style="display:flex;flex-direction:column;gap:13px;padding:12px 34px 16px">
+        <div style="display:flex;align-items:center;justify-content:space-between">
+          <div class="t-unit">Signal path</div>
+          <div id="tx-path-note" style="font-family:var(--f-mono);font-size:10px;color:var(--label-faint);text-transform:uppercase;letter-spacing:0.06em">Applies to the next job</div>
+        </div>
+        <div style="display:flex;justify-content:center;gap:44px;order:2">
+          <button class="ctl" id="ctl-provider" title="Transcription provider">
+            <span class="knob-plate"><span class="knob-grip" id="knob-provider"></span></span>
+            <span class="stack"><span class="name">Provider</span>${vfd('', 'vfd-provider')}</span>
+          </button>
+          <button class="ctl" id="ctl-model" title="Model — list comes from the selected provider">
+            <span class="knob-plate"><span class="knob-grip" id="knob-model"></span></span>
+            <span class="stack"><span class="name">Model</span>${vfd('', 'vfd-model')}</span>
+          </button>
+          <button class="ctl" id="ctl-lang" title="Spoken language">
+            <span class="knob-plate"><span class="knob-grip" id="knob-lang"></span></span>
+            <span class="stack"><span class="name">Language</span>${vfd('', 'vfd-lang')}</span>
+          </button>
+        </div>
+        <div style="display:flex;justify-content:center;gap:44px;order:1">
+          <button class="ctl" id="ctl-diarize" title="Identify who spoke when (diarization)">
+            <span class="tog" id="tog-diarize"><span class="tog-plate"><span class="tog-track"><span class="tog-paddle"></span></span></span></span>
+            <span class="stack"><span class="name">Speakers</span>${vfd('', 'vfd-diarize')}</span>
+          </button>
+          <button class="ctl" id="ctl-autocorrect" title="Run the LLM correction pass automatically">
+            <span class="tog" id="tog-autocorrect"><span class="tog-plate"><span class="tog-track"><span class="tog-paddle"></span></span></span></span>
+            <span class="stack"><span class="name">Auto-correct</span>${vfd('', 'vfd-autocorrect')}</span>
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- fine adjust -->
+    <details class="unit">
+      <summary style="list-style:none;cursor:pointer;padding:13px 26px;display:flex;align-items:center;gap:10px;font-family:var(--f-cond);font-weight:600;font-size:13px;text-transform:uppercase;letter-spacing:0.04em"><span style="color:var(--label-dim);font-size:11px">▸</span> Fine adjust — speakers, title, creativity, context</summary>
+      <div style="padding:14px 26px 18px;border-top:1px solid var(--panel-lo)">
+        <div style="display:flex;gap:24px;flex-wrap:wrap;margin-bottom:14px">
+          <div class="field" style="min-width:170px">
+            <label class="t-label" for="tx-speakers">Speaker count</label>
+            <input class="inp" id="tx-speakers" type="text" placeholder="auto-detect" style="padding:7px 9px">
+            <div class="t-hint">Blank = auto-detect.</div>
+          </div>
+          <div class="field" style="min-width:210px;flex:1">
+            <label class="t-label" for="tx-title">Meeting title</label>
+            <input class="inp" id="tx-title" type="text" placeholder="optional" style="padding:7px 9px">
+            <div class="t-hint">Names the saved transcript.</div>
+          </div>
+          <div class="field" style="min-width:130px">
+            <label class="t-label" for="tx-temp">Creativity</label>
+            <input class="inp" id="tx-temp" type="text" value="0" style="padding:7px 9px">
+            <div class="t-hint">0 = strict. Technical: temperature.</div>
+          </div>
+        </div>
+        <div class="field">
+          <label class="t-label" for="tx-context">Meeting context</label>
+          <textarea class="inp" id="tx-context" rows="2" placeholder="Paste the agenda or jargon-heavy notes — names and terms get added to your term glossary." style="padding:7px 9px"></textarea>
+        </div>
+      </div>
+    </details>
+
+    <!-- start strip -->
+    <div class="unit" style="border-radius:3px">
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:12px 22px;gap:16px">
+        <div id="tx-arm-text" style="font-family:var(--f-mono);font-size:10.5px;color:var(--label-dim);text-transform:uppercase;letter-spacing:0.08em"></div>
+        <div style="display:flex;align-items:center;gap:10px">
+          <div class="led-dot" id="tx-start-led"></div>
+          <button class="key key--wide" id="tx-start" disabled>▶ Start transcription</button>
+        </div>
+      </div>
+    </div>`;
+
+  wireTranscribe();
+  syncTranscribe();
+  startInstruments();
+}
+
+function wireTranscribe() {
+  wireTranscribeDrop();
+  $('key-eject').addEventListener('click', () => {
+    if (S.running) { toast('Job in progress — cancel first', 'info'); return; }
+    if (S.tapeLoaded) ejectTape(); else $('file-input').click();
+  });
+  $('key-play-a').addEventListener('click', startJob);
+  $('key-rec').addEventListener('click', openRecModal);
+  $('key-open-done').addEventListener('click', () => {
+    if (S.doneId) navigate('detail', S.doneId);
+  });
+  $('tx-start').addEventListener('click', startJob);
+  $('tx-cancel').addEventListener('click', cancelJob);
+  $('ctl-provider').addEventListener('click', async () => {
+    if (S.running) return;
+    S.providerIdx = (S.providerIdx + 1) % S.providers.length;
+    S.modelIdx = 0;
+    await fetchModelsFor(S.providerIdx);
+    syncTranscribe();
+  });
+  $('ctl-model').addEventListener('click', () => {
+    if (S.running) return;
+    S.modelIdx = (S.modelIdx + 1) % curProv().models.length;
+    syncTranscribe();
+  });
+  $('ctl-lang').addEventListener('click', () => {
+    if (S.running) return;
+    S.langIdx = (S.langIdx + 1) % LANGUAGES.length;
+    syncTranscribe();
+  });
+  $('ctl-diarize').addEventListener('click', () => {
+    if (S.running) return;
+    S.diarize = !S.diarize;
+    syncTranscribe();
+  });
+  $('ctl-autocorrect').addEventListener('click', () => {
+    if (S.running) return;
+    S.autoCorrect = !S.autoCorrect;
+    syncTranscribe();
+  });
+}
+
+function setVfd(id, text) {
+  const w = $(id);
+  if (!w) return;
+  w.firstElementChild.textContent = text;
+  armVfdMarquees(w.parentElement);
+}
+
+function stageLeds() {
+  // Honest stage mapping: upload done once the POST returned; transcribe while
+  // chunks are moving; diarize/finalize once every chunk is done but the
+  // transcript is still processing (backend merges + diarizes then).
+  const st = S.stage;
+  const defs = [
+    { label: 'Upload', done: st !== 'upload', on: st === 'upload' },
+    { label: 'Transcribe', done: st === 'diarize' || st === 'finalize', on: st === 'transcribe' },
+    { label: 'Diarize', done: st === 'finalize', on: st === 'diarize' },
+    { label: 'Finalize', done: false, on: st === 'finalize' },
+  ];
+  return defs.map(d => `
+    <div style="display:flex;flex-direction:column;align-items:center;gap:4px">
+      ${ledDot(d.done ? GREEN : d.on ? AMBER : null, d.done || d.on, 7)}
+      <div style="font-family:var(--f-mono);font-size:9px;text-transform:uppercase;color:var(--label-dim)">${d.label}</div>
+    </div>`).join('');
+}
+
+function syncTranscribe() {
+  if (S.page !== 'transcribe' || !$('tx-prov-status')) return;
+  const prov = curProv();
+  const canStart = S.tapeLoaded && !S.running && prov.ready;
+
+  // header provider status
+  const psColor = prov.ready ? GREEN : AMBER;
+  $('tx-prov-status').style.color = psColor;
+  $('tx-prov-status').innerHTML = ledDot(psColor, true, 9) + escapeHtml(prov.statusText);
+
+  // deck A window: drop zone vs reels
+  const winA = $('deck-a-window');
+  const wantReels = S.tapeLoaded;
+  if (wantReels && !winA.querySelector('.deck-window')) winA.innerHTML = reelsSvg('decka');
+  if (!wantReels && !winA.querySelector('.deck-drop')) {
+    winA.innerHTML = `
+      <button class="deck-drop" id="deck-drop">
+        <span style="font-family:var(--f-mono);font-size:10.5px;color:var(--label-dim);letter-spacing:0.06em">DROP AUDIO HERE — OR CLICK TO BROWSE</span>
+        <span style="font-family:var(--f-mono);font-size:9px;color:var(--label-faint);letter-spacing:0.04em">MP3 · WAV · M4A · FLAC · OGG · MP4</span>
+      </button>`;
+    wireTranscribeDrop();
+  }
+  const spin = motionAllowed() && S.running;
+  document.querySelectorAll('.decka-reel').forEach(g => g.style.animation = spin ? 'reel-spin 2.4s linear infinite' : 'none');
+  const spinB = motionAllowed() && S.running && S.stage === 'finalize';
+  document.querySelectorAll('.deckb-reel').forEach(g => g.style.animation = spinB ? 'reel-spin 2.4s linear infinite' : 'none');
+
+  // deck statuses
+  const dA = $('deck-a-status');
+  if (S.running) {
+    dA.textContent = 'Reading (' + S.pct + '%): ' + S.tapeName;
+    dA.style.color = AMBER;
+  } else if (S.tapeLoaded) {
+    const mb = S.tapeFile ? ' · ' + (S.tapeFile.size / 1048576).toFixed(1) + ' MB' : '';
+    dA.textContent = S.tapeName + mb + ' · loaded';
+    dA.style.color = AMBER;
+  } else {
+    dA.textContent = 'No media loaded';
+    dA.style.color = 'var(--label-dim)';
+  }
+  const dB = $('deck-b-status');
+  if (S.running) {
+    dB.textContent = S.stage === 'diarize' || S.stage === 'finalize' ? 'Writing output — diarizing' : 'Standing by — transcription in progress';
+    dB.style.color = S.stage === 'diarize' || S.stage === 'finalize' ? AMBER : 'var(--label-dim)';
+  } else if (S.jobDone) {
+    dB.textContent = 'Transcript written — press ⏹ to open it';
+    dB.style.color = GREEN;
+  } else {
+    dB.textContent = 'Idle — output writes here';
+    dB.style.color = 'var(--label-dim)';
+  }
+
+  // play key + start key + LEDs
+  const playKey = $('key-play-a'), startKey = $('tx-start');
+  playKey.disabled = !canStart;
+  playKey.title = canStart ? 'Start transcription' : S.running ? 'Job running' : !S.tapeLoaded ? 'Load media first' : 'Provider needs a key — see service panel';
+  startKey.disabled = !canStart;
+  const ledColor = (S.running || canStart) ? GREEN : null;
+  ['key-play-a-led', 'tx-start-led'].forEach(id => {
+    const el = $(id);
+    el.style.background = ledColor || 'var(--edge)';
+    el.style.boxShadow = ledColor ? '0 0 5px ' + GREEN : 'none';
+  });
+
+  // arm strip
+  $('tx-arm-text').textContent = S.running
+    ? 'Job in progress — settings locked'
+    : S.tapeLoaded
+      ? 'Armed — ' + prov.name + ' · ' + curModel() + ' · ' + LANGUAGES[S.langIdx]
+      : 'Load a tape to arm the transport';
+
+  // meter row
+  $('tx-meter').style.display = S.running ? '' : 'none';
+  if (S.running) {
+    const lit = Math.round(S.pct / 100 * 11);
+    $('tx-meter-leds').innerHTML = [...Array(11)].map((_, i) => i < lit
+      ? '<span style="background:' + AMBER + ';box-shadow:0 0 4px ' + AMBER + '"></span>'
+      : '<span></span>').join('');
+    $('tx-meter-nix').outerHTML = '<span id="tx-meter-nix">' + nixie(S.pct + '%') + '</span>';
+    $('tx-stages').innerHTML = stageLeds();
+  }
+
+  // signal path
+  $('tx-path-note').textContent = S.running ? 'Locked while running' : 'Applies to the next job';
+  document.querySelectorAll('.ctl').forEach(c => c.classList.toggle('locked', S.running));
+  $('knob-provider').style.transform = 'rotate(' + (-60 + S.providerIdx * 20) + 'deg)';
+  $('knob-model').style.transform = 'rotate(' + (-60 + (S.modelIdx % prov.models.length) * 24) + 'deg)';
+  $('knob-lang').style.transform = 'rotate(' + (-60 + S.langIdx * 18) + 'deg)';
+  setVfd('vfd-provider', prov.name);
+  setVfd('vfd-model', curModel());
+  setVfd('vfd-lang', LANGUAGES[S.langIdx]);
+  $('tog-diarize').classList.toggle('on', S.diarize);
+  $('tog-autocorrect').classList.toggle('on', S.autoCorrect);
+  setVfd('vfd-diarize', S.diarize ? 'ON' : 'OFF');
+  setVfd('vfd-autocorrect', S.autoCorrect ? 'ON' : 'OFF');
+
+  // instruments monitor + nav badge
+  $('inst-monitor').textContent = instrumentsActive() ? 'LIVE' : 'STANDBY';
+  const lamp = $('inst-stereo-lamp');
+  lamp.style.background = S.stereoLive ? GREEN : 'var(--edge)';
+  lamp.style.boxShadow = S.stereoLive ? '0 0 6px ' + GREEN : 'none';
+  $('nav-badge-transcribe').textContent = S.running || S.capturing ? 'REC' : '';
+}
+
+function wireTranscribeDrop() {
+  const drop = $('deck-drop');
+  if (!drop) return;
+  drop.addEventListener('click', () => $('file-input').click());
+  drop.addEventListener('dragover', (e) => { e.preventDefault(); drop.classList.add('dragover'); });
+  drop.addEventListener('dragleave', () => drop.classList.remove('dragover'));
+  drop.addEventListener('drop', (e) => {
+    e.preventDefault();
+    drop.classList.remove('dragover');
+    if (e.dataTransfer.files[0]) loadTape(e.dataTransfer.files[0]);
+  });
+}
+
+function loadTape(file) {
+  S.tapeFile = file;
+  S.tapeName = file.name;
+  S.tapeLoaded = true;
+  S.jobDone = false;
+  S.pct = 0;
+  syncTranscribe();
+}
+
+function ejectTape() {
+  S.tapeFile = null;
+  S.tapeName = '';
+  S.tapeLoaded = false;
+  S.jobDone = false;
+  S.pct = 0;
+  syncTranscribe();
+}
+
+async function startJob() {
+  const prov = curProv();
+  if (!S.tapeLoaded || S.running || !prov.ready || !S.tapeFile) return;
+  const form = new FormData();
+  form.append('file', S.tapeFile);
+  form.append('provider', prov.id);
+  form.append('model', curModel());
+  const lang = LANGUAGES[S.langIdx];
+  form.append('language', lang === 'Auto-detect' ? 'auto' : lang.toLowerCase().slice(0, 2));
+  form.append('temperature', ($('tx-temp') && $('tx-temp').value) || '0');
+  form.append('diarize', S.diarize ? 'true' : 'false');
+  const n = $('tx-speakers') && $('tx-speakers').value.trim();
+  if (n) form.append('num_speakers', n);
+  const title = $('tx-title') && $('tx-title').value.trim();
+  if (title) form.append('title', title);
+  const ctxDoc = $('tx-context') && $('tx-context').value.trim();
+  if (ctxDoc) form.append('context_doc', ctxDoc);
+
+  S.running = true;
+  S.jobDone = false;
+  S.pct = 0;
+  S.stage = 'upload';
+  syncTranscribe();
+  try {
+    const initial = await api('/api/transcribe', { method: 'POST', body: form });
+    S.runningId = initial.id;
+    S.stage = 'transcribe';
+    syncTranscribe();
+    const finalData = await pollTranscript(initial.id);
+    S.running = false;
+    S.stage = null;
+    S.runningId = null;
+    if (finalData.status === 'cancelled') {
+      toast('Transcription cancelled — resume from the channel bank', 'info');
+      S.pct = 0;
+    } else if (finalData.status === 'partial') {
+      toast('Partially complete — some sections failed; retry from the channel bank', 'error');
+      S.jobDone = true;
+      S.doneId = finalData.id;
+    } else {
+      toast('Transcription complete');
+      S.jobDone = true;
+      S.doneId = finalData.id;
+      S.pct = 100;
+    }
+    S.tapeLoaded = false;
+    S.tapeFile = null;
+    S.tapeName = '';
+    syncTranscribe();
+  } catch (e) {
+    S.running = false;
+    S.stage = null;
+    S.runningId = null;
+    toast('Transcription failed: ' + e.message, 'error');
+    syncTranscribe();
+  }
+}
+
+async function pollTranscript(id) {
+  while (true) {
+    const data = await api('/api/transcripts/' + id);
+    const qs = data.queue_status;
+    if (qs && qs.chunks_total) {
+      S.pct = Math.round(qs.chunks_done / qs.chunks_total * 100);
+      S.stage = qs.chunks_done >= qs.chunks_total ? (S.diarize ? 'diarize' : 'finalize') : 'transcribe';
+    } else if (data.status === 'processing') {
+      S.stage = 'transcribe';
+    }
+    if (['completed', 'failed', 'partial', 'cancelled'].includes(data.status)) {
+      if (data.status === 'failed') throw new Error(data.error || 'Transcription failed');
+      return data;
+    }
+    if (S.page === 'transcribe') syncTranscribe();
+    await new Promise(res => setTimeout(res, 2000));
+  }
+}
+
+async function cancelJob() {
+  if (!S.runningId) return;
+  try {
+    await api('/api/transcripts/' + S.runningId + '/cancel', { method: 'POST' });
+    toast('Cancelling…', 'info');
+  } catch (e) { toast(e.message, 'error'); }
+}
+
+/* Rec modal — consent copy is design-mandated, verbatim. Capture wiring lands in Phase 8. */
+function openRecModal() {
+  openModal(`
+    <div style="display:flex;align-items:center;justify-content:space-between">
+      <div style="font-family:var(--f-cond);font-weight:600;font-size:14px;text-transform:uppercase;letter-spacing:0.05em">Live capture</div>
+      <span class="led-dot" style="background:${AMBER};box-shadow:0 0 5px ${AMBER}"></span>
+    </div>
+    <div style="font-size:13px;line-height:1.55;color:var(--body)">This records your microphone (left channel) and system audio (right channel) until you press Stop. Nothing has been recorded yet.</div>
+    <div style="font-size:12px;color:var(--label-dim)">The recording stays on this machine.</div>
+    <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:6px">
+      <button class="btn" id="rec-notnow" style="border-color:var(--inset-edge)">Not now</button>
+      <button class="btn btn--amber" id="rec-start">● Start recording</button>
+    </div>`);
+  $('rec-notnow').addEventListener('click', closeModal);
+  $('rec-start').addEventListener('click', () => {
+    closeModal();
+    startLiveCapture();
+  });
+}
+
+function startLiveCapture() {
+  toast('Live capture arrives in Phase 8', 'info');
+}
 /* ══════════════════ channel bank ══════════════════ */
 let bankPollTimer = null;
 
@@ -759,5 +1441,9 @@ document.addEventListener('DOMContentLoaded', () => {
     if (e.target === $('modal-overlay')) closeModal();
   });
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeModal(); });
+  $('file-input').addEventListener('change', (e) => {
+    if (e.target.files[0]) loadTape(e.target.files[0]);
+    e.target.value = '';
+  });
   checkAuth();
 });
