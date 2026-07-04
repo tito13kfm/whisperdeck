@@ -31,7 +31,8 @@ from services.voice_id import VoiceIdentificationService
 from services.audio_prep import transcode_for_upload, AudioPrepError, chunk_audio
 from services.queue import create_chunk_jobs, retry_failed_chunks, queue_worker_loop, compute_queue_status, cancel_transcript_jobs, resume_cancelled_chunks
 from services.hotwords import list_hotwords, add_hotword, delete_hotword
-from services.correction import extract_hotwords_from_doc, correct_transcript
+from services.correction import extract_hotwords_from_doc, correct_transcript, run_auto_correction
+from services.model_catalog import get_correction_models
 from backends import list_providers, get_provider
 
 # ── App Setup ──────────────────────────────────────────────────────────────
@@ -531,17 +532,10 @@ async def transcribe_audio(
                 print(f"[diarization] non-fatal failure for transcript {transcript.id}: {e}")
 
         # Post-hoc correction pass — best-effort, mirrors diarization's
-        # non-fatal handling. Uses groq by default, same as summarize().
+        # non-fatal handling. Provider/model come from user settings; the
+        # key comes from the central ProviderConfig pool.
         if user_settings.get("auto_correct", True):
-            correction_cfg = db.query(ProviderConfig).filter(
-                ProviderConfig.user_id == current_user.id,
-                ProviderConfig.name == "groq",
-            ).first()
-            if correction_cfg and correction_cfg.api_key:
-                try:
-                    await correct_transcript(db, transcript, api_key=correction_cfg.api_key)
-                except Exception as e:
-                    print(f"[correction] non-fatal failure for transcript {transcript.id}: {e}")
+            await run_auto_correction(db, transcript, user_settings)
 
         return _serialize_transcript(db, transcript)
 
@@ -733,14 +727,23 @@ async def correct_transcript_route(
     if transcript.status not in ("completed", "partial"):
         raise HTTPException(status_code=400, detail=f"Transcript {transcript_id} is not completed")
 
-    prov_cfg = db.query(ProviderConfig).filter(
-        ProviderConfig.user_id == current_user.id,
-        ProviderConfig.name == provider,
-    ).first()
-    api_key = prov_cfg.api_key if prov_cfg else ""
+    from services.settings import resolve_provider_key
+    api_key, provider_config = resolve_provider_key(db, current_user.id, provider)
+    if provider != "local" and not api_key:
+        raise HTTPException(status_code=400, detail=f"No {provider} API key saved — add one in the service panel")
 
-    await correct_transcript(db, transcript, api_key=api_key, provider_name=provider, model=model)
+    await correct_transcript(
+        db, transcript, api_key=api_key, provider_name=provider, model=model,
+        provider_config=provider_config,
+    )
     return _serialize_transcript(db, transcript)
+
+
+@app.get("/api/correction-models/{provider}")
+async def correction_models(provider: str, current_user: User = Depends(get_current_user)):
+    """Curated, cost-aware model shortlist for the correction/summary pickers.
+    OpenRouter entries are validated against its live catalog with pricing."""
+    return {"provider": provider, "models": await get_correction_models(provider)}
 
 
 @app.get("/api/transcripts/{transcript_id}/summary")

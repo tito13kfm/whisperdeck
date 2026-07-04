@@ -1392,12 +1392,44 @@ function segmentsHtml(t) {
 function correctedHtml(t) {
   if (t.correction_error) {
     return '<div class="unit" style="padding:20px 32px;font-size:13px;color:var(--red)">' +
-      '<div class="t-cap" style="color:var(--red);margin-bottom:6px">Correction failed</div>' +
+      '<div class="t-cap" style="color:var(--red);margin-bottom:6px">Correction ' +
+      (t.correction_error.startsWith('auto-correct skipped') ? 'skipped' : 'failed') + '</div>' +
       escapeHtml(t.correction_error) + '</div>';
   }
   if (t.corrected_text) {
-    return '<div class="unit" style="padding:20px 32px;font-size:13.5px;line-height:1.6;color:var(--body);white-space:pre-wrap">' +
-      escapeHtml(t.corrected_text) + '</div>';
+    const model = t.correction_model
+      ? '<div class="t-cap" style="padding:10px 0 4px">Corrected by ' + escapeHtml(t.correction_model) + '</div>'
+      : '';
+    // The correction pass preserves 'Speaker Name: text' lines — render them
+    // like transcript segments. Paragraphs that don't parse fall back to prose.
+    const paras = t.corrected_text.split(/\n\s*\n/).map(p => p.trim()).filter(Boolean);
+    const parsed = paras.map(p => {
+      const m = p.match(/^([^:\n]{1,60}?):\s+([\s\S]+)$/);
+      return m ? { speaker: m[1].trim(), text: m[2].trim() } : null;
+    });
+    const hits = parsed.filter(Boolean).length;
+    if (paras.length && hits / paras.length >= 0.6) {
+      const rows = paras.map((p, i) => {
+        const seg = parsed[i];
+        if (!seg) {
+          return '<div style="padding:12px 0;border-bottom:1px solid var(--seg-edge);font-size:13.5px;line-height:1.55;color:var(--body)">' + escapeHtml(p) + '</div>';
+        }
+        const dot = hashColor(seg.speaker);
+        return `
+        <div style="display:flex;gap:16px;padding:12px 0;border-bottom:1px solid var(--seg-edge)">
+          <div style="min-width:0">
+            <div style="display:flex;align-items:center;gap:7px;margin-bottom:3px">
+              <span style="width:7px;height:7px;border-radius:50%;background:${dot};box-shadow:0 0 4px ${dot}"></span>
+              <span style="font-family:var(--f-cond);font-weight:600;font-size:12.5px;text-transform:uppercase;letter-spacing:0.05em">${escapeHtml(seg.speaker)}</span>
+            </div>
+            <div style="font-size:13.5px;line-height:1.55;color:var(--body)">${escapeHtml(seg.text)}</div>
+          </div>
+        </div>`;
+      }).join('');
+      return '<div class="unit" style="border-radius:3px;padding:6px 32px">' + rows + model + '</div>';
+    }
+    return '<div class="unit" style="padding:20px 32px;font-size:13.5px;line-height:1.6;color:var(--body)">' +
+      '<div style="white-space:pre-wrap">' + escapeHtml(t.corrected_text) + '</div>' + model + '</div>';
   }
   return '<div class="empty-unit">Correction pass not run yet — use Re-run correction above' +
     (t.correction_model ? '' : ' (auto-correct was off for this job)') + '</div>';
@@ -1512,9 +1544,11 @@ async function detailAction(act) {
     }
     if (act === 'summarize') {
       toast('Summarizing…', 'info');
+      let settings = {};
+      try { settings = await api('/api/settings'); } catch { /* backend defaults apply */ }
       const fd = new FormData();
-      fd.append('provider', 'groq');
-      fd.append('model', 'llama-3.3-70b-versatile');
+      fd.append('provider', settings.summary_provider || 'groq');
+      fd.append('model', settings.summary_model || 'llama-3.3-70b-versatile');
       await api('/api/transcripts/' + t.id + '/summarize', { method: 'POST', body: fd });
       S.detailTab = 'summary';
       await loadTranscriptDetail(t.id);
@@ -1527,29 +1561,72 @@ async function detailAction(act) {
   } catch (e) { toast(e.message, 'error'); }
 }
 
-function toggleRerunPicker() {
+const LLM_PROVIDERS = [
+  { id: 'groq', name: 'Groq' },
+  { id: 'openai', name: 'OpenAI' },
+  { id: 'openrouter', name: 'OpenRouter' },
+  { id: 'local', name: 'Local / Custom' },
+];
+
+// Populate a model <select> from the curated catalog (labels carry live
+// pricing for OpenRouter). local has no catalog — swap to free text.
+async function fillModelPicker(selectId, textId, provider, preferred) {
+  const sel = $(selectId), txt = $(textId);
+  const isLocal = provider === 'local';
+  sel.style.display = isLocal ? 'none' : '';
+  txt.style.display = isLocal ? '' : 'none';
+  if (isLocal) {
+    if (preferred) txt.value = preferred;
+    return;
+  }
+  sel.innerHTML = '<option>Loading…</option>';
+  try {
+    const r = await api('/api/correction-models/' + provider);
+    const models = r.models || [];
+    sel.innerHTML = models.map(m =>
+      '<option value="' + escapeHtml(m.id) + '">' + escapeHtml(m.label || m.id) + '</option>').join('')
+      || '<option value="">No models listed</option>';
+    if (preferred && models.some(m => m.id === preferred)) sel.value = preferred;
+  } catch (e) {
+    sel.innerHTML = '<option value="">' + escapeHtml(e.message) + '</option>';
+  }
+}
+
+function llmPickerValue(selectId, textId, provider) {
+  return provider === 'local' ? $(textId).value.trim() : $(selectId).value;
+}
+
+async function toggleRerunPicker() {
   const box = $('rerun-picker');
   if (box.style.display !== 'none') { box.style.display = 'none'; return; }
   box.style.display = 'block';
+  let settings = {};
+  try { settings = await api('/api/settings'); } catch { /* defaults below */ }
+  const prov = settings.correction_provider || 'groq';
   box.innerHTML = `
     <div class="unit" style="padding:12px 34px;display:flex;gap:12px;align-items:center;flex-wrap:wrap">
       <span class="t-unit">Correction pass</span>
       <select id="rerun-provider" class="inp" style="padding:6px 8px;font-size:12px">
-        <option value="groq">Groq</option>
-        <option value="openai">OpenAI</option>
-        <option value="openrouter">OpenRouter</option>
+        ${LLM_PROVIDERS.map(p => '<option value="' + p.id + '"' + (p.id === prov ? ' selected' : '') + '>' + p.name + '</option>').join('')}
       </select>
-      <input id="rerun-model" class="inp" style="padding:6px 8px;font-size:12px;width:230px" value="llama-3.3-70b-versatile" title="LLM used for the correction pass">
+      <select id="rerun-model" class="inp" style="padding:6px 8px;font-size:12px;min-width:230px"></select>
+      <input id="rerun-model-text" class="inp" style="padding:6px 8px;font-size:12px;width:230px;display:none" placeholder="model served by your endpoint" title="Model name your local endpoint serves">
       <button id="rerun-go" class="btn btn--amber" style="font-size:12px;padding:7px 14px">Run correction</button>
     </div>`;
+  await fillModelPicker('rerun-model', 'rerun-model-text', prov, settings.correction_model);
+  $('rerun-provider').addEventListener('change', () =>
+    fillModelPicker('rerun-model', 'rerun-model-text', $('rerun-provider').value, ''));
   $('rerun-go').addEventListener('click', rerunCorrection);
 }
 
 async function rerunCorrection() {
   const t = detailData;
+  const provider = $('rerun-provider').value;
+  const model = llmPickerValue('rerun-model', 'rerun-model-text', provider);
+  if (!model) { toast('Pick a model first', 'error'); return; }
   const fd = new FormData();
-  fd.append('provider', $('rerun-provider').value);
-  fd.append('model', $('rerun-model').value);
+  fd.append('provider', provider);
+  fd.append('model', model);
   toast('Running correction…', 'info');
   try {
     // route returns 200 even when the pass fails — the error rides in the body
@@ -1824,6 +1901,26 @@ async function loadSettingsPage() {
       </div>
     </div>
 
+    <div style="margin-top:30px">
+      <div class="t-cap" style="font-size:10.5px;letter-spacing:0.14em;margin:0 0 8px 36px">Correction &amp; summary defaults</div>
+      <div class="unit unit--svc" style="border-radius:3px;padding:16px 34px;display:flex;flex-direction:column;gap:12px">
+        <div style="font-size:11.5px;color:var(--label-dim)">Used by auto-correct after every job and by the Summarize button. Keys come from the credential jacks above; the model lists are a curated cost-aware shortlist (OpenRouter shows live pricing).</div>
+        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+          <label class="t-label" style="width:110px" for="llm-corr-provider">Correction</label>
+          <select id="llm-corr-provider" class="inp" style="padding:6px 8px;font-size:12px"></select>
+          <select id="llm-corr-model" class="inp" style="padding:6px 8px;font-size:12px;min-width:250px"></select>
+          <input id="llm-corr-model-text" class="inp" style="padding:6px 8px;font-size:12px;width:250px;display:none" placeholder="model served by your endpoint">
+        </div>
+        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+          <label class="t-label" style="width:110px" for="llm-sum-provider">Summary</label>
+          <select id="llm-sum-provider" class="inp" style="padding:6px 8px;font-size:12px"></select>
+          <select id="llm-sum-model" class="inp" style="padding:6px 8px;font-size:12px;min-width:250px"></select>
+          <input id="llm-sum-model-text" class="inp" style="padding:6px 8px;font-size:12px;width:250px;display:none" placeholder="model served by your endpoint">
+        </div>
+        <button id="llm-defaults-save" style="font-family:var(--f-cond);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:0.03em;background:var(--input);border:1px solid var(--input-edge);color:var(--label);padding:8px 14px;border-radius:2px;cursor:pointer;align-self:flex-start">Save defaults</button>
+      </div>
+    </div>
+
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:30px">
       <div>
         <div class="t-cap" style="font-size:10.5px;letter-spacing:0.14em;margin:0 0 8px 36px">Environment readout</div>
@@ -1866,6 +1963,32 @@ async function loadSettingsPage() {
 
   renderHotwordRows();
   syncFaceplate();
+
+  // LLM defaults pickers (correction + summary)
+  const provOpts = LLM_PROVIDERS.map(p => '<option value="' + p.id + '">' + p.name + '</option>').join('');
+  $('llm-corr-provider').innerHTML = provOpts;
+  $('llm-sum-provider').innerHTML = provOpts;
+  $('llm-corr-provider').value = settings.correction_provider || 'groq';
+  $('llm-sum-provider').value = settings.summary_provider || 'groq';
+  fillModelPicker('llm-corr-model', 'llm-corr-model-text', $('llm-corr-provider').value, settings.correction_model);
+  fillModelPicker('llm-sum-model', 'llm-sum-model-text', $('llm-sum-provider').value, settings.summary_model);
+  $('llm-corr-provider').addEventListener('change', () =>
+    fillModelPicker('llm-corr-model', 'llm-corr-model-text', $('llm-corr-provider').value, ''));
+  $('llm-sum-provider').addEventListener('change', () =>
+    fillModelPicker('llm-sum-model', 'llm-sum-model-text', $('llm-sum-provider').value, ''));
+  $('llm-defaults-save').addEventListener('click', async () => {
+    const body = {
+      correction_provider: $('llm-corr-provider').value,
+      correction_model: llmPickerValue('llm-corr-model', 'llm-corr-model-text', $('llm-corr-provider').value),
+      summary_provider: $('llm-sum-provider').value,
+      summary_model: llmPickerValue('llm-sum-model', 'llm-sum-model-text', $('llm-sum-provider').value),
+    };
+    if (!body.correction_model || !body.summary_model) { toast('Pick a model for each row', 'error'); return; }
+    try {
+      await api('/api/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      toast('Correction & summary defaults saved');
+    } catch (e) { toast(e.message, 'error'); }
+  });
 
   // credential jacks
   JACK_DEFS.forEach(j => {

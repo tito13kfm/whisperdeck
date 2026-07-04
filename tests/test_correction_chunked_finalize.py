@@ -40,12 +40,14 @@ def _setup_completed_chunks(db_session, auto_correct=True, with_groq_key=True):
 async def test_finalize_runs_correction_when_enabled(db_session):
     transcript = _setup_completed_chunks(db_session)
 
-    async def _fake_correct(db, t, api_key, provider_name="groq", model="llama-3.3-70b-versatile"):
+    async def _fake_correct(db, t, api_key, provider_name="groq", model="llama-3.3-70b-versatile", **kwargs):
         t.corrected_text = "Hello world."
         t.correction_model = f"{provider_name}/{model}"
         db.commit()
 
-    with patch("services.queue.correct_transcript", side_effect=_fake_correct):
+    # Patch the inner LLM call so run_auto_correction's settings/key
+    # resolution still runs for real against the groq ProviderConfig.
+    with patch("services.correction.correct_transcript", side_effect=_fake_correct):
         await _finalize_if_done(db_session, transcript.id, DiarizationService())
 
     db_session.refresh(transcript)
@@ -56,20 +58,24 @@ async def test_finalize_runs_correction_when_enabled(db_session):
 @pytest.mark.asyncio
 async def test_finalize_skips_correction_when_setting_disabled(db_session):
     transcript = _setup_completed_chunks(db_session, auto_correct=False)
-    fake_correct = AsyncMock()
+    fake_auto = AsyncMock()
 
-    with patch("services.queue.correct_transcript", fake_correct):
+    with patch("services.correction.run_auto_correction", fake_auto):
         await _finalize_if_done(db_session, transcript.id, DiarizationService())
 
-    fake_correct.assert_not_awaited()
+    fake_auto.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_finalize_skips_correction_without_groq_key(db_session):
+async def test_finalize_records_skip_when_provider_key_missing(db_session):
+    """No key for the configured correction provider: no LLM call happens and
+    the skip reason lands on the transcript for the corrected tab to show."""
     transcript = _setup_completed_chunks(db_session, with_groq_key=False)
-    fake_correct = AsyncMock()
+    fake_post = AsyncMock()
 
-    with patch("services.queue.correct_transcript", fake_correct):
+    with patch("httpx.AsyncClient.post", fake_post):
         await _finalize_if_done(db_session, transcript.id, DiarizationService())
 
-    fake_correct.assert_not_awaited()
+    fake_post.assert_not_awaited()
+    db_session.refresh(transcript)
+    assert "auto-correct skipped: no groq API key" in (transcript.correction_error or "")

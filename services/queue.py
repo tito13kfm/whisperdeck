@@ -11,7 +11,6 @@ from typing import Optional
 from database import Transcript, TranscriptionJob
 from backends import get_provider, ProviderError
 from database import ProviderConfig
-from services.correction import correct_transcript
 
 # Free-tier numbers confirmed live against https://console.groq.com/docs/rate-limits
 # on 2026-07-01. Paid/dev tiers raise these — kept here as a dict (not a
@@ -483,16 +482,8 @@ async def _finalize_if_done(db, transcript_id: int, diarization_service) -> None
         from services.settings import get_user_settings  # local import avoids a module-load cycle with app.py
         user_settings = get_user_settings(db, transcript.user_id)
         if user_settings.get("auto_correct", True):
-            from database import ProviderConfig
-            groq_cfg = db.query(ProviderConfig).filter(
-                ProviderConfig.user_id == transcript.user_id,
-                ProviderConfig.name == "groq",
-            ).first()
-            if groq_cfg and groq_cfg.api_key:
-                try:
-                    await correct_transcript(db, transcript, api_key=groq_cfg.api_key)
-                except Exception as e:
-                    print(f"[queue] non-fatal correction failure for transcript {transcript_id}: {e}")
+            from services.correction import run_auto_correction
+            await run_auto_correction(db, transcript, user_settings)
 
 
 async def queue_worker_tick(SessionLocal, diarization_service) -> None:

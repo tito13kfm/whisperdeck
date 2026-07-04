@@ -22,14 +22,15 @@ def _upload(client, provider="groq"):
 
 def test_auto_correct_runs_after_inline_transcription(client):
     client.put("/api/providers/groq", json={"api_key": "fake-groq-key"})
-    fake_correct = AsyncMock()
 
     async def _fake_correct(db, transcript, **kwargs):
         transcript.corrected_text = "Hello world."
         transcript.correction_model = "groq/llama-3.3-70b-versatile"
         db.commit()
 
-    with patch("app.correct_transcript", side_effect=_fake_correct):
+    # inline path routes through run_auto_correction; patch the inner LLM
+    # call so settings/key resolution is exercised for real
+    with patch("services.correction.correct_transcript", side_effect=_fake_correct):
         response = _upload(client)
 
     assert response.status_code == 200
@@ -43,7 +44,7 @@ def test_auto_correct_skipped_when_setting_disabled(client):
     client.put("/api/settings", json={"auto_correct": False})
     fake_correct = AsyncMock()
 
-    with patch("app.correct_transcript", fake_correct):
+    with patch("app.run_auto_correction", fake_correct):
         response = _upload(client)
 
     assert response.status_code == 200
@@ -53,12 +54,13 @@ def test_auto_correct_skipped_when_setting_disabled(client):
 def test_manual_correct_endpoint_reruns_with_different_model(client):
     client.put("/api/providers/groq", json={"api_key": "fake-groq-key"})
 
-    async def _fake_correct(db, transcript, api_key, provider_name="groq", model="llama-3.3-70b-versatile"):
+    async def _fake_correct(db, transcript, api_key, provider_name="groq", model="llama-3.3-70b-versatile", **kwargs):
         transcript.corrected_text = f"corrected by {model}"
         transcript.correction_model = f"{provider_name}/{model}"
         db.commit()
 
-    with patch("app.correct_transcript", side_effect=_fake_correct):
+    with patch("app.correct_transcript", side_effect=_fake_correct), \
+         patch("app.run_auto_correction", AsyncMock()):
         upload_response = _upload(client)
         transcript_id = upload_response.json()["id"]
 

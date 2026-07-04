@@ -201,11 +201,19 @@ Return ONLY valid JSON, no markdown, no code fences."""
         if provider_name == "openai":
             api_base = "https://api.openai.com/v1"
             model = model or "gpt-4o-mini"
+        elif provider_name == "openrouter":
+            api_base = "https://openrouter.ai/api/v1"
+            model = model or "deepseek/deepseek-v4-flash"
         elif provider_name == "local":
-            api_base = (provider_config or {}).get("api_url", "http://localhost:11434/v1")
+            api_base = (provider_config or {}).get("api_url") or "http://localhost:11434/v1"
             model = model or "llama3"
         elif provider_name == "groq":
             model = model or "llama-3.3-70b-versatile"
+        else:
+            raise ProviderError(
+                f"Summarization does not support provider '{provider_name}' — "
+                f"use groq, openai, openrouter, or local."
+            )
 
         request_body = {
             "model": model,
@@ -221,7 +229,7 @@ Return ONLY valid JSON, no markdown, no code fences."""
         # produced replies that got cut off mid-object and failed to parse.
         # OpenAI-compatible endpoints that don't support it (e.g. Ollama's
         # local /v1) just ignore an unrecognized field.
-        if provider_name in ("groq", "openai"):
+        if provider_name in ("groq", "openai", "openrouter"):
             request_body["response_format"] = {"type": "json_object"}
 
         async with httpx.AsyncClient(timeout=120) as client:
