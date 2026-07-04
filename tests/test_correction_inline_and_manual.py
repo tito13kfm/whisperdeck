@@ -20,57 +20,55 @@ def _upload(client, provider="groq"):
         )
 
 
-def test_auto_correct_runs_after_inline_transcription(client):
+def test_auto_correct_enqueues_job_after_inline_transcription(client):
     client.put("/api/providers/groq", json={"api_key": "fake-groq-key"})
-    fake_correct = AsyncMock()
 
-    async def _fake_correct(db, transcript, **kwargs):
-        transcript.corrected_text = "Hello world."
-        transcript.correction_model = "groq/llama-3.3-70b-versatile"
-        db.commit()
-
-    with patch("app.correct_transcript", side_effect=_fake_correct):
-        response = _upload(client)
-
+    response = _upload(client)
     assert response.status_code == 200
+    transcript_id = response.json()["id"]
+
+    # inline path queues a background LlmJob instead of blocking the response
     body = response.json()
-    assert body["corrected_text"] == "Hello world."
-    assert body["correction_model"] == "groq/llama-3.3-70b-versatile"
+    assert body["correction_job"] is not None
+    assert body["correction_job"]["kind"] == "correction"
+    assert body["correction_job"]["status"] == "pending"
+    assert body["correction_job"]["transcript_id"] == transcript_id
 
 
 def test_auto_correct_skipped_when_setting_disabled(client):
     client.put("/api/providers/groq", json={"api_key": "fake-groq-key"})
     client.put("/api/settings", json={"auto_correct": False})
-    fake_correct = AsyncMock()
 
-    with patch("app.correct_transcript", fake_correct):
-        response = _upload(client)
+    response = _upload(client)
 
     assert response.status_code == 200
-    fake_correct.assert_not_awaited()
+    assert response.json()["correction_job"] is None
 
 
-def test_manual_correct_endpoint_reruns_with_different_model(client):
+def test_manual_correct_endpoint_enqueues_job(client):
     client.put("/api/providers/groq", json={"api_key": "fake-groq-key"})
+    client.put("/api/settings", json={"auto_correct": False})
 
-    async def _fake_correct(db, transcript, api_key, provider_name="groq", model="llama-3.3-70b-versatile"):
-        transcript.corrected_text = f"corrected by {model}"
-        transcript.correction_model = f"{provider_name}/{model}"
-        db.commit()
+    upload_response = _upload(client)
+    transcript_id = upload_response.json()["id"]
 
-    with patch("app.correct_transcript", side_effect=_fake_correct):
-        upload_response = _upload(client)
-        transcript_id = upload_response.json()["id"]
-
-        rerun_response = client.post(
-            f"/api/transcripts/{transcript_id}/correct",
-            data={"provider": "groq", "model": "llama-3.1-8b-instant"},
-        )
+    rerun_response = client.post(
+        f"/api/transcripts/{transcript_id}/correct",
+        data={"provider": "groq", "model": "llama-3.1-8b-instant"},
+    )
 
     assert rerun_response.status_code == 200
-    body = rerun_response.json()
-    assert body["corrected_text"] == "corrected by llama-3.1-8b-instant"
-    assert body["correction_model"] == "groq/llama-3.1-8b-instant"
+    job = rerun_response.json()["job"]
+    assert job["kind"] == "correction"
+    assert job["status"] == "pending"
+    assert job["model"] == "llama-3.1-8b-instant"
+
+    # enqueueing again while a job is active returns the same job, not a dupe
+    again = client.post(
+        f"/api/transcripts/{transcript_id}/correct",
+        data={"provider": "groq", "model": "llama-3.1-8b-instant"},
+    )
+    assert again.json()["job"]["id"] == job["id"]
 
 
 def test_manual_correct_requires_completed_transcript(client):

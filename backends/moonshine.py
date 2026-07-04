@@ -12,6 +12,13 @@ import asyncio
 
 from .base import BaseProvider, TranscriptionResult, ProviderError
 
+# Process-wide transcriber cache. get_provider() constructs a fresh provider
+# instance per call (one per chunk job in the queue), and a Moonshine model
+# load is multi-second + multi-GB — without this, every chunk of a chunked
+# local run would reload the model. Safe because local chunk dispatch is
+# serialized (see services/queue.py concurrency rule for local providers).
+_TRANSCRIBER_CACHE: dict = {}
+
 
 class MoonshineProvider(BaseProvider):
     """Transcribe locally using Moonshine (moonshine-voice), English-only."""
@@ -60,8 +67,12 @@ class MoonshineProvider(BaseProvider):
             model_path, resolved_arch = get_model_for_language(
                 wanted_language="en", wanted_model_arch=model_arch
             )
-            self._transcriber = Transcriber(model_path, model_arch=resolved_arch)
             self._resolved_model_name = model_arch_to_string(resolved_arch)
+            cached = _TRANSCRIBER_CACHE.get(self._resolved_model_name)
+            if cached is None:
+                cached = Transcriber(model_path, model_arch=resolved_arch)
+                _TRANSCRIBER_CACHE[self._resolved_model_name] = cached
+            self._transcriber = cached
         except ProviderError:
             raise
         except Exception as e:

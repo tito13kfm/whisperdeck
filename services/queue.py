@@ -11,7 +11,6 @@ from typing import Optional
 from database import Transcript, TranscriptionJob
 from backends import get_provider, ProviderError
 from database import ProviderConfig
-from services.correction import correct_transcript
 
 # Free-tier numbers confirmed live against https://console.groq.com/docs/rate-limits
 # on 2026-07-01. Paid/dev tiers raise these — kept here as a dict (not a
@@ -82,6 +81,11 @@ def compute_audio_seconds_used(db, user_id: int, provider: str, window_seconds: 
 def has_budget(db, user_id: int, provider: str, additional_seconds: float) -> bool:
     """True if submitting a job of additional_seconds would keep this user
     under both the hourly and daily audio-second budget for provider."""
+    from backends import LOCAL_PROVIDERS
+    if provider in LOCAL_PROVIDERS:
+        # On-device work has no rate limit to budget against — the DEFAULT_LIMITS
+        # fallback would nonsensically throttle local CPU inference.
+        return True
     limits = PROVIDER_LIMITS.get(provider, DEFAULT_LIMITS)
     used_hour = compute_audio_seconds_used(db, user_id, provider, 3600)
     used_day = compute_audio_seconds_used(db, user_id, provider, 86400)
@@ -483,16 +487,10 @@ async def _finalize_if_done(db, transcript_id: int, diarization_service) -> None
         from services.settings import get_user_settings  # local import avoids a module-load cycle with app.py
         user_settings = get_user_settings(db, transcript.user_id)
         if user_settings.get("auto_correct", True):
-            from database import ProviderConfig
-            groq_cfg = db.query(ProviderConfig).filter(
-                ProviderConfig.user_id == transcript.user_id,
-                ProviderConfig.name == "groq",
-            ).first()
-            if groq_cfg and groq_cfg.api_key:
-                try:
-                    await correct_transcript(db, transcript, api_key=groq_cfg.api_key)
-                except Exception as e:
-                    print(f"[queue] non-fatal correction failure for transcript {transcript_id}: {e}")
+            # Queued as a background LlmJob — the LLM worker loop picks it
+            # up, so chunk finalization never blocks on a correction pass.
+            from services.llm_jobs import enqueue_auto_correction
+            enqueue_auto_correction(db, transcript, user_settings)
 
 
 async def queue_worker_tick(SessionLocal, diarization_service) -> None:
@@ -536,7 +534,15 @@ async def queue_worker_tick(SessionLocal, diarization_service) -> None:
             if not transcript:
                 continue
             settings = get_user_settings(db, transcript.user_id)
-            concurrency_cap = settings["max_concurrent_chunks"]
+            from backends import LOCAL_PROVIDERS
+            if transcript.provider in LOCAL_PROVIDERS:
+                # Serial: local backends share one process-wide model instance
+                # (see backends/moonshine.py cache comment) whose thread-safety
+                # under concurrent calls is unverified, and parallel local
+                # inference would multiply RAM for no wall-clock win on CPU.
+                concurrency_cap = 1
+            else:
+                concurrency_cap = settings["max_concurrent_chunks"]
 
             already_running = (
                 db.query(TranscriptionJob)

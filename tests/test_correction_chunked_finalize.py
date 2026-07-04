@@ -37,39 +37,44 @@ def _setup_completed_chunks(db_session, auto_correct=True, with_groq_key=True):
 
 
 @pytest.mark.asyncio
-async def test_finalize_runs_correction_when_enabled(db_session):
+async def test_finalize_enqueues_correction_job_when_enabled(db_session):
+    from database import LlmJob
+
     transcript = _setup_completed_chunks(db_session)
-
-    async def _fake_correct(db, t, api_key, provider_name="groq", model="llama-3.3-70b-versatile"):
-        t.corrected_text = "Hello world."
-        t.correction_model = f"{provider_name}/{model}"
-        db.commit()
-
-    with patch("services.queue.correct_transcript", side_effect=_fake_correct):
-        await _finalize_if_done(db_session, transcript.id, DiarizationService())
+    await _finalize_if_done(db_session, transcript.id, DiarizationService())
 
     db_session.refresh(transcript)
     assert transcript.status == "completed"
-    assert transcript.corrected_text == "Hello world."
+    job = db_session.query(LlmJob).filter(LlmJob.transcript_id == transcript.id).first()
+    assert job is not None
+    assert job.kind == "correction"
+    assert job.status == "pending"
+    assert job.provider == "groq"
 
 
 @pytest.mark.asyncio
 async def test_finalize_skips_correction_when_setting_disabled(db_session):
+    from database import LlmJob
+
     transcript = _setup_completed_chunks(db_session, auto_correct=False)
-    fake_correct = AsyncMock()
+    await _finalize_if_done(db_session, transcript.id, DiarizationService())
 
-    with patch("services.queue.correct_transcript", fake_correct):
-        await _finalize_if_done(db_session, transcript.id, DiarizationService())
-
-    fake_correct.assert_not_awaited()
+    assert db_session.query(LlmJob).filter(LlmJob.transcript_id == transcript.id).count() == 0
 
 
 @pytest.mark.asyncio
-async def test_finalize_skips_correction_without_groq_key(db_session):
+async def test_finalize_records_skip_when_provider_key_missing(db_session):
+    """No key for the configured correction provider: the job lands as
+    'failed' with the skip reason (visible + rerunnable on the Queue screen)
+    and the transcript's corrected tab can explain itself."""
+    from database import LlmJob
+
     transcript = _setup_completed_chunks(db_session, with_groq_key=False)
-    fake_correct = AsyncMock()
+    await _finalize_if_done(db_session, transcript.id, DiarizationService())
 
-    with patch("services.queue.correct_transcript", fake_correct):
-        await _finalize_if_done(db_session, transcript.id, DiarizationService())
-
-    fake_correct.assert_not_awaited()
+    job = db_session.query(LlmJob).filter(LlmJob.transcript_id == transcript.id).first()
+    assert job is not None
+    assert job.status == "failed"
+    assert "auto-correct skipped: no groq API key" in job.error
+    db_session.refresh(transcript)
+    assert "auto-correct skipped: no groq API key" in (transcript.correction_error or "")
