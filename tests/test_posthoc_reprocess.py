@@ -223,14 +223,14 @@ def test_context_route_extracts_terms(client, db_session):
     fake_extract.assert_awaited_once()
 
 
-def test_context_route_400_without_groq_key(client, db_session):
+def test_context_route_400_without_provider_key(client, db_session):
     user = _test_user(db_session)
     t = Transcript(user_id=user.id, title="c", filename="c.mp3", status="completed", full_text="x")
     db_session.add(t)
     db_session.commit()
     r = client.post(f"/api/transcripts/{t.id}/context", data={"context_doc": "Agenda"})
     assert r.status_code == 400
-    assert "Groq API key" in r.json()["detail"]
+    assert "API key" in r.json()["detail"]
 
 
 def test_context_route_400_when_empty(client, db_session):
