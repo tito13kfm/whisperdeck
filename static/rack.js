@@ -2100,6 +2100,8 @@ async function toggleContextPicker() {
 }
 
 /* ══════════════════ voice roster ══════════════════ */
+let expandedVoice = null; // profile id currently showing its clip list
+let clipAudio = null;
 async function loadVoices() {
   const root = $('page-voices');
   let voices;
@@ -2107,16 +2109,30 @@ async function loadVoices() {
 
   const cards = voices.map(v => {
     const initials = (v.name || '?').split(' ').map(w => w[0]).join('').slice(0, 2).toUpperCase();
-    const meta = (v.sample_count || 1) + ' sample' + ((v.sample_count || 1) !== 1 ? 's' : '') + ' · ' + (v.embedding_model || '—');
+    const meta = (v.sample_count || 0) + ' clip' + ((v.sample_count || 0) !== 1 ? 's' : '') + ' · ' + (v.embedding_model || '—');
+    const open = expandedVoice === v.id;
+    const clipRows = (v.clips || []).map(c => `
+      <div style="display:flex;align-items:center;gap:10px;padding:6px 0;border-bottom:1px solid var(--seg-edge)">
+        <button data-clip-play="${c.id}" data-vid="${v.id}" style="background:none;border:1px solid var(--inset-edge);border-radius:3px;width:24px;height:22px;cursor:pointer;font-size:10px;color:var(--label-dim)">▶</button>
+        <span style="font-family:var(--f-mono);font-size:10.5px;color:var(--label-dim)">${c.created_at ? new Date(c.created_at).toLocaleString() : ''}</span>
+        <button data-clip-del="${c.id}" data-vid="${v.id}" style="margin-left:auto;background:none;border:none;color:var(--red);cursor:pointer;font-size:11px">Remove</button>
+      </div>`).join('') || '<div style="font-size:11.5px;color:var(--label-dim);padding:6px 0">No clips yet</div>';
     return `
-    <div class="unit" style="display:grid;grid-template-columns:auto 1fr auto auto;align-items:center;gap:16px;padding:11px 34px">
-      <div style="width:38px;height:38px;border-radius:50%;background:linear-gradient(155deg,#D4D6D8,#A9ACAF 70%);display:flex;align-items:center;justify-content:center;box-shadow:0 2px 4px rgba(0,0,0,0.5),inset 0 -2px 3px rgba(0,0,0,0.2);font-family:var(--f-cond);font-weight:700;font-size:14px;color:var(--key-ink)">${escapeHtml(initials)}</div>
-      <div style="min-width:0">
-        <div style="font-weight:600;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(v.name)}</div>
-        <div style="font-family:var(--f-mono);font-size:10.5px;color:var(--label-dim);margin-top:2px">${escapeHtml(meta)}</div>
+    <div class="unit" style="padding:11px 34px">
+      <div style="display:grid;grid-template-columns:auto 1fr auto auto;align-items:center;gap:16px;cursor:pointer" data-voice-toggle="${v.id}">
+        <div style="width:38px;height:38px;border-radius:50%;background:linear-gradient(155deg,#D4D6D8,#A9ACAF 70%);display:flex;align-items:center;justify-content:center;box-shadow:0 2px 4px rgba(0,0,0,0.5),inset 0 -2px 3px rgba(0,0,0,0.2);font-family:var(--f-cond);font-weight:700;font-size:14px;color:var(--key-ink)">${escapeHtml(initials)}</div>
+        <div style="min-width:0">
+          <div style="font-weight:600;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(v.name)}</div>
+          <div style="font-family:var(--f-mono);font-size:10.5px;color:var(--label-dim);margin-top:2px">${escapeHtml(meta)}</div>
+        </div>
+        <div style="font-size:12px;color:var(--label-dim)">${escapeHtml(v.notes || '')}</div>
+        <button class="btn btn--red" data-vdel="${v.id}" style="font-size:11px;padding:5px 12px;background:none">Remove</button>
       </div>
-      <div style="font-size:12px;color:var(--label-dim)">${escapeHtml(v.notes || '')}</div>
-      <button class="btn btn--red" data-vdel="${v.id}" style="font-size:11px;padding:5px 12px;background:none">Remove</button>
+      ${open ? `
+      <div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--seg-edge)">
+        ${clipRows}
+        <button data-add-clip="${v.id}" style="margin-top:8px;font-family:var(--f-mono);font-size:11px;background:none;border:1px dashed var(--dash);color:var(--label-dim);padding:6px 10px;border-radius:2px;cursor:pointer">+ Add clip</button>
+      </div>` : ''}
     </div>`;
   }).join('');
 
@@ -2134,7 +2150,8 @@ async function loadVoices() {
   $('nav-badge-voices').textContent = String(voices.length).padStart(2, '0');
   $('voice-enroll-btn').addEventListener('click', openEnrollModal);
   $('voice-identify-btn').addEventListener('click', openIdentifyModal);
-  root.querySelectorAll('[data-vdel]').forEach(b => b.addEventListener('click', async () => {
+  root.querySelectorAll('[data-vdel]').forEach(b => b.addEventListener('click', async (e) => {
+    e.stopPropagation();
     if (!window.confirm('Remove this voice profile from the roster?')) return;
     try {
       await api('/api/voices/' + b.dataset.vdel, { method: 'DELETE' });
@@ -2142,6 +2159,25 @@ async function loadVoices() {
       loadVoices();
     } catch (e) { toast(e.message, 'error'); }
   }));
+  root.querySelectorAll('[data-voice-toggle]').forEach(el => el.addEventListener('click', () => {
+    const id = Number(el.dataset.voiceToggle);
+    expandedVoice = expandedVoice === id ? null : id;
+    loadVoices();
+  }));
+  root.querySelectorAll('[data-clip-play]').forEach(btn => btn.addEventListener('click', () => {
+    if (clipAudio) clipAudio.pause();
+    clipAudio = new Audio('/api/voices/' + btn.dataset.vid + '/clips/' + btn.dataset.clipPlay + '/audio');
+    clipAudio.play().catch(err => toast(err.message, 'error'));
+  }));
+  root.querySelectorAll('[data-clip-del]').forEach(btn => btn.addEventListener('click', async () => {
+    if (!window.confirm('Remove this clip?')) return;
+    try {
+      await api('/api/voices/' + btn.dataset.vid + '/clips/' + btn.dataset.clipDel, { method: 'DELETE' });
+      toast('Clip removed');
+      loadVoices();
+    } catch (e) { toast(e.message, 'error'); }
+  }));
+  root.querySelectorAll('[data-add-clip]').forEach(btn => btn.addEventListener('click', () => openAddClipModal(Number(btn.dataset.addClip))));
 }
 
 let enrollFile = null;
@@ -2190,6 +2226,43 @@ function openEnrollModal() {
     try {
       await api('/api/voices/enroll', { method: 'POST', body: fd });
       toast('Enrolled ' + name + ' to the roster');
+      closeModal();
+      loadVoices();
+    } catch (e) { toast(e.message, 'error'); }
+  });
+}
+
+let addClipFile = null;
+function openAddClipModal(profileId) {
+  addClipFile = null;
+  openModal(`
+    <div style="font-family:var(--f-cond);font-weight:700;font-size:16px;text-transform:uppercase;letter-spacing:0.04em;margin-bottom:12px">Add a clip</div>
+    <div class="field" style="gap:4px;margin-bottom:16px">
+      <label class="t-label" style="font-size:12px">Voice sample</label>
+      <button id="add-clip-file-btn" style="font-family:var(--f-mono);font-size:11px;background:var(--panel-lo);border:1px dashed var(--dash);color:var(--label-dim);padding:12px;border-radius:2px;cursor:pointer">Choose an audio file…</button>
+    </div>
+    <div style="display:flex;justify-content:flex-end;gap:8px">
+      <button class="btn" id="add-clip-cancel" style="font-size:12px;border-color:var(--inset-edge)">Cancel</button>
+      <button id="add-clip-go" style="font-family:var(--f-mono);font-size:11px;font-weight:700;background:${AMBER};color:var(--amber-ink);border:none;padding:8px 14px;border-radius:2px;cursor:pointer">Add clip</button>
+    </div>`);
+  $('add-clip-cancel').addEventListener('click', closeModal);
+  $('add-clip-file-btn').addEventListener('click', () => {
+    const inp = document.createElement('input');
+    inp.type = 'file';
+    inp.accept = 'audio/*,.mp3,.wav,.m4a,.flac,.ogg';
+    inp.addEventListener('change', () => {
+      addClipFile = inp.files[0] || null;
+      if (addClipFile) $('add-clip-file-btn').textContent = addClipFile.name;
+    });
+    inp.click();
+  });
+  $('add-clip-go').addEventListener('click', async () => {
+    if (!addClipFile) { toast('Choose a voice sample first', 'error'); return; }
+    const fd = new FormData();
+    fd.append('file', addClipFile);
+    try {
+      await api('/api/voices/' + profileId + '/clips', { method: 'POST', body: fd });
+      toast('Clip added');
       closeModal();
       loadVoices();
     } catch (e) { toast(e.message, 'error'); }
