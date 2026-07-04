@@ -1531,6 +1531,11 @@ let detailPollTimer = null;
 let segAudio = null, segAudioTid = null, segPlayingBtn = null;
 let seedClips = {}; // speaker label -> [{start, end}]
 
+// Bulk re-tag mode: selectedSegments holds real indices into t.segments
+// (not the filtered-view index, since search can filter the list).
+let selectMode = false;
+let selectedSegments = new Set();
+
 function resetSegAudio() {
   if (segAudio) segAudio.pause();
   segAudio = null;
@@ -1588,16 +1593,21 @@ function detailTabsHtml() {
 
 function segmentsHtml(t) {
   const q = (S.query || '').trim().toLowerCase();
-  const segs = (t.segments || []).filter(sg =>
-    !q || (sg.text || '').toLowerCase().includes(q) || (sg.speaker || '').toLowerCase().includes(q));
+  const allSegs = t.segments || [];
+  const segs = allSegs
+    .map((sg, i) => ({ sg, i }))
+    .filter(({ sg }) => !q || (sg.text || '').toLowerCase().includes(q) || (sg.speaker || '').toLowerCase().includes(q));
   if (!segs.length) {
     return '<div style="padding:30px;text-align:center;font-family:var(--f-mono);font-size:11px;color:var(--label-dim)">' +
       (q ? 'NO SEGMENTS MATCH — CLEAR THE SEARCH OR CHECK JOB STATUS' : 'NO SEGMENTS YET — CHECK JOB STATUS') + '</div>';
   }
   const segBtn = 'background:none;border:1px solid var(--inset-edge);border-radius:3px;width:24px;height:22px;cursor:pointer;font-size:10px;padding:0;flex-shrink:0';
-  return segs.map(sg => {
+  return segs.map(({ sg, i }) => {
     const dot = hashColor(sg.speaker || '');
     const seeded = sg.speaker && (seedClips[sg.speaker] || []).some(c => c.start === sg.start && c.end === sg.end);
+    const checkbox = selectMode
+      ? `<input type="checkbox" data-seg-select="${i}" ${selectedSegments.has(i) ? 'checked' : ''} style="margin-top:4px;flex-shrink:0">`
+      : '';
     const controls = !t.has_audio ? '' : `
       <div style="display:flex;flex-direction:column;gap:4px;flex-shrink:0">
         <button data-seg-play data-start="${sg.start}" data-end="${sg.end}" title="Play this line from the recording" style="${segBtn};color:var(--label-dim)">▶</button>
@@ -1608,6 +1618,7 @@ function segmentsHtml(t) {
       : `<span style="font-family:var(--f-cond);font-weight:600;font-size:12.5px;text-transform:uppercase;letter-spacing:0.05em">Speaker</span>`;
     return `
     <div style="display:flex;gap:16px;padding:12px 0;border-bottom:1px solid var(--seg-edge)">
+      ${checkbox}
       ${controls}
       <div style="font-family:var(--f-mono);font-size:11px;color:var(--nixie);text-shadow:0 0 4px rgba(255,138,61,0.4);width:44px;flex-shrink:0;padding-top:2px">${formatTime(sg.start)}</div>
       <div style="min-width:0">
@@ -1628,8 +1639,16 @@ function detailBodyClick(e) {
   if (play) { segPlay(play); return; }
   const seed = e.target.closest('[data-seg-seed]');
   if (seed) { toggleSeed(seed); return; }
+  const sel = e.target.closest('[data-seg-select]');
+  if (sel) {
+    const i = Number(sel.dataset.segSelect);
+    if (sel.checked) selectedSegments.add(i); else selectedSegments.delete(i);
+    const retagBtn = $('retag-selected-btn');
+    if (retagBtn) retagBtn.textContent = 'Re-tag selected (' + selectedSegments.size + ')';
+    return;
+  }
   const ren = e.target.closest('[data-seg-rename]');
-  if (ren) { renameSpeaker(ren.dataset.segRename); }
+  if (ren && !selectMode) { renameSpeaker(ren.dataset.segRename); }
 }
 
 function segPlay(btn) {
@@ -1744,6 +1763,46 @@ async function openEnrollMarkedModal() {
       closeModal();
       renderDetailBody();
       syncEnrollMarkedBtn();
+    } catch (e) { toast(e.message, 'error'); }
+  });
+}
+
+async function openRetagModal() {
+  if (!selectedSegments.size) { toast('Select at least one line first', 'error'); return; }
+  let voices = [];
+  try { voices = await api('/api/voices'); } catch { /* picker still works with just "new name" */ }
+  const options = voices.map(v => `<option value="${escapeHtml(v.name)}">${escapeHtml(v.name)}</option>`).join('');
+  openModal(`
+    <div style="font-family:var(--f-cond);font-weight:700;font-size:16px;text-transform:uppercase;letter-spacing:0.04em;margin-bottom:12px">Re-tag ${selectedSegments.size} line${selectedSegments.size !== 1 ? 's' : ''}</div>
+    <div style="display:flex;flex-direction:column;gap:10px;margin-bottom:16px">
+      <div class="field" style="gap:4px">
+        <label class="t-label" style="font-size:12px">Correct speaker</label>
+        <select class="inp" id="retag-existing" style="font-size:12px;padding:7px 9px">
+          <option value="">— New name —</option>${options}
+        </select>
+        <input class="inp" id="retag-new" type="text" placeholder="New speaker name" style="font-size:12px;padding:7px 9px;margin-top:6px">
+      </div>
+    </div>
+    <div style="display:flex;justify-content:flex-end;gap:8px">
+      <button class="btn" id="retag-cancel" style="font-size:12px;border-color:var(--inset-edge)">Cancel</button>
+      <button id="retag-go" style="font-family:var(--f-mono);font-size:11px;font-weight:700;background:${AMBER};color:var(--amber-ink);border:none;padding:8px 14px;border-radius:2px;cursor:pointer">Re-tag</button>
+    </div>`);
+  $('retag-cancel').addEventListener('click', closeModal);
+  $('retag-go').addEventListener('click', async () => {
+    const existing = $('retag-existing').value;
+    const newName = $('retag-new').value.trim();
+    const name = existing || newName;
+    if (!name) { toast('Pick an existing name or type a new one', 'error'); return; }
+    try {
+      const r = await api('/api/transcripts/' + detailData.id + '/segments/retag', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ indices: Array.from(selectedSegments), speaker: name }),
+      });
+      toast('Re-tagged ' + r.retagged + ' line' + (r.retagged !== 1 ? 's' : ''), 'info');
+      selectMode = false;
+      selectedSegments = new Set();
+      closeModal();
+      await loadTranscriptDetail(detailData.id, { preserveQuery: true });
     } catch (e) { toast(e.message, 'error'); }
   });
 }
@@ -1879,6 +1938,8 @@ function renderDetail() {
     <div style="display:flex;gap:6px;align-items:flex-end;margin-bottom:14px;padding:0 36px">
       ${detailTabsHtml()}
       <button id="enroll-marked-btn" class="btn" style="margin-left:auto;font-size:11px;padding:6px 12px;border-color:var(--inset-edge)" ${markedSpeakers().length ? '' : 'disabled title="Flag a line with the ◈ button first"'}>Enroll marked clips</button>
+      <button id="select-mode-btn" class="btn" style="font-size:11px;padding:6px 12px;border-color:var(--inset-edge)">${selectMode ? 'Cancel select' : 'Select lines…'}</button>
+      ${selectMode ? `<button id="retag-selected-btn" class="btn" style="font-size:11px;padding:6px 12px;border-color:var(--inset-edge)">Re-tag selected (${selectedSegments.size})</button>` : ''}
       <input id="detail-search" class="inp" type="text" placeholder="Search transcript…" value="${escapeHtml(S.query)}" style="font-size:12px;width:220px;padding:8px 10px">
     </div>
     <div id="detail-body"></div>`;
@@ -1896,6 +1957,14 @@ function renderDetail() {
   });
   const enrollMarkedBtn = $('enroll-marked-btn');
   if (enrollMarkedBtn) enrollMarkedBtn.addEventListener('click', openEnrollMarkedModal);
+  const selectModeBtn = $('select-mode-btn');
+  if (selectModeBtn) selectModeBtn.addEventListener('click', () => {
+    selectMode = !selectMode;
+    if (!selectMode) selectedSegments.clear();
+    renderDetail();
+  });
+  const retagBtn = $('retag-selected-btn');
+  if (retagBtn) retagBtn.addEventListener('click', openRetagModal);
   root.querySelectorAll('[data-dact]').forEach(b => b.addEventListener('click', () => detailAction(b.dataset.dact)));
   // Delegated: segment rows re-render on search/poll, the container doesn't.
   $('detail-body').addEventListener('click', detailBodyClick);
