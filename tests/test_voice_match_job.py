@@ -136,3 +136,46 @@ def test_voice_match_skips_segment_on_extraction_failure_without_failing_job(db_
     assert t.segments[0]["speaker"] == "SPEAKER_00"  # extraction failed, left alone
     assert t.segments[1]["speaker"] == "Alice"
     assert "1 segment" in job.error  # skip count surfaced even though status is completed
+
+
+def test_voice_match_route_enqueues_job(client, db_session, tmp_path):
+    from database import User as _User
+    user = db_session.query(_User).filter(_User.username == "testuser").first()
+    if not user:
+        user = _User(username="testuser", password_hash="x", password_salt="y")
+        db_session.add(user)
+        db_session.commit()
+    t = _transcript_with_segments(db_session, user, tmp_path,
+                                   [{"start": 0, "end": 1, "text": "hi", "speaker": "S"}])
+    r = client.post(f"/api/transcripts/{t.id}/voice-match")
+    assert r.status_code == 200
+    assert r.json()["job"]["kind"] == "voice_match"
+    assert r.json()["job"]["status"] == "pending"
+
+
+def test_voice_match_route_400_without_stored_audio(client, db_session):
+    from database import User as _User, Transcript as _Transcript
+    user = db_session.query(_User).filter(_User.username == "testuser").first()
+    if not user:
+        user = _User(username="testuser", password_hash="x", password_salt="y")
+        db_session.add(user)
+        db_session.commit()
+    t = _Transcript(user_id=user.id, title="n", filename="n.mp3", status="completed", full_text="x")
+    db_session.add(t)
+    db_session.commit()
+    r = client.post(f"/api/transcripts/{t.id}/voice-match")
+    assert r.status_code == 400
+
+
+def test_transcript_serialization_includes_voice_match_job(client, db_session, tmp_path):
+    from database import User as _User
+    user = db_session.query(_User).filter(_User.username == "testuser").first()
+    if not user:
+        user = _User(username="testuser", password_hash="x", password_salt="y")
+        db_session.add(user)
+        db_session.commit()
+    t = _transcript_with_segments(db_session, user, tmp_path,
+                                   [{"start": 0, "end": 1, "text": "hi", "speaker": "S"}])
+    client.post(f"/api/transcripts/{t.id}/voice-match")
+    r = client.get(f"/api/transcripts/{t.id}")
+    assert r.json()["voice_match_job"]["kind"] == "voice_match"

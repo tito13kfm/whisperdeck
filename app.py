@@ -170,6 +170,7 @@ def _serialize_transcript(db: Session, t: Transcript) -> dict:
         # ("correction running — section X of Y") straight from these.
         "correction_job": serialize_llm_job(cj) if (cj := latest_job(db, t.id, "correction")) else None,
         "summary_job": serialize_llm_job(sj) if (sj := latest_job(db, t.id, "summary")) else None,
+        "voice_match_job": serialize_llm_job(vj) if (vj := latest_job(db, t.id, "voice_match")) else None,
     }
 
 
@@ -1040,6 +1041,25 @@ async def rediarize_transcript(
     t.diarize_requested = True
     db.commit()
     job = enqueue_llm_job(db, current_user.id, transcript_id, "rediarize", "", "")
+    return {"job": serialize_llm_job(job)}
+
+
+@app.post("/api/transcripts/{transcript_id}/voice-match")
+async def voice_match_transcript(
+    transcript_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Queue a background pass that relabels segments using the voice
+    roster — no re-clustering, just matching against enrolled voices."""
+    t = db.query(Transcript).filter(
+        Transcript.id == transcript_id, Transcript.user_id == current_user.id
+    ).first()
+    if not t:
+        raise HTTPException(status_code=404, detail="Transcript not found")
+    if not (t.audio_path and os.path.exists(t.audio_path)):
+        raise HTTPException(status_code=400, detail="No stored audio for this transcript")
+    job = enqueue_llm_job(db, current_user.id, transcript_id, "voice_match", "", "")
     return {"job": serialize_llm_job(job)}
 
 
