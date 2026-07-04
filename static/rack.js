@@ -1079,18 +1079,18 @@ async function cancelJob() {
   } catch (e) { toast(e.message, 'error'); }
 }
 
-/* Rec modal — consent copy is design-mandated, verbatim. Capture wiring lands in Phase 8. */
+/* Rec modal — consent copy is design-mandated, verbatim from the prototype. */
 function openRecModal() {
   openModal(`
-    <div style="display:flex;align-items:center;justify-content:space-between">
-      <div style="font-family:var(--f-cond);font-weight:600;font-size:14px;text-transform:uppercase;letter-spacing:0.05em">Live capture</div>
-      <span class="led-dot" style="background:${AMBER};box-shadow:0 0 5px ${AMBER}"></span>
+    <div style="display:flex;align-items:center;gap:9px;margin-bottom:12px">
+      <span style="width:9px;height:9px;border-radius:50%;background:${RED};box-shadow:0 0 6px ${RED}"></span>
+      <span style="font-family:var(--f-cond);font-weight:700;font-size:16px;text-transform:uppercase;letter-spacing:0.04em">Start a live capture?</span>
     </div>
-    <div style="font-size:13px;line-height:1.55;color:var(--body)">This records your microphone (left channel) and system audio (right channel) until you press Stop. Nothing has been recorded yet.</div>
-    <div style="font-size:12px;color:var(--label-dim)">The recording stays on this machine.</div>
-    <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:6px">
-      <button class="btn" id="rec-notnow" style="border-color:var(--inset-edge)">Not now</button>
-      <button class="btn btn--amber" id="rec-start">● Start recording</button>
+    <div style="font-size:13.5px;line-height:1.55;color:var(--body);margin-bottom:8px">This records your microphone (left channel) and system audio (right channel) until you press Stop. Nothing has been recorded yet.</div>
+    <div style="font-family:var(--f-mono);font-size:10.5px;color:var(--label-dim);margin-bottom:18px">The recording stays on this machine.</div>
+    <div style="display:flex;justify-content:flex-end;gap:8px">
+      <button class="btn" id="rec-notnow" style="font-size:12px;border-color:var(--inset-edge)">Not now</button>
+      <button id="rec-start" style="font-family:var(--f-mono);font-size:11px;font-weight:700;background:${AMBER};color:var(--amber-ink);border:none;padding:8px 14px;border-radius:2px;cursor:pointer">● Start recording</button>
     </div>`);
   $('rec-notnow').addEventListener('click', closeModal);
   $('rec-start').addEventListener('click', () => {
@@ -1427,7 +1427,167 @@ async function rerunCorrection() {
     await loadTranscriptDetail(t.id);
   } catch (e) { toast(e.message, 'error'); }
 }
-function loadVoices() { $('page-voices').innerHTML = '<div class="empty-unit">Voice roster — coming in Phase 6</div>'; }
+/* ══════════════════ voice roster ══════════════════ */
+async function loadVoices() {
+  const root = $('page-voices');
+  let voices;
+  try { voices = await api('/api/voices'); } catch (e) { toast(e.message, 'error'); return; }
+
+  const cards = voices.map(v => {
+    const initials = (v.name || '?').split(' ').map(w => w[0]).join('').slice(0, 2).toUpperCase();
+    const meta = (v.sample_count || 1) + ' sample' + ((v.sample_count || 1) !== 1 ? 's' : '') + ' · ' + (v.embedding_model || '—');
+    return `
+    <div class="unit" style="display:grid;grid-template-columns:auto 1fr auto auto;align-items:center;gap:16px;padding:11px 34px">
+      <div style="width:38px;height:38px;border-radius:50%;background:linear-gradient(155deg,#D4D6D8,#A9ACAF 70%);display:flex;align-items:center;justify-content:center;box-shadow:0 2px 4px rgba(0,0,0,0.5),inset 0 -2px 3px rgba(0,0,0,0.2);font-family:var(--f-cond);font-weight:700;font-size:14px;color:var(--key-ink)">${escapeHtml(initials)}</div>
+      <div style="min-width:0">
+        <div style="font-weight:600;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(v.name)}</div>
+        <div style="font-family:var(--f-mono);font-size:10.5px;color:var(--label-dim);margin-top:2px">${escapeHtml(meta)}</div>
+      </div>
+      <div style="font-size:12px;color:var(--label-dim)">${escapeHtml(v.notes || '')}</div>
+      <button class="btn btn--red" data-vdel="${v.id}" style="font-size:11px;padding:5px 12px;background:none">Remove</button>
+    </div>`;
+  }).join('');
+
+  root.innerHTML = `
+    <div class="page-head">
+      <h1 class="t-title">Voice roster</h1>
+      <div style="display:flex;gap:8px">
+        <button class="btn" id="voice-enroll-btn" style="font-size:12px;padding:7px 14px;border-color:var(--inset-edge)">+ Enroll speaker…</button>
+        <button class="btn" id="voice-identify-btn" style="font-size:12px;padding:7px 14px;border-color:var(--inset-edge)">Identify a voice…</button>
+      </div>
+    </div>
+    <div style="font-family:var(--f-mono);font-size:10.5px;color:var(--label-dim);letter-spacing:0.06em;margin:0 36px 14px">Profiles on this roster are matched against every diarized transcript to auto-name speakers.</div>
+    ${voices.length ? cards : '<div class="empty-unit">Roster empty — enroll a speaker with a short voice sample</div>'}`;
+
+  $('nav-badge-voices').textContent = String(voices.length).padStart(2, '0');
+  $('voice-enroll-btn').addEventListener('click', openEnrollModal);
+  $('voice-identify-btn').addEventListener('click', openIdentifyModal);
+  root.querySelectorAll('[data-vdel]').forEach(b => b.addEventListener('click', async () => {
+    if (!window.confirm('Remove this voice profile from the roster?')) return;
+    try {
+      await api('/api/voices/' + b.dataset.vdel, { method: 'DELETE' });
+      toast('Profile removed');
+      loadVoices();
+    } catch (e) { toast(e.message, 'error'); }
+  }));
+}
+
+let enrollFile = null;
+function openEnrollModal() {
+  enrollFile = null;
+  openModal(`
+    <div style="font-family:var(--f-cond);font-weight:700;font-size:16px;text-transform:uppercase;letter-spacing:0.04em;margin-bottom:12px">Enroll a speaker</div>
+    <div style="display:flex;flex-direction:column;gap:10px;margin-bottom:12px">
+      <div class="field" style="gap:4px">
+        <label class="t-label" style="font-size:12px" for="enroll-name">Speaker name</label>
+        <input class="inp" id="enroll-name" type="text" placeholder="e.g. Sarah Chen" style="font-size:12px;padding:7px 9px">
+      </div>
+      <div class="field" style="gap:4px">
+        <label class="t-label" style="font-size:12px" for="enroll-notes">Notes — optional</label>
+        <input class="inp" id="enroll-notes" type="text" placeholder="role, context…" style="font-size:12px;padding:7px 9px">
+      </div>
+      <div class="field" style="gap:4px">
+        <label class="t-label" style="font-size:12px">Voice sample</label>
+        <button id="enroll-file-btn" style="font-family:var(--f-mono);font-size:11px;background:var(--panel-lo);border:1px dashed var(--dash);color:var(--label-dim);padding:12px;border-radius:2px;cursor:pointer">Choose an audio file…</button>
+      </div>
+    </div>
+    <div style="font-size:12px;line-height:1.5;color:${AMBER};margin-bottom:16px">Enrolling saves this voice to the shared roster — future diarized transcripts will auto-name matching speakers.</div>
+    <div style="display:flex;justify-content:flex-end;gap:8px">
+      <button class="btn" id="enroll-cancel" style="font-size:12px;border-color:var(--inset-edge)">Cancel</button>
+      <button id="enroll-go" style="font-family:var(--f-mono);font-size:11px;font-weight:700;background:${AMBER};color:var(--amber-ink);border:none;padding:8px 14px;border-radius:2px;cursor:pointer">Enroll to roster</button>
+    </div>`);
+  $('enroll-cancel').addEventListener('click', closeModal);
+  $('enroll-file-btn').addEventListener('click', () => {
+    const inp = document.createElement('input');
+    inp.type = 'file';
+    inp.accept = 'audio/*,.mp3,.wav,.m4a,.flac,.ogg';
+    inp.addEventListener('change', () => {
+      enrollFile = inp.files[0] || null;
+      if (enrollFile) $('enroll-file-btn').textContent = enrollFile.name;
+    });
+    inp.click();
+  });
+  $('enroll-go').addEventListener('click', async () => {
+    const name = $('enroll-name').value.trim();
+    if (!name) { toast('Speaker name required', 'error'); return; }
+    if (!enrollFile) { toast('Choose a voice sample first', 'error'); return; }
+    const fd = new FormData();
+    fd.append('file', enrollFile);
+    fd.append('name', name);
+    fd.append('notes', $('enroll-notes').value.trim());
+    try {
+      await api('/api/voices/enroll', { method: 'POST', body: fd });
+      toast('Enrolled ' + name + ' to the roster');
+      closeModal();
+      loadVoices();
+    } catch (e) { toast(e.message, 'error'); }
+  });
+}
+
+let identifyFile = null, identifyThreshold = '65';
+function openIdentifyModal() {
+  identifyFile = null;
+  identifyThreshold = '65';
+  openModal(`
+    <div style="font-family:var(--f-cond);font-weight:700;font-size:16px;text-transform:uppercase;letter-spacing:0.04em;margin-bottom:8px">Identify a voice</div>
+    <div style="font-size:12.5px;color:var(--label-dim);margin-bottom:14px">Match a sample against the enrolled roster. Nothing is saved.</div>
+    <button id="identify-file-btn" style="width:100%;font-family:var(--f-mono);font-size:11px;background:var(--panel-lo);border:1px dashed var(--dash);color:var(--label-dim);padding:12px;border-radius:2px;cursor:pointer;margin-bottom:14px">Choose an audio sample…</button>
+    <div class="t-label" style="font-size:12px;margin-bottom:6px">Match strictness</div>
+    <div style="display:flex;gap:6px;margin-bottom:16px" id="identify-thresholds"></div>
+    <div id="identify-result" style="display:none;border:1px solid ${GREEN};border-radius:2px;padding:10px 14px;margin-bottom:16px;justify-content:space-between;align-items:center"></div>
+    <div style="display:flex;justify-content:flex-end;gap:8px">
+      <button class="btn" id="identify-close" style="font-size:12px;border-color:var(--inset-edge)">Close</button>
+      <button id="identify-go" style="font-family:var(--f-mono);font-size:11px;font-weight:700;background:${AMBER};color:var(--amber-ink);border:none;padding:8px 14px;border-radius:2px;cursor:pointer">Run match</button>
+    </div>`);
+  renderThresholds();
+  $('identify-close').addEventListener('click', closeModal);
+  $('identify-file-btn').addEventListener('click', () => {
+    const inp = document.createElement('input');
+    inp.type = 'file';
+    inp.accept = 'audio/*,.mp3,.wav,.m4a,.flac,.ogg';
+    inp.addEventListener('change', () => {
+      identifyFile = inp.files[0] || null;
+      if (identifyFile) $('identify-file-btn').textContent = identifyFile.name;
+    });
+    inp.click();
+  });
+  $('identify-go').addEventListener('click', runIdentify);
+}
+
+function renderThresholds() {
+  const defs = [['50', '50% lenient'], ['65', '65% balanced'], ['80', '80% strict']];
+  $('identify-thresholds').innerHTML = defs.map(([v, label]) => {
+    const on = identifyThreshold === v;
+    return `<button data-th="${v}" style="flex:1;font-family:var(--f-mono);font-size:10px;text-transform:uppercase;background:${on ? AMBER : 'var(--panel-lo)'};border:1px solid ${on ? AMBER : 'var(--inset-edge)'};color:${on ? 'var(--amber-ink)' : 'var(--label-dim)'};padding:8px 4px;border-radius:2px;cursor:pointer">${label}</button>`;
+  }).join('');
+  document.querySelectorAll('[data-th]').forEach(b => b.addEventListener('click', () => {
+    identifyThreshold = b.dataset.th;
+    $('identify-result').style.display = 'none';
+    renderThresholds();
+  }));
+}
+
+async function runIdentify() {
+  if (!identifyFile) { toast('Choose an audio sample first', 'error'); return; }
+  const fd = new FormData();
+  fd.append('file', identifyFile);
+  fd.append('threshold', String(Number(identifyThreshold) / 100));
+  try {
+    const r = await api('/api/voices/identify', { method: 'POST', body: fd });
+    const box = $('identify-result');
+    box.style.display = 'flex';
+    const best = (r.matches || [])[0];
+    if (best) {
+      box.style.borderColor = GREEN;
+      box.innerHTML = '<span style="font-size:13px;color:' + GREEN + ';font-weight:600">Match: ' + escapeHtml(best.name) + '</span>' +
+        '<span style="font-family:var(--f-mono);font-size:11px;color:var(--label-dim)">' + Math.round((best.similarity || 0) * 100) + '% similarity</span>';
+    } else {
+      box.style.borderColor = AMBER;
+      box.innerHTML = '<span style="font-size:13px;color:' + AMBER + ';font-weight:600">No match above ' + identifyThreshold + '%</span>' +
+        '<span style="font-family:var(--f-mono);font-size:11px;color:var(--label-dim)">' + (r.total_profiles || 0) + ' profiles checked</span>';
+    }
+  } catch (e) { toast(e.message, 'error'); }
+}
 function loadSettingsPage() { $('page-settings').innerHTML = '<div class="empty-unit">Service panel — coming in Phase 7</div>'; }
 
 /* ══════════════════ init ══════════════════ */
