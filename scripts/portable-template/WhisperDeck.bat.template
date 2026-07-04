@@ -1,0 +1,36 @@
+@echo off
+setlocal
+cd /d "%~dp0"
+
+set PYTHON=python\python.exe
+set FFMPEG_DIR=%~dp0ffmpeg
+set DEPS_MARKER=data\.deps_installed
+set PORT=__PORT__
+
+echo ==============================================
+echo          WhisperDeck (portable)
+echo   Transcribe - Diarize - Summarize - Identify
+echo ==============================================
+echo.
+
+if not exist "data" mkdir "data"
+
+if not exist "%DEPS_MARKER%" (
+    echo [*] First launch - installing dependencies, this takes a minute...
+    "%PYTHON%" -m ensurepip --quiet
+    "%PYTHON%" -m pip install --quiet -r app\requirements.txt
+    if errorlevel 1 (
+        echo.
+        echo [!] Dependency install failed. Check your internet connection and try again.
+        pause
+        exit /b 1
+    )
+    echo ok > "%DEPS_MARKER%"
+    echo [*] Dependencies installed.
+)
+
+echo [*] Starting server on http://localhost:%PORT%
+start "" http://localhost:%PORT%
+"%PYTHON%" app\app.py
+
+pause
