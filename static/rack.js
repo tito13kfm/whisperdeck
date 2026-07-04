@@ -172,9 +172,11 @@ async function api(path, opts = {}) {
 /* ══════════════════ component render helpers ══════════════════ */
 
 // nixie readout: str rendered per-glyph with ghost-8 behind. variant: '', 'dim', 'fault'
-function nixie(str, variant = '') {
+// color overrides the tube glow (e.g. green "ML" diarization stat).
+function nixie(str, variant = '', color = null) {
+  const style = color ? ' style="color:' + color + ';text-shadow:0 0 3px ' + color + ',0 0 9px rgba(255,138,61,0.5)"' : '';
   const glyphs = String(str).split('').map(ch =>
-    '<i><b>' + escapeHtml(ch) + '</b></i>').join('');
+    '<i><b' + style + '>' + escapeHtml(ch) + '</b></i>').join('');
   return '<span class="nixie ' + variant + '">' + glyphs + '</span>';
 }
 
@@ -209,13 +211,24 @@ function armVfdMarquees(rootEl) {
 /* ── the ONE status→presentation mapping used by every transcript view ──
    (Monitor recents, Channel bank rows, detail meta must always agree.) */
 const GREEN = '#5FCB7A', AMBER = '#E0A83E', RED = '#E0554A';
+// Percent is derived, not stored: chunked jobs report chunks_done/chunks_total
+// (queue_status while processing, job_progress otherwise); single-shot jobs
+// have neither and sit at 0 until terminal.
+function transcriptPct(t) {
+  const qs = t.queue_status;
+  if (qs && qs.chunks_total) return Math.round(qs.chunks_done / qs.chunks_total * 100);
+  const jp = t.job_progress;
+  if (jp && jp.total) return Math.round(jp.completed / jp.total * 100);
+  if (t.status === 'completed') return 100;
+  return 0;
+}
 function statusView(t) {
   const status = t.status || 'queued';
-  const pct = Math.max(0, Math.min(100, Math.round(t.progress ?? t.pct ?? 0)));
+  const pct = Math.max(0, Math.min(100, transcriptPct(t)));
   const qs = t.queue_status || {};
   let color, lit, nix, nixVariant = '', word = status;
   switch (status) {
-    case 'completed': case 'done':
+    case 'completed':
       color = GREEN; lit = 11; nix = '100%'; word = 'done'; break;
     case 'failed':
       color = RED; lit = 3; nix = 'ERR'; nixVariant = 'fault'; word = 'failed'; break;
@@ -223,13 +236,18 @@ function statusView(t) {
       color = AMBER; lit = Math.max(1, Math.round(pct / 100 * 11)); nix = pct + '%'; word = 'partial'; break;
     case 'cancelled':
       color = AMBER; lit = 0; nix = pct + '%'; nixVariant = 'dim'; word = 'cancelled'; break;
-    case 'queued': case 'pending':
-      color = null; lit = 0;
-      nix = t.duration_seconds != null ? formatTime(t.duration_seconds) : '--:--';
-      nixVariant = 'dim'; word = 'queued'; break;
-    default: // processing / transcribing / running / rate_limited
-      color = AMBER; lit = Math.round(pct / 100 * 11); nix = pct + '%';
-      word = qs.state === 'rate_limited' ? 'waiting' : 'running';
+    case 'processing':
+      if (qs.state === 'queued' || (!qs.state && pct === 0)) {
+        color = null; lit = 0;
+        nix = t.duration_seconds != null ? formatTime(t.duration_seconds) : '--:--';
+        nixVariant = 'dim'; word = 'queued';
+      } else {
+        color = AMBER; lit = Math.round(pct / 100 * 11); nix = pct + '%';
+        word = qs.state === 'rate_limited' ? 'waiting' : 'running';
+      }
+      break;
+    default:
+      color = null; lit = 0; nix = '--:--'; nixVariant = 'dim'; word = status;
   }
   const cells = [];
   for (let i = 0; i < 11; i++) cells.push({ on: color !== null && i < lit, color });
@@ -322,8 +340,85 @@ async function logout() {
   showLogin();
 }
 
-/* ══════════════════ page renderers (filled in per phase) ══════════════════ */
-function loadDashboard() { $('page-dashboard').innerHTML = '<div class="empty-unit">Monitor — coming in Phase 3</div>'; }
+/* ══════════════════ dashboard (Monitor) ══════════════════ */
+function greeting() {
+  const h = new Date().getHours();
+  return h < 12 ? 'Good morning' : h < 18 ? 'Good afternoon' : 'Good evening';
+}
+
+function transcriptMeta(t) {
+  const sv = statusView(t);
+  const parts = [];
+  parts.push((t.provider || '—') + (t.model ? ' · ' + t.model : ''));
+  if (t.duration_seconds != null) parts.push(formatDur(t.duration_seconds));
+  if (sv.word === 'done' && t.speaker_count) parts.push(t.speaker_count + ' speakers');
+  if (sv.word === 'running') parts.push('transcribing…');
+  if (sv.word === 'waiting') parts.push('rate-limited — waiting');
+  if (sv.word === 'queued') parts.push('awaiting turn');
+  if (sv.word === 'failed' && t.error) parts.push(t.error);
+  if (sv.word === 'done' || sv.word === 'failed') parts.push(timeAgo(t.created_at));
+  return parts.join(' · ');
+}
+
+function updateRailStorage(totalMinutes) {
+  const cap = 500;
+  $('rail-storage-text').textContent = Math.round(totalMinutes) + ' / ' + cap + ' min';
+  const lit = Math.min(11, Math.round(totalMinutes / cap * 11));
+  $('rail-storage-leds').innerHTML = [...Array(11)].map((_, i) => i < lit
+    ? '<span style="background:' + GREEN + ';box-shadow:0 0 3px ' + GREEN + '"></span>'
+    : '<span></span>').join('');
+}
+
+async function loadDashboard() {
+  const root = $('page-dashboard');
+  root.innerHTML = `
+    <div class="page-head">
+      <h1 class="t-title">Monitor</h1>
+      <div class="page-status" style="color:${GREEN}">${ledDot(GREEN, true, 9)}${escapeHtml(greeting())}</div>
+    </div>
+    <div class="unit" id="dash-stats" style="display:grid;grid-template-columns:repeat(4,1fr);padding:8px 28px"></div>
+    <div class="t-cap" style="font-size:10.5px;letter-spacing:0.14em;margin:20px 0 8px 36px">Recent signals</div>
+    <div id="dash-recents"></div>`;
+  try {
+    const [st, recents] = await Promise.all([
+      api('/api/status'),
+      api('/api/transcripts?limit=5'),
+    ]);
+    const stats = [
+      { nix: String(Math.round(st.total_minutes ?? 0)), label: 'Minutes transcribed', glow: 'var(--nixie)' },
+      { nix: String(st.total_transcripts ?? 0).padStart(2, '0'), label: 'Transcripts', glow: 'var(--nixie)' },
+      { nix: String(st.voice_profiles ?? 0).padStart(2, '0'), label: 'Voice profiles', glow: 'var(--nixie)' },
+      st.diarization_available
+        ? { nix: 'ML', label: 'Diarization ready', glow: GREEN }
+        : { nix: '--', label: 'Diarization basic', glow: 'var(--nixie)' },
+    ];
+    $('dash-stats').innerHTML = stats.map(s => `
+      <div style="padding:12px 8px;display:flex;flex-direction:column;align-items:center;gap:9px;border-right:1px solid rgba(0,0,0,0.22)">
+        ${nixie(s.nix, '', s.glow === 'var(--nixie)' ? null : s.glow)}
+        <div class="t-cap" style="text-align:center">${escapeHtml(s.label)}</div>
+      </div>`).join('');
+    updateRailStorage(st.total_minutes ?? 0);
+    $('nav-badge-transcripts').textContent = String(st.total_transcripts ?? 0).padStart(2, '0');
+    $('nav-badge-voices').textContent = String(st.voice_profiles ?? 0).padStart(2, '0');
+
+    $('dash-recents').innerHTML = (recents && recents.length) ? recents.map(t => {
+      const sv = statusView(t);
+      return `
+      <button class="unit" data-open="${t.id}" style="display:grid;grid-template-columns:1fr 170px 100px;align-items:center;gap:16px;padding:11px 30px">
+        <span style="min-width:0">
+          <span style="display:block;font-weight:600;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(t.title || t.filename || 'Untitled')}</span>
+          <span style="display:block;font-family:var(--f-mono);font-size:10.5px;color:var(--label-dim);margin-top:2px">${escapeHtml(transcriptMeta(t))}</span>
+        </span>
+        ${bargraph(sv.cells)}
+        <span style="font-family:var(--f-mono);font-size:10px;text-transform:uppercase;letter-spacing:0.05em;color:${sv.color};text-align:right">${escapeHtml(sv.word)}</span>
+      </button>`;
+    }).join('') : '<div class="empty-unit">No signals yet — load a tape on the Transcribe deck</div>';
+    $('dash-recents').querySelectorAll('[data-open]').forEach(b =>
+      b.addEventListener('click', () => navigate('detail', Number(b.dataset.open))));
+  } catch (e) {
+    toast(e.message, 'error');
+  }
+}
 function renderTranscribe() { $('page-transcribe').innerHTML = '<div class="empty-unit">Transcribe — coming in Phase 5</div>'; }
 function loadTranscripts() { $('page-transcripts').innerHTML = '<div class="empty-unit">Channel bank — coming in Phase 4</div>'; }
 function loadTranscriptDetail() { $('page-detail').innerHTML = '<div class="empty-unit">Detail — coming in Phase 4</div>'; }
