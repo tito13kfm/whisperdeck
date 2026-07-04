@@ -42,41 +42,35 @@ or directly:
 ```
 Open http://localhost:9781
 
-## 3. Transcription — recommended for noisy meetings / heavy accents
+## 3. Transcription
 
-Default provider is **Groq**, model **whisper-large-v3** (not `-turbo` —
-the non-turbo model has noticeably better accuracy on noisy audio and
-accented speech; turbo trades that accuracy for speed).
+Default provider is **Moonshine** — local, zero API key, English-only,
+beats Whisper Large on word-error-rate at a fraction of the parameter
+count, no GPU needed. It's in `requirements.txt`, so a plain
+`pip install -r requirements.txt` gets a fully working app with no further
+setup. The model for your chosen size (`tiny`, `tiny-streaming`, `base` —
+default, `small-streaming`, `medium-streaming`) downloads automatically on
+first transcription and is cached for subsequent runs. The Transcribe
+page auto-selects the first provider whose backend actually checks out
+healthy, so this is what you get on first launch.
+
+If you need non-English audio, or want noisy-meeting/heavy-accent
+accuracy that beats Moonshine, switch the Transcribe page provider to
+**Groq**, model **whisper-large-v3** (not `-turbo` — the non-turbo model
+has noticeably better accuracy on noisy audio and accented speech; turbo
+trades that accuracy for speed):
 
 1. Get a free API key at https://console.groq.com/keys
 2. In the app: Settings → Providers → Groq → paste key.
 
 No local model download or GPU needed — inference runs on Groq's hosted
-GPUs. This is the recommended default over the built-in local
-faster-whisper backend, which defaults to the much smaller/less accurate
-`tiny` model and needs a local model download either way.
+GPUs.
 
-If you need fully offline/local transcription instead, switch the
-Transcribe page provider to **Built-in (Whisper Tiny)** and pick a bigger
-model (e.g. `large-v3`) from the model dropdown — but expect it to be slow
-on CPU. That path requires `pip install faster-whisper` (not in
-requirements.txt, since Groq is the recommended default).
-
-Alternatively, for offline/local transcription with meaningfully better
-accuracy than Built-in's `tiny` model, switch the Transcribe page provider
-to **Moonshine** instead. It runs a small on-device model (English-only)
-that beats Whisper Large on word-error-rate at a fraction of the parameter
-count, and needs no GPU. Setup:
-
-```
-.venv\Scripts\python.exe -m pip install moonshine-voice
-```
-
-(not in `requirements.txt`, same as `faster-whisper` — optional, install
-only if you want this provider). No API key needed. The model for your
-chosen size (`tiny`, `tiny-streaming`, `base` — default, `small-streaming`,
-`medium-streaming`) downloads automatically on first transcription and is
-cached for subsequent runs.
+There's also **Built-in (Whisper Tiny)** — local, multilingual, needs
+`pip install faster-whisper` (not in requirements.txt, optional — heavier
+install than Moonshine and its default `tiny` model is much less accurate;
+pick a bigger model like `large-v3` from the dropdown if you use it, but
+expect it to be slow on CPU).
 
 ## 4. Diarization — recommended: pyannote.audio
 

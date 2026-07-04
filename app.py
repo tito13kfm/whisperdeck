@@ -302,6 +302,17 @@ async def get_providers(db: Session = Depends(get_db), current_user: User = Depe
         else:
             p["configured"] = False
             p["is_active"] = False
+        if not p["needs_key"]:
+            # Local providers: "no key needed" isn't "ready" — the optional
+            # package (faster-whisper, moonshine-voice) might not be
+            # installed. Probe check_health instead of trusting needs_key,
+            # so the badge doesn't lie. Hosted providers skip this: their
+            # health check would be a network call on every page load.
+            try:
+                health = await get_provider(p["id"], {}).check_health()
+                p["configured"] = bool(health.get("ok"))
+            except Exception:
+                p["configured"] = False
     return providers
 
 
@@ -562,7 +573,7 @@ async def _run_transcription_pipeline(
 async def transcribe_audio(
     file: UploadFile = File(...),
     title: Optional[str] = Form(None),
-    provider: str = Form("groq"),
+    provider: str = Form("moonshine"),
     model: Optional[str] = Form(None),
     language: str = Form("en"),
     temperature: float = Form(0.0),
