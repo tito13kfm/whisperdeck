@@ -28,7 +28,7 @@ from services.settings import get_user_settings, update_user_settings
 from services.transcription import TranscriptionService
 from services.diarization import DiarizationService
 from services.voice_id import VoiceIdentificationService
-from services.audio_prep import transcode_for_upload, AudioPrepError, chunk_audio, get_audio_duration
+from services.audio_prep import transcode_for_upload, AudioPrepError, chunk_audio, get_audio_duration, extract_clips_concat
 from services.queue import create_chunk_jobs, retry_failed_chunks, queue_worker_loop, compute_queue_status, cancel_transcript_jobs, resume_cancelled_chunks
 from services.hotwords import list_hotwords, add_hotword, delete_hotword
 from services.correction import extract_hotwords_from_doc
@@ -733,6 +733,124 @@ async def retranscribe_transcript(
         diarize=diarize if diarize is not None else bool(t.diarize_requested),
         num_speakers=num_speakers if num_speakers is not None else t.num_speakers,
     )
+
+
+_AUDIO_MIME = {
+    ".mp3": "audio/mpeg", ".wav": "audio/wav", ".ogg": "audio/ogg",
+    ".flac": "audio/flac", ".webm": "audio/webm", ".m4a": "audio/mp4",
+}
+
+
+@app.get("/api/transcripts/{transcript_id}/audio")
+async def get_transcript_audio(transcript_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    """Serve the stored source audio — the detail screen's per-line play
+    buttons load this once and seek to each segment's start time."""
+    t = db.query(Transcript).filter(
+        Transcript.id == transcript_id, Transcript.user_id == current_user.id
+    ).first()
+    if not t:
+        raise HTTPException(status_code=404, detail="Transcript not found")
+    if not (t.audio_path and os.path.exists(t.audio_path)):
+        raise HTTPException(status_code=404, detail="No stored audio for this transcript")
+    ext = os.path.splitext(t.audio_path)[1].lower()
+    return FileResponse(t.audio_path, media_type=_AUDIO_MIME.get(ext, "audio/mpeg"))
+
+
+@app.post("/api/transcripts/{transcript_id}/speakers/rename")
+async def rename_transcript_speaker(
+    transcript_id: int,
+    data: dict = Body(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Rename a diarization speaker label across the whole transcript —
+    every matching segment, plus the 'Speaker: text' line prefixes in
+    corrected_text so the two views stay in agreement."""
+    old = (data.get("from") or "").strip()
+    new = (data.get("to") or "").strip()
+    if not old or not new:
+        raise HTTPException(status_code=400, detail="Both 'from' and 'to' names are required")
+    t = db.query(Transcript).filter(
+        Transcript.id == transcript_id, Transcript.user_id == current_user.id
+    ).first()
+    if not t:
+        raise HTTPException(status_code=404, detail="Transcript not found")
+
+    # New list, not in-place mutation — SQLAlchemy doesn't change-track
+    # in-place edits on a JSON column.
+    renamed = 0
+    new_segments = []
+    for seg in t.segments or []:
+        if (seg.get("speaker") or "") == old:
+            seg = {**seg, "speaker": new}
+            renamed += 1
+        new_segments.append(seg)
+    if renamed == 0:
+        raise HTTPException(status_code=400, detail=f"No segments have speaker '{old}'")
+    t.segments = new_segments
+
+    if t.corrected_text:
+        # Line-anchored: only rewrite the 'Old Name: ' prefix at the start
+        # of a line — the same string inside sentence text must not change.
+        prefix = f"{old}: "
+        t.corrected_text = "\n".join(
+            (new + line[len(old):]) if line.startswith(prefix) else line
+            for line in t.corrected_text.splitlines()
+        )
+
+    t.updated_at = datetime.datetime.utcnow()
+    db.commit()
+    return {"renamed": renamed, "transcript": _serialize_transcript(db, t)}
+
+
+@app.post("/api/transcripts/{transcript_id}/enroll-speaker")
+async def enroll_speaker_from_transcript(
+    transcript_id: int,
+    data: dict = Body(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Enroll a voice profile from transcript lines flagged as seeds.
+    The clip time ranges are cut from the stored audio, concatenated into
+    one sample, and embedded — one enroll call, since re-enrolling a name
+    overwrites its embedding rather than averaging."""
+    name = (data.get("name") or "").strip()
+    clips = data.get("clips") or []
+    if not name:
+        raise HTTPException(status_code=400, detail="Speaker name is required")
+    if not clips or len(clips) > 10:
+        raise HTTPException(status_code=400, detail="Flag between 1 and 10 clips to seed a voice")
+    t = db.query(Transcript).filter(
+        Transcript.id == transcript_id, Transcript.user_id == current_user.id
+    ).first()
+    if not t:
+        raise HTTPException(status_code=404, detail="Transcript not found")
+    if not (t.audio_path and os.path.exists(t.audio_path)):
+        raise HTTPException(status_code=404, detail="No stored audio for this transcript")
+
+    try:
+        sample_path = await extract_clips_concat(t.audio_path, clips, str(UPLOAD_DIR))
+    except (AudioPrepError, KeyError, TypeError, ValueError) as e:
+        raise HTTPException(status_code=400, detail=f"Could not extract seed clips: {e}")
+    try:
+        profile = voice_id_service.enroll(
+            db, current_user.id, name=name, audio_path=sample_path,
+            notes=f"Seeded from transcript {t.id}",
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        try:
+            os.remove(sample_path)
+        except OSError:
+            pass
+    return {
+        "id": profile.id,
+        "name": profile.name,
+        "sample_count": profile.sample_count,
+        "embedding_model": profile.embedding_model,
+        "notes": profile.notes,
+    }
 
 
 # ── Diarization ───────────────────────────────────────────────────────────
