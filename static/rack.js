@@ -1558,7 +1558,7 @@ async function loadTranscriptDetail(id, opts = {}) {
 
 function _jobFingerprint(t) {
   const f = (j) => j ? j.status + ':' + (j.progress ? j.progress.done : 0) : '-';
-  return f(t.correction_job) + '|' + f(t.summary_job);
+  return f(t.correction_job) + '|' + f(t.summary_job) + '|' + f(t.voice_match_job);
 }
 
 // While an LLM job is active for the open transcript, refresh quietly and
@@ -1566,7 +1566,7 @@ function _jobFingerprint(t) {
 function scheduleDetailPoll() {
   clearTimeout(detailPollTimer);
   const t = detailData;
-  if (!t || !(llmJobActive(t.correction_job) || llmJobActive(t.summary_job))) return;
+  if (!t || !(llmJobActive(t.correction_job) || llmJobActive(t.summary_job) || llmJobActive(t.voice_match_job))) return;
   const fp = _jobFingerprint(t), id = t.id;
   detailPollTimer = setTimeout(async () => {
     if (S.page !== 'detail' || !detailData || detailData.id !== id) return;
@@ -1916,6 +1916,7 @@ function renderDetail() {
         ${extraActs.join('')}
         <button class="btn" style="font-size:12px;padding:7px 14px;border-color:var(--inset-edge)" data-dact="retranscribe" ${t.has_audio ? '' : 'disabled title="No stored audio for this transcript"'}>Re-transcribe</button>
         <button class="btn" style="font-size:12px;padding:7px 14px;border-color:var(--inset-edge)" data-dact="rediarize" ${t.has_audio ? '' : 'disabled title="No stored audio for this transcript"'}>Re-diarize</button>
+        <button class="btn" style="font-size:12px;padding:7px 14px;border-color:var(--inset-edge)" data-dact="voicematch" ${!t.has_audio ? 'disabled title="No stored audio for this transcript"' : (llmJobActive(t.voice_match_job) ? 'disabled title="Voice match job already queued"' : '')}>Match against voice roster</button>
         <button class="btn" style="font-size:12px;padding:7px 14px;border-color:var(--inset-edge)" data-dact="context">Add context</button>
         <button class="btn" style="font-size:12px;padding:7px 14px;border-color:var(--inset-edge)" data-dact="summarize" ${llmJobActive(t.summary_job) ? 'disabled title="Summary job already queued"' : ''}>Summarize</button>
         <button class="btn" style="font-size:12px;padding:7px 14px;border-color:var(--inset-edge)" data-dact="rerun" ${llmJobActive(t.correction_job) ? 'disabled title="Correction job already queued"' : ''}>Re-run correction</button>
@@ -1974,7 +1975,8 @@ async function renderDetailBody() {
   const t = detailData;
   const body = $('detail-body');
   if (S.detailTab === 'transcript') {
-    body.innerHTML = '<div class="unit" style="border-radius:3px;padding:6px 32px">' + segmentsHtml(t) + '</div>';
+    const vm = llmJobActive(t.voice_match_job) ? jobRunningUnit(t.voice_match_job, 'Voice match') : '';
+    body.innerHTML = vm + '<div class="unit" style="border-radius:3px;margin-top:' + (vm ? '10px' : '0') + ';padding:6px 32px">' + segmentsHtml(t) + '</div>';
   } else if (S.detailTab === 'corrected') {
     body.innerHTML = correctedHtml(t);
   } else {
@@ -2029,6 +2031,10 @@ async function detailAction(act) {
     }
     if (act === 'rediarize') {
       toggleRediarizePicker();
+      return;
+    }
+    if (act === 'voicematch') {
+      await runVoiceMatch();
       return;
     }
     if (act === 'context') {
@@ -2185,6 +2191,16 @@ async function toggleRediarizePicker() {
       await loadTranscriptDetail(t.id);
     } catch (e) { toast(e.message, 'error'); }
   });
+}
+
+async function runVoiceMatch() {
+  const t = detailData;
+  if (!t) return;
+  try {
+    await api('/api/transcripts/' + t.id + '/voice-match', { method: 'POST' });
+    toast('Matching against voice roster…', 'info');
+    await loadTranscriptDetail(t.id, { preserveQuery: true });
+  } catch (e) { toast(e.message, 'error'); }
 }
 
 async function toggleContextPicker() {
