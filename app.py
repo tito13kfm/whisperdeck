@@ -413,8 +413,16 @@ async def transcribe_audio(
     # Normalize for cloud upload: strips video track, downsamples to 16kHz
     # mono (all Whisper providers resample to this internally anyway). Fixes
     # "file too large" errors on video uploads and long recordings. Builtin
-    # runs locally with no upload limit, so skip the extra transcode there.
-    if provider not in LOCAL_PROVIDERS:
+    # runs locally with no upload limit, so skip the extra transcode there —
+    # unless the container is one libsndfile can't open (browser live capture
+    # produces webm/opus), in which case local providers need the ffmpeg
+    # pass too or soundfile fails with "Format not recognised".
+    local_readable_exts = {".wav", ".flac", ".ogg", ".mp3", ".aiff", ".aif"}
+    needs_transcode = (
+        provider not in LOCAL_PROVIDERS
+        or save_path.suffix.lower() not in local_readable_exts
+    )
+    if needs_transcode:
         try:
             save_path = Path(await transcode_for_upload(
                 str(save_path), str(UPLOAD_DIR), bitrate_kbps=user_settings["bitrate_kbps"]
