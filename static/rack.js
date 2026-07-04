@@ -1523,11 +1523,29 @@ let detailData = null;
 
 let detailPollTimer = null;
 
+// Per-line playback + voice-seed flags. All session-local: the shared
+// Audio element is created lazily on first play, and seed flags live in
+// memory until the user enrolls them — both reset when a DIFFERENT
+// transcript opens (same-id reloads keep flags so a rename refresh
+// doesn't wipe them).
+let segAudio = null, segAudioTid = null, segPlayingBtn = null;
+let seedClips = {}; // speaker label -> [{start, end}]
+
+function resetSegAudio() {
+  if (segAudio) segAudio.pause();
+  segAudio = null;
+  segAudioTid = null;
+  segPlayingBtn = null;
+  seedClips = {};
+}
+
 async function loadTranscriptDetail(id, opts = {}) {
   if (id == null) { navigate('transcripts'); return; }
+  const prevId = detailData ? detailData.id : null;
   try {
     detailData = await api('/api/transcripts/' + id);
   } catch (e) { toast(e.message, 'error'); return; }
+  if (prevId !== null && prevId !== detailData.id) resetSegAudio();
   if (!opts.preserveQuery) S.query = '';
   renderDetail();
   scheduleDetailPoll();
@@ -1576,20 +1594,108 @@ function segmentsHtml(t) {
     return '<div style="padding:30px;text-align:center;font-family:var(--f-mono);font-size:11px;color:var(--label-dim)">' +
       (q ? 'NO SEGMENTS MATCH — CLEAR THE SEARCH OR CHECK JOB STATUS' : 'NO SEGMENTS YET — CHECK JOB STATUS') + '</div>';
   }
+  const segBtn = 'background:none;border:1px solid var(--inset-edge);border-radius:3px;width:24px;height:22px;cursor:pointer;font-size:10px;padding:0;flex-shrink:0';
   return segs.map(sg => {
     const dot = hashColor(sg.speaker || '');
+    const seeded = sg.speaker && (seedClips[sg.speaker] || []).some(c => c.start === sg.start && c.end === sg.end);
+    const controls = !t.has_audio ? '' : `
+      <div style="display:flex;flex-direction:column;gap:4px;flex-shrink:0">
+        <button data-seg-play data-start="${sg.start}" data-end="${sg.end}" title="Play this line from the recording" style="${segBtn};color:var(--label-dim)">▶</button>
+        ${sg.speaker ? `<button data-seg-seed data-speaker="${escapeHtml(sg.speaker)}" data-start="${sg.start}" data-end="${sg.end}" title="${seeded ? 'Flagged as a voice seed — click to unflag' : 'Flag this line as a voice seed for enrollment'}" style="${segBtn};color:${seeded ? 'var(--nixie)' : 'var(--label-dim)'};${seeded ? 'border-color:var(--nixie);text-shadow:0 0 5px rgba(255,138,61,0.6)' : ''}">◈</button>` : ''}
+      </div>`;
+    const speakerLabel = sg.speaker
+      ? `<span data-seg-rename="${escapeHtml(sg.speaker)}" title="Rename this speaker everywhere (enrolls flagged seed clips)" style="font-family:var(--f-cond);font-weight:600;font-size:12.5px;text-transform:uppercase;letter-spacing:0.05em;cursor:pointer;border-bottom:1px dotted var(--label-dim)">${escapeHtml(sg.speaker)}</span>`
+      : `<span style="font-family:var(--f-cond);font-weight:600;font-size:12.5px;text-transform:uppercase;letter-spacing:0.05em">Speaker</span>`;
     return `
     <div style="display:flex;gap:16px;padding:12px 0;border-bottom:1px solid var(--seg-edge)">
+      ${controls}
       <div style="font-family:var(--f-mono);font-size:11px;color:var(--nixie);text-shadow:0 0 4px rgba(255,138,61,0.4);width:44px;flex-shrink:0;padding-top:2px">${formatTime(sg.start)}</div>
       <div style="min-width:0">
         <div style="display:flex;align-items:center;gap:7px;margin-bottom:3px">
           <span style="width:7px;height:7px;border-radius:50%;background:${dot};box-shadow:0 0 4px ${dot}"></span>
-          <span style="font-family:var(--f-cond);font-weight:600;font-size:12.5px;text-transform:uppercase;letter-spacing:0.05em">${escapeHtml(sg.speaker || 'Speaker')}</span>
+          ${speakerLabel}
         </div>
         <div style="font-size:13.5px;line-height:1.55;color:var(--body)">${escapeHtml(sg.text || '')}</div>
       </div>
     </div>`;
   }).join('');
+}
+
+/* ── per-line playback, seed flags, speaker rename ── */
+
+function detailBodyClick(e) {
+  const play = e.target.closest('[data-seg-play]');
+  if (play) { segPlay(play); return; }
+  const seed = e.target.closest('[data-seg-seed]');
+  if (seed) { toggleSeed(seed); return; }
+  const ren = e.target.closest('[data-seg-rename]');
+  if (ren) { renameSpeaker(ren.dataset.segRename); }
+}
+
+function segPlay(btn) {
+  const t = detailData;
+  const start = parseFloat(btn.dataset.start), end = parseFloat(btn.dataset.end);
+  if (!segAudio || segAudioTid !== t.id) {
+    if (segAudio) segAudio.pause();
+    segAudio = new Audio('/api/transcripts/' + t.id + '/audio');
+    segAudioTid = t.id;
+    segAudio.addEventListener('timeupdate', () => {
+      if (segAudio._stopAt != null && segAudio.currentTime >= segAudio._stopAt) segAudio.pause();
+    });
+    segAudio.addEventListener('pause', () => {
+      if (segPlayingBtn) { segPlayingBtn.textContent = '▶'; segPlayingBtn = null; }
+    });
+    segAudio.addEventListener('error', () => toast('Audio failed to load', 'error'));
+  }
+  if (segPlayingBtn === btn && !segAudio.paused) { segAudio.pause(); return; }
+  if (segPlayingBtn) segPlayingBtn.textContent = '▶';
+  const seekAndPlay = () => {
+    segAudio._stopAt = end;
+    segAudio.currentTime = start;
+    segAudio.play().catch(err => toast(err.message, 'error'));
+  };
+  // Seeking before metadata arrives gets clamped to 0 — defer to the event.
+  if (segAudio.readyState >= 1) seekAndPlay();
+  else segAudio.addEventListener('loadedmetadata', seekAndPlay, { once: true });
+  segPlayingBtn = btn;
+  btn.textContent = '■';
+}
+
+function toggleSeed(btn) {
+  const sp = btn.dataset.speaker;
+  const start = parseFloat(btn.dataset.start), end = parseFloat(btn.dataset.end);
+  const list = seedClips[sp] = seedClips[sp] || [];
+  const i = list.findIndex(c => c.start === start && c.end === end);
+  if (i >= 0) list.splice(i, 1); else list.push({ start, end });
+  if (!list.length) delete seedClips[sp];
+  renderDetailBody(); // rows render flag state straight from seedClips
+}
+
+async function renameSpeaker(speaker) {
+  const t = detailData;
+  if (!t) return;
+  const clips = seedClips[speaker] || [];
+  const name = (window.prompt('Rename "' + speaker + '" to:', speaker) || '').trim();
+  if (!name) return;
+  if (name === speaker && !clips.length) return;
+  try {
+    if (name !== speaker) {
+      const r = await api('/api/transcripts/' + t.id + '/speakers/rename', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ from: speaker, to: name }),
+      });
+      toast('Renamed ' + r.renamed + ' line' + (r.renamed !== 1 ? 's' : '') + ' to ' + name, 'info');
+    }
+    if (clips.length && window.confirm('Enroll ' + clips.length + ' flagged clip' + (clips.length !== 1 ? 's' : '') + ' as the voice seed for "' + name + '"?')) {
+      const p = await api('/api/transcripts/' + t.id + '/enroll-speaker', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, clips }),
+      });
+      toast('Voice profile "' + p.name + '" saved to the roster', 'info');
+    }
+    delete seedClips[speaker];
+    await loadTranscriptDetail(t.id, { preserveQuery: true });
+  } catch (e) { toast(e.message, 'error'); }
 }
 
 function llmJobActive(job) {
@@ -1738,6 +1844,8 @@ function renderDetail() {
     else renderDetailBody();
   });
   root.querySelectorAll('[data-dact]').forEach(b => b.addEventListener('click', () => detailAction(b.dataset.dact)));
+  // Delegated: segment rows re-render on search/poll, the container doesn't.
+  $('detail-body').addEventListener('click', detailBodyClick);
 }
 
 async function renderDetailBody() {
