@@ -812,8 +812,9 @@ async def enroll_speaker_from_transcript(
 ):
     """Enroll a voice profile from transcript lines flagged as seeds.
     The clip time ranges are cut from the stored audio, concatenated into
-    one sample, and embedded — one enroll call, since re-enrolling a name
-    overwrites its embedding rather than averaging."""
+    one sample, and added as a clip on the named profile (creating it if
+    needed) — the profile's embedding is the mean of all its clips, so
+    repeated calls append and average rather than overwrite."""
     name = (data.get("name") or "").strip()
     clips = data.get("clips") or []
     if not name:
@@ -833,10 +834,30 @@ async def enroll_speaker_from_transcript(
     except (AudioPrepError, KeyError, TypeError, ValueError) as e:
         raise HTTPException(status_code=400, detail=f"Could not extract seed clips: {e}")
     try:
-        profile = voice_id_service.enroll(
-            db, current_user.id, name=name, audio_path=sample_path,
-            notes=f"Seeded from transcript {t.id}",
-        )
+        profile = db.query(VoiceProfile).filter(
+            VoiceProfile.user_id == current_user.id, VoiceProfile.name == name
+        ).first()
+        if not profile:
+            profile = VoiceProfile(
+                user_id=current_user.id, name=name, embedding=None,
+                embedding_model=voice_id_service.backend_name, sample_count=0,
+                notes=f"Seeded from transcript {t.id}",
+            )
+            db.add(profile)
+            db.commit()
+        permanent_path = VOICES_DIR / f"clip_{profile.id}_{datetime.datetime.utcnow().strftime('%Y%m%d_%H%M%S%f')}.wav"
+        shutil.copyfile(sample_path, permanent_path)
+        clip = voice_id_service.add_clip(db, profile.id, current_user.id, str(permanent_path),
+                                          source_transcript_id=t.id)
+        db.refresh(profile)
+        return {
+            "id": profile.id,
+            "name": profile.name,
+            "sample_count": profile.sample_count,
+            "embedding_model": profile.embedding_model,
+            "notes": profile.notes,
+            "clip_id": clip.id,
+        }
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     finally:
@@ -844,13 +865,6 @@ async def enroll_speaker_from_transcript(
             os.remove(sample_path)
         except OSError:
             pass
-    return {
-        "id": profile.id,
-        "name": profile.name,
-        "sample_count": profile.sample_count,
-        "embedding_model": profile.embedding_model,
-        "notes": profile.notes,
-    }
 
 
 # ── Diarization ───────────────────────────────────────────────────────────

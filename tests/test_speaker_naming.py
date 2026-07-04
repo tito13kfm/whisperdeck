@@ -120,13 +120,15 @@ def test_enroll_speaker_happy_path(client, db_session, tmp_path):
     db_session.commit()
 
     with patch("app.extract_clips_concat", fake_extract), \
-         patch("app.voice_id_service.enroll", return_value=profile) as fake_enroll:
+         patch("app.voice_id_service.add_clip") as fake_add_clip:
+        from database import VoiceClip
+        fake_add_clip.return_value = VoiceClip(id=1, voice_profile_id=profile.id)
         r = client.post(f"/api/transcripts/{t.id}/enroll-speaker",
                         json={"name": "Alice", "clips": [{"start": 0.0, "end": 2.0}]})
     assert r.status_code == 200
     assert r.json()["name"] == "Alice"
     fake_extract.assert_awaited_once()
-    fake_enroll.assert_called_once()
+    fake_add_clip.assert_called_once()
     assert not sample.exists()  # temp sample cleaned up
 
 
@@ -136,12 +138,48 @@ def test_enroll_speaker_cleans_up_when_enroll_fails(client, db_session, tmp_path
     sample.write_bytes(b"wav")
 
     with patch("app.extract_clips_concat", AsyncMock(return_value=str(sample))), \
-         patch("app.voice_id_service.enroll", side_effect=ValueError("no backend")):
+         patch("app.voice_id_service.add_clip", side_effect=ValueError("no backend")):
         r = client.post(f"/api/transcripts/{t.id}/enroll-speaker",
                         json={"name": "Alice", "clips": [{"start": 0.0, "end": 2.0}]})
     assert r.status_code == 400
     assert "no backend" in r.json()["detail"]
     assert not sample.exists()
+
+
+def test_enroll_speaker_appends_clip_to_existing_profile_without_overwriting(client, db_session, tmp_path):
+    t = _transcript(db_session, tmp_path)
+    user = _test_user(db_session)
+    from database import VoiceProfile, VoiceClip
+    profile = VoiceProfile(user_id=user.id, name="Alice", embedding=[9.0, 9.0],
+                           embedding_model="MFCC fingerprint (librosa)", sample_count=1)
+    db_session.add(profile)
+    db_session.commit()
+    # Back the pre-existing embedding with an actual clip row — add_clip's
+    # averaging is computed from VoiceClip rows, not the raw embedding field.
+    db_session.add(VoiceClip(voice_profile_id=profile.id, audio_path="/dev/null",
+                              embedding=[9.0, 9.0]))
+    db_session.commit()
+
+    sample = tmp_path / "seed.wav"
+    sample.write_bytes(b"wav")
+    fake_extract = AsyncMock(return_value=str(sample))
+
+    with patch("app.extract_clips_concat", fake_extract), \
+         patch("app.voice_id_service._extract_embedding", return_value=__import__("numpy").array([1.0, 3.0])):
+        r = client.post(f"/api/transcripts/{t.id}/enroll-speaker",
+                        json={"name": "Alice", "clips": [{"start": 0.0, "end": 2.0}]})
+    assert r.status_code == 200
+    db_session.expire_all()
+    refreshed = db_session.query(VoiceProfile).filter(VoiceProfile.id == profile.id).first()
+    # averaged with the existing [9.0, 9.0] embedding, not overwritten to [1.0, 3.0]
+    assert refreshed.embedding == [5.0, 6.0]
+    assert refreshed.sample_count == 2
+    # the new clip's audio must be a permanent copy, not the temp seed sample
+    # that the route deletes in its finally block — otherwise the clip is
+    # unplayable from the roster.
+    clip_id = r.json()["clip_id"]
+    new_clip = db_session.query(VoiceClip).filter(VoiceClip.id == clip_id).first()
+    assert os.path.exists(new_clip.audio_path)
 
 
 def test_enroll_speaker_validation(client, db_session, tmp_path):
