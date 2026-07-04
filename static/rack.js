@@ -420,8 +420,331 @@ async function loadDashboard() {
   }
 }
 function renderTranscribe() { $('page-transcribe').innerHTML = '<div class="empty-unit">Transcribe — coming in Phase 5</div>'; }
-function loadTranscripts() { $('page-transcripts').innerHTML = '<div class="empty-unit">Channel bank — coming in Phase 4</div>'; }
-function loadTranscriptDetail() { $('page-detail').innerHTML = '<div class="empty-unit">Detail — coming in Phase 4</div>'; }
+/* ══════════════════ channel bank ══════════════════ */
+let bankPollTimer = null;
+
+// Per-state expanded fields — only values the API actually provides.
+function bankDetailFields(t, sv) {
+  const pipeline = (t.provider || '—') + ' · ' + (t.model || '—');
+  const qs = t.queue_status || {};
+  const jp = t.job_progress || {};
+  switch (sv.word) {
+    case 'done':
+      return [['Recorded', timeAgo(t.created_at)], ['Speakers', String(t.speaker_count || '—')], ['Pipeline', pipeline]];
+    case 'running':
+      return [['Step', 'transcribing · chunk ' + ((qs.chunks_done ?? 0) + 1) + ' of ' + (qs.chunks_total ?? '?')],
+              ['Elapsed', formatDur((Date.now() - new Date(t.created_at + 'Z').getTime()) / 1000)],
+              ['Pipeline', pipeline]];
+    case 'waiting':
+      return [['Step', 'rate-limited · resumes in ~' + (qs.resume_in_seconds ?? '?') + 's'],
+              ['Chunks done', (qs.chunks_done ?? 0) + ' of ' + (qs.chunks_total ?? '?')],
+              ['Pipeline', pipeline]];
+    case 'queued':
+      return [['Chunks done', (qs.chunks_done ?? 0) + ' of ' + (qs.chunks_total ?? '—')],
+              ['Duration', formatDur(t.duration_seconds)], ['Pipeline', pipeline]];
+    case 'failed':
+      return [['Reason', t.error || 'unknown'], ['Duration', formatDur(t.duration_seconds)], ['Pipeline', pipeline]];
+    case 'cancelled':
+      return [['Progress at cancel', sv.pct + '%'], ['Duration', formatDur(t.duration_seconds)], ['Pipeline', pipeline]];
+    case 'partial':
+      return [['Failed sections', String(jp.failed ?? '?')], ['Duration', formatDur(t.duration_seconds)], ['Pipeline', pipeline]];
+    default:
+      return [['Status', sv.word], ['Duration', formatDur(t.duration_seconds)], ['Pipeline', pipeline]];
+  }
+}
+
+async function loadTranscripts() {
+  const root = $('page-transcripts');
+  let list;
+  try {
+    list = await api('/api/transcripts?limit=100');
+  } catch (e) { toast(e.message, 'error'); return; }
+
+  const active = list.filter(t => t.status === 'processing').length;
+  const openIds = new Set([...root.querySelectorAll('details[open]')].map(d => d.dataset.tid));
+
+  const rows = list.map(t => {
+    const sv = statusView(t);
+    const fields = bankDetailFields(t, sv);
+    const acts = ['<button class="btn" style="font-size:12px;padding:6px 12px;border-color:var(--inset-edge)" data-act="open" data-id="' + t.id + '">Open transcript</button>'];
+    if (t.status === 'processing')
+      acts.push('<button class="btn" style="font-size:12px;padding:6px 12px;border-color:var(--inset-edge)" data-act="cancel" data-id="' + t.id + '">Cancel — resumable</button>');
+    if (t.status === 'cancelled')
+      acts.push('<button class="btn" style="font-size:12px;padding:6px 12px;border-color:var(--inset-edge)" data-act="resume" data-id="' + t.id + '">Resume</button>');
+    if (t.status === 'failed' || t.status === 'partial')
+      acts.push('<button class="btn" style="font-size:12px;padding:6px 12px;border-color:var(--inset-edge)" data-act="retry" data-id="' + t.id + '">Retry</button>');
+    acts.push('<button class="btn btn--red" style="font-size:12px;padding:6px 12px" data-act="delete" data-id="' + t.id + '">Delete</button>');
+    return `
+    <details class="unit" data-tid="${t.id}" ${openIds.has(String(t.id)) ? 'open' : ''}>
+      <summary style="list-style:none;cursor:pointer;padding:12px 22px 12px 34px;display:grid;grid-template-columns:1fr 190px 112px;align-items:center;gap:16px">
+        <div style="min-width:0">
+          <div style="font-weight:600;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(t.title || t.filename || 'Untitled')}</div>
+          <div style="font-family:var(--f-mono);font-size:11px;color:var(--label-dim);margin-top:2px">${escapeHtml(transcriptMeta(t))}</div>
+        </div>
+        ${bargraph(sv.cells, 16)}
+        <div style="display:flex;flex-direction:column;align-items:flex-end;gap:3px">
+          ${nixie(sv.nix, sv.nixVariant)}
+          <div style="font-family:var(--f-mono);font-size:10px;text-transform:uppercase;letter-spacing:0.05em;color:${sv.color}">${escapeHtml(sv.word)}</div>
+        </div>
+      </summary>
+      <div style="padding:12px 22px 16px 34px;border-top:1px solid var(--panel-lo)">
+        <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-bottom:12px">
+          ${fields.map(f => `<div style="font-size:12.5px"><div style="font-family:var(--f-mono);font-size:10px;text-transform:uppercase;letter-spacing:0.08em;color:var(--label-dim);margin-bottom:3px">${escapeHtml(f[0])}</div>${escapeHtml(f[1])}</div>`).join('')}
+        </div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">${acts.join('')}</div>
+      </div>
+    </details>`;
+  }).join('');
+
+  root.innerHTML = `
+    <div class="page-head">
+      <h1 class="t-title">Channel bank</h1>
+      <div class="page-status" style="color:${GREEN}">${ledDot(GREEN, true, 9)}${list.length} channels · ${active} active</div>
+    </div>
+    ${list.length ? rows : '<div class="empty-unit">No signals on the bank — load a tape on the Transcribe deck</div>'}`;
+
+  root.querySelectorAll('[data-act]').forEach(b => b.addEventListener('click', async (e) => {
+    e.preventDefault();
+    const id = Number(b.dataset.id), act = b.dataset.act;
+    try {
+      if (act === 'open') { navigate('detail', id); return; }
+      if (act === 'cancel') { await api('/api/transcripts/' + id + '/cancel', { method: 'POST' }); toast('Cancelled — resumable later', 'info'); }
+      if (act === 'resume') { const r = await api('/api/transcripts/' + id + '/resume', { method: 'POST' }); toast('Resumed ' + r.resumed + ' sections', 'info'); }
+      if (act === 'retry') { const r = await api('/api/transcripts/' + id + '/retry-failed-chunks', { method: 'POST' }); toast('Retrying ' + r.retried + ' sections', 'info'); }
+      if (act === 'delete') {
+        if (!window.confirm('Delete this transcript permanently?')) return;
+        await api('/api/transcripts/' + id, { method: 'DELETE' });
+        toast('Transcript deleted');
+      }
+      loadTranscripts();
+    } catch (err) { toast(err.message, 'error'); }
+  }));
+
+  clearTimeout(bankPollTimer);
+  if (active > 0 && S.page === 'transcripts') {
+    bankPollTimer = setTimeout(() => { if (S.page === 'transcripts') loadTranscripts(); }, 4000);
+  }
+}
+
+/* ══════════════════ transcript detail ══════════════════ */
+let detailData = null;
+
+async function loadTranscriptDetail(id) {
+  if (id == null) { navigate('transcripts'); return; }
+  try {
+    detailData = await api('/api/transcripts/' + id);
+  } catch (e) { toast(e.message, 'error'); return; }
+  S.query = '';
+  renderDetail();
+}
+
+function detailTabsHtml() {
+  return ['transcript', 'corrected', 'summary'].map(tb => {
+    const on = S.detailTab === tb;
+    return `
+    <button data-tab="${tb}" style="display:flex;flex-direction:column;align-items:center;gap:5px;background:none;border:none;cursor:pointer;padding:0">
+      ${ledDot(on ? GREEN : null, on, 6)}
+      <span style="font-family:var(--f-cond);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:0.04em;width:110px;height:30px;background:${on ? 'linear-gradient(180deg,#FFFFFF,#DEE0E1 55%,#A9ACAF)' : 'linear-gradient(180deg,#D8D9DA,#C6C8C9 55%,#B7B9BA)'};border:1px solid var(--key-edge);border-top-color:var(--key-top);border-radius:0 0 3px 3px;box-shadow:0 2px 0 var(--key-shadow),0 3px 4px rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;color:var(--key-ink)">${tb}</span>
+    </button>`;
+  }).join('');
+}
+
+function segmentsHtml(t) {
+  const q = (S.query || '').trim().toLowerCase();
+  const segs = (t.segments || []).filter(sg =>
+    !q || (sg.text || '').toLowerCase().includes(q) || (sg.speaker || '').toLowerCase().includes(q));
+  if (!segs.length) {
+    return '<div style="padding:30px;text-align:center;font-family:var(--f-mono);font-size:11px;color:var(--label-dim)">' +
+      (q ? 'NO SEGMENTS MATCH — CLEAR THE SEARCH OR CHECK JOB STATUS' : 'NO SEGMENTS YET — CHECK JOB STATUS') + '</div>';
+  }
+  return segs.map(sg => {
+    const dot = hashColor(sg.speaker || '');
+    return `
+    <div style="display:flex;gap:16px;padding:12px 0;border-bottom:1px solid var(--seg-edge)">
+      <div style="font-family:var(--f-mono);font-size:11px;color:var(--nixie);text-shadow:0 0 4px rgba(255,138,61,0.4);width:44px;flex-shrink:0;padding-top:2px">${formatTime(sg.start)}</div>
+      <div style="min-width:0">
+        <div style="display:flex;align-items:center;gap:7px;margin-bottom:3px">
+          <span style="width:7px;height:7px;border-radius:50%;background:${dot};box-shadow:0 0 4px ${dot}"></span>
+          <span style="font-family:var(--f-cond);font-weight:600;font-size:12.5px;text-transform:uppercase;letter-spacing:0.05em">${escapeHtml(sg.speaker || 'Speaker')}</span>
+        </div>
+        <div style="font-size:13.5px;line-height:1.55;color:var(--body)">${escapeHtml(sg.text || '')}</div>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function correctedHtml(t) {
+  if (t.correction_error) {
+    return '<div class="unit" style="padding:20px 32px;font-size:13px;color:var(--red)">' +
+      '<div class="t-cap" style="color:var(--red);margin-bottom:6px">Correction failed</div>' +
+      escapeHtml(t.correction_error) + '</div>';
+  }
+  if (t.corrected_text) {
+    return '<div class="unit" style="padding:20px 32px;font-size:13.5px;line-height:1.6;color:var(--body);white-space:pre-wrap">' +
+      escapeHtml(t.corrected_text) + '</div>';
+  }
+  return '<div class="empty-unit">Correction pass not run yet — use Re-run correction above' +
+    (t.correction_model ? '' : ' (auto-correct was off for this job)') + '</div>';
+}
+
+async function summaryHtml(t) {
+  if (!t.has_summary) return '<div class="empty-unit">No summary yet — press Summarize above</div>';
+  try {
+    const s = await api('/api/transcripts/' + t.id + '/summary');
+    const cards = [
+      { title: 'Summary', items: s.short_summary ? [s.short_summary] : [] },
+      { title: 'Key points', items: s.key_points || [] },
+      { title: 'Action items', items: s.action_items || [] },
+      { title: 'Decisions', items: s.decisions || [] },
+    ].filter(c => c.items.length);
+    return cards.map(c => `
+      <div class="unit" style="padding:16px 32px">
+        <div style="font-family:var(--f-cond);font-weight:600;font-size:13px;text-transform:uppercase;letter-spacing:0.05em;margin-bottom:8px;color:${AMBER}">${escapeHtml(c.title)}</div>
+        ${c.items.map(it => `<div style="display:flex;gap:9px;font-size:13px;line-height:1.55;color:var(--body);padding:2px 0"><span style="color:${GREEN}">▪</span><span>${escapeHtml(it)}</span></div>`).join('')}
+      </div>`).join('');
+  } catch (e) {
+    return '<div class="empty-unit">' + escapeHtml(e.message) + '</div>';
+  }
+}
+
+function renderDetail() {
+  const t = detailData;
+  if (!t) return;
+  const root = $('page-detail');
+  const sv = statusView(t);
+  const extraActs = [];
+  if (t.status === 'partial')
+    extraActs.push('<button class="btn" style="font-size:12px;padding:7px 14px;border-color:var(--inset-edge)" data-dact="retry">Retry failed sections</button>');
+  if (t.status === 'cancelled')
+    extraActs.push('<button class="btn" style="font-size:12px;padding:7px 14px;border-color:var(--inset-edge)" data-dact="resume">Resume</button>');
+
+  root.innerHTML = `
+    <div class="page-head" style="gap:14px">
+      <h1 class="t-title" style="min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(t.title || t.filename || 'Untitled')}</h1>
+      <div style="display:flex;gap:8px;flex-shrink:0">
+        ${extraActs.join('')}
+        <button class="btn" style="font-size:12px;padding:7px 14px;border-color:var(--inset-edge)" data-dact="summarize">Summarize</button>
+        <button class="btn" style="font-size:12px;padding:7px 14px;border-color:var(--inset-edge)" data-dact="rerun">Re-run correction</button>
+        <button class="btn btn--red" style="font-size:12px;padding:7px 14px" data-dact="delete">Delete</button>
+      </div>
+    </div>
+    <div id="rerun-picker" style="display:none;margin:0 36px 14px"></div>
+    <div class="unit" style="border-radius:3px;margin-bottom:14px;padding:14px 22px 14px 34px">
+      <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:14px">
+        <div style="font-size:12.5px"><div style="font-family:var(--f-mono);font-size:10px;text-transform:uppercase;letter-spacing:0.08em;color:var(--label-dim);margin-bottom:3px">Duration</div>${formatDur(t.duration_seconds)}</div>
+        <div style="font-size:12.5px"><div style="font-family:var(--f-mono);font-size:10px;text-transform:uppercase;letter-spacing:0.08em;color:var(--label-dim);margin-bottom:3px">Provider</div>${escapeHtml((t.provider || '—') + (t.model ? ' · ' + t.model : ''))}</div>
+        <div style="font-size:12.5px"><div style="font-family:var(--f-mono);font-size:10px;text-transform:uppercase;letter-spacing:0.08em;color:var(--label-dim);margin-bottom:3px">Status</div><span style="color:${sv.color}">${escapeHtml(sv.word)}</span></div>
+        <div style="font-size:12.5px"><div style="font-family:var(--f-mono);font-size:10px;text-transform:uppercase;letter-spacing:0.08em;color:var(--label-dim);margin-bottom:3px">Speakers</div>${t.speaker_count || '—'}</div>
+        <div style="font-size:12.5px"><div style="font-family:var(--f-mono);font-size:10px;text-transform:uppercase;letter-spacing:0.08em;color:var(--label-dim);margin-bottom:3px">Segments</div>${(t.segments || []).length}</div>
+      </div>
+    </div>
+    <div style="display:flex;gap:6px;align-items:flex-end;margin-bottom:14px;padding:0 36px">
+      ${detailTabsHtml()}
+      <input id="detail-search" class="inp" type="text" placeholder="Search transcript…" value="${escapeHtml(S.query)}" style="margin-left:auto;font-size:12px;width:220px;padding:8px 10px">
+    </div>
+    <div id="detail-body"></div>`;
+
+  renderDetailBody();
+
+  root.querySelectorAll('[data-tab]').forEach(b => b.addEventListener('click', () => {
+    S.detailTab = b.dataset.tab;
+    renderDetail();
+  }));
+  $('detail-search').addEventListener('input', () => {
+    S.query = $('detail-search').value;
+    if (S.detailTab !== 'transcript') { S.detailTab = 'transcript'; renderDetail(); $('detail-search').focus(); }
+    else renderDetailBody();
+  });
+  root.querySelectorAll('[data-dact]').forEach(b => b.addEventListener('click', () => detailAction(b.dataset.dact)));
+}
+
+async function renderDetailBody() {
+  const t = detailData;
+  const body = $('detail-body');
+  if (S.detailTab === 'transcript') {
+    body.innerHTML = '<div class="unit" style="border-radius:3px;padding:6px 32px">' + segmentsHtml(t) + '</div>';
+  } else if (S.detailTab === 'corrected') {
+    body.innerHTML = correctedHtml(t);
+  } else {
+    body.innerHTML = '<div class="empty-unit">Loading summary…</div>';
+    body.innerHTML = await summaryHtml(t);
+  }
+}
+
+async function detailAction(act) {
+  const t = detailData;
+  if (!t) return;
+  try {
+    if (act === 'delete') {
+      if (!window.confirm('Delete this transcript permanently?')) return;
+      await api('/api/transcripts/' + t.id, { method: 'DELETE' });
+      toast('Transcript deleted');
+      navigate('transcripts');
+      return;
+    }
+    if (act === 'retry') {
+      const r = await api('/api/transcripts/' + t.id + '/retry-failed-chunks', { method: 'POST' });
+      toast('Retrying ' + r.retried + ' sections', 'info');
+      loadTranscriptDetail(t.id);
+      return;
+    }
+    if (act === 'resume') {
+      const r = await api('/api/transcripts/' + t.id + '/resume', { method: 'POST' });
+      toast('Resumed ' + r.resumed + ' sections', 'info');
+      loadTranscriptDetail(t.id);
+      return;
+    }
+    if (act === 'summarize') {
+      toast('Summarizing…', 'info');
+      const fd = new FormData();
+      await api('/api/transcripts/' + t.id + '/summarize', { method: 'POST', body: fd });
+      S.detailTab = 'summary';
+      await loadTranscriptDetail(t.id);
+      return;
+    }
+    if (act === 'rerun') {
+      toggleRerunPicker();
+      return;
+    }
+  } catch (e) { toast(e.message, 'error'); }
+}
+
+function toggleRerunPicker() {
+  const box = $('rerun-picker');
+  if (box.style.display !== 'none') { box.style.display = 'none'; return; }
+  box.style.display = 'block';
+  box.innerHTML = `
+    <div class="unit" style="padding:12px 34px;display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+      <span class="t-unit">Correction pass</span>
+      <select id="rerun-provider" class="inp" style="padding:6px 8px;font-size:12px">
+        <option value="groq">Groq</option>
+        <option value="openai">OpenAI</option>
+        <option value="openrouter">OpenRouter</option>
+      </select>
+      <input id="rerun-model" class="inp" style="padding:6px 8px;font-size:12px;width:230px" value="llama-3.3-70b-versatile" title="LLM used for the correction pass">
+      <button id="rerun-go" class="btn btn--amber" style="font-size:12px;padding:7px 14px">Run correction</button>
+    </div>`;
+  $('rerun-go').addEventListener('click', rerunCorrection);
+}
+
+async function rerunCorrection() {
+  const t = detailData;
+  const fd = new FormData();
+  fd.append('provider', $('rerun-provider').value);
+  fd.append('model', $('rerun-model').value);
+  toast('Running correction…', 'info');
+  try {
+    // route returns 200 even when the pass fails — the error rides in the body
+    const res = await api('/api/transcripts/' + t.id + '/correct', { method: 'POST', body: fd });
+    if (res && res.correction_error) {
+      toast('Correction failed: ' + res.correction_error, 'error');
+    } else {
+      toast('Correction complete');
+    }
+    S.detailTab = 'corrected';
+    await loadTranscriptDetail(t.id);
+  } catch (e) { toast(e.message, 'error'); }
+}
 function loadVoices() { $('page-voices').innerHTML = '<div class="empty-unit">Voice roster — coming in Phase 6</div>'; }
 function loadSettingsPage() { $('page-settings').innerHTML = '<div class="empty-unit">Service panel — coming in Phase 7</div>'; }
 
