@@ -104,6 +104,44 @@ def test_rename_validation(client, db_session):
     assert "No segments" in r.json()["detail"]
 
 
+# ── POST /segments/retag ──────────────────────────────────────────────────
+
+def test_retag_only_changes_selected_indices(client, db_session):
+    t = _transcript(db_session)
+    r = client.post(f"/api/transcripts/{t.id}/segments/retag",
+                    json={"indices": [0], "speaker": "Bob"})
+    assert r.status_code == 200
+    assert r.json()["retagged"] == 1
+    db_session.expire_all()
+    t2 = db_session.query(Transcript).filter(Transcript.id == t.id).first()
+    speakers = [s["speaker"] for s in t2.segments]
+    # index 0 retagged; index 2 (also originally SPEAKER_00) untouched
+    assert speakers == ["Bob", "SPEAKER_01", "SPEAKER_00"]
+
+
+def test_retag_leaves_corrected_text_untouched(client, db_session):
+    corrected = "SPEAKER_00: hello there\n\nSPEAKER_01: general kenobi"
+    t = _transcript(db_session, corrected_text=corrected)
+    r = client.post(f"/api/transcripts/{t.id}/segments/retag",
+                    json={"indices": [0], "speaker": "Bob"})
+    assert r.status_code == 200
+    db_session.expire_all()
+    t2 = db_session.query(Transcript).filter(Transcript.id == t.id).first()
+    assert t2.corrected_text == corrected
+
+
+def test_retag_validation(client, db_session):
+    t = _transcript(db_session)
+    assert client.post(f"/api/transcripts/{t.id}/segments/retag",
+                       json={"indices": [], "speaker": "Bob"}).status_code == 400
+    assert client.post(f"/api/transcripts/{t.id}/segments/retag",
+                       json={"indices": [0], "speaker": "  "}).status_code == 400
+    r = client.post(f"/api/transcripts/{t.id}/segments/retag",
+                    json={"indices": [99], "speaker": "Bob"})
+    assert r.status_code == 400
+    assert "out of range" in r.json()["detail"]
+
+
 # ── POST /enroll-speaker ───────────────────────────────────────────────────
 
 def test_enroll_speaker_happy_path(client, db_session, tmp_path):

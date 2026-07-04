@@ -803,6 +803,44 @@ async def rename_transcript_speaker(
     return {"renamed": renamed, "transcript": _serialize_transcript(db, t)}
 
 
+@app.post("/api/transcripts/{transcript_id}/segments/retag")
+async def retag_transcript_segments(
+    transcript_id: int,
+    data: dict = Body(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Fix a chunk of mis-diarized lines by index, without touching other
+    segments that happen to share the same (correct) original label.
+    corrected_text is intentionally left untouched — there is no reliable
+    line-to-segment-index mapping once the LLM has reworded/merged lines."""
+    indices = data.get("indices") or []
+    speaker = (data.get("speaker") or "").strip()
+    if not indices or not speaker:
+        raise HTTPException(status_code=400, detail="'indices' (non-empty) and 'speaker' are required")
+
+    t = db.query(Transcript).filter(
+        Transcript.id == transcript_id, Transcript.user_id == current_user.id
+    ).first()
+    if not t:
+        raise HTTPException(status_code=404, detail="Transcript not found")
+
+    segments = t.segments or []
+    for i in indices:
+        if not isinstance(i, int) or i < 0 or i >= len(segments):
+            raise HTTPException(status_code=400, detail=f"Segment index {i} is out of range")
+
+    index_set = set(indices)
+    new_segments = [
+        {**seg, "speaker": speaker} if i in index_set else seg
+        for i, seg in enumerate(segments)
+    ]
+    t.segments = new_segments
+    t.updated_at = datetime.datetime.utcnow()
+    db.commit()
+    return {"retagged": len(index_set), "transcript": _serialize_transcript(db, t)}
+
+
 @app.post("/api/transcripts/{transcript_id}/enroll-speaker")
 async def enroll_speaker_from_transcript(
     transcript_id: int,
