@@ -587,15 +587,26 @@ function startInstruments() {
 async function ensureProviders() {
   if (S.providers.length) return;
   const provs = await api('/api/providers');
+  // `configured` already reflects reality for both kinds: for local
+  // providers the backend probed check_health (package actually
+  // importable), for hosted providers it means a key is saved.
   S.providers = provs.map(p => ({
     id: p.id,
     name: p.name,
-    ready: !p.needs_key || p.configured,
+    ready: p.configured,
     needsKey: p.needs_key,
-    statusText: p.name + (!p.needs_key ? ' · local · ready' : (p.configured ? ' · key connected · ready' : ' · no key — see service panel')),
+    statusText: p.name + (!p.needs_key
+      ? (p.configured ? ' · local · ready' : ' · local · not installed')
+      : (p.configured ? ' · key connected · ready' : ' · no key — see service panel')),
     models: [p.default_model].filter(Boolean),
     modelsFetched: false,
   }));
+  // Default to the first ready provider (usually the zero-setup local one)
+  // instead of always index 0, so a broken/uninstalled provider never
+  // silently becomes the pre-selected default.
+  const firstReady = S.providers.findIndex(p => p.ready);
+  if (firstReady >= 0) S.providerIdx = firstReady;
+  if (curProv().id === 'moonshine') S.langIdx = 0;
 }
 
 async function fetchModelsFor(idx) {
@@ -832,6 +843,10 @@ function wireTranscribe() {
     if (S.running) return;
     S.providerIdx = (S.providerIdx + 1) % S.providers.length;
     S.modelIdx = 0;
+    // Moonshine only ever decodes as English (backend hardcodes it) — lock
+    // the language knob so picking e.g. Spanish here doesn't silently
+    // produce English-decoded garbage with no error.
+    if (curProv().id === 'moonshine') S.langIdx = 0;
     await fetchModelsFor(S.providerIdx);
     syncTranscribe();
   });
@@ -842,6 +857,10 @@ function wireTranscribe() {
   });
   $('ctl-lang').addEventListener('click', () => {
     if (S.running) return;
+    if (curProv().id === 'moonshine') {
+      toast('Moonshine is English-only — switch provider to change language', 'info');
+      return;
+    }
     S.langIdx = (S.langIdx + 1) % LANGUAGES.length;
     syncTranscribe();
   });

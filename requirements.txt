@@ -2,6 +2,7 @@
 # Optional extras:
 #   requirements-diarization.txt — real speaker diarization (pyannote.audio).
 librosa>=0.10.0  # voice enrollment embedding backend (MFCC fallback)
+moonshine-voice>=0.0.63  # default zero-setup local transcription provider (English-only)
 fastapi>=0.115.0
 uvicorn[standard]>=0.30.0
 sqlalchemy>=2.0.0
