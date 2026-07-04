@@ -128,6 +128,20 @@ class VoiceProfile(Base):
     updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
 
 
+class VoiceClip(Base):
+    """One enrolled audio clip backing a VoiceProfile. A profile's match
+    embedding is the mean of its clips' embeddings, recomputed whenever a
+    clip is added or removed (see services/voice_id.py)."""
+    __tablename__ = "voice_clips"
+
+    id = Column(Integer, primary_key=True)
+    voice_profile_id = Column(Integer, ForeignKey("voice_profiles.id", ondelete="CASCADE"), nullable=False)
+    audio_path = Column(String(512), nullable=False)
+    embedding = Column(JSON, nullable=False)  # this clip's own embedding, list of floats
+    source_transcript_id = Column(Integer, ForeignKey("transcripts.id"), nullable=True)
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+
+
 class ProviderConfig(Base):
     __tablename__ = "provider_configs"
     __table_args__ = (UniqueConstraint("user_id", "name", name="uq_provider_config_user_name"),)
@@ -234,6 +248,6 @@ def init_db(db_path: str = "data/whisperdesk.db") -> tuple:
 
 
 __all__ = [
-    "Base", "User", "Transcript", "Summary", "VoiceProfile", "ProviderConfig", "TranscriptionJob", "LlmJob", "HotwordEntry",
+    "Base", "User", "Transcript", "Summary", "VoiceProfile", "VoiceClip", "ProviderConfig", "TranscriptionJob", "LlmJob", "HotwordEntry",
     "init_db", "migrate_schema", "backfill_user_id", "ensure_columns",
 ]
