@@ -14,7 +14,7 @@ from database import LlmJob, Transcript
 ACTIVE_STATUSES = ("pending", "running")
 _MAX_CONCURRENT_JOBS = 2
 
-VALID_KINDS = ("correction", "summary")
+VALID_KINDS = ("correction", "summary", "rediarize")
 
 
 def serialize_llm_job(job: LlmJob) -> dict:
@@ -123,8 +123,10 @@ def _finish(db, job: LlmJob, status: str, error: str | None = None) -> None:
     db.commit()
 
 
-async def run_llm_job(SessionLocal, job_id: int, transcription_service) -> None:
+async def run_llm_job(SessionLocal, job_id: int, transcription_service, diarization_service=None) -> None:
     """Execute one claimed (already 'running') job in its own session."""
+    import os
+
     from services.correction import correct_transcript
     from services.settings import resolve_provider_key
 
@@ -138,10 +140,12 @@ async def run_llm_job(SessionLocal, job_id: int, transcription_service) -> None:
             _finish(db, job, "failed", "Transcript no longer exists")
             return
 
-        api_key, provider_config = resolve_provider_key(db, job.user_id, job.provider)
-        if job.provider != "local" and not api_key:
-            _finish(db, job, "failed", f"no {job.provider} API key saved (see service panel)")
-            return
+        api_key, provider_config = None, None
+        if job.kind != "rediarize":  # rediarize is local compute — no LLM key involved
+            api_key, provider_config = resolve_provider_key(db, job.user_id, job.provider)
+            if job.provider != "local" and not api_key:
+                _finish(db, job, "failed", f"no {job.provider} API key saved (see service panel)")
+                return
 
         if job.kind == "correction":
             def progress(done, total):
@@ -176,6 +180,32 @@ async def run_llm_job(SessionLocal, job_id: int, transcription_service) -> None:
                 _finish(db, job, "completed")
             except Exception as e:
                 _finish(db, job, "failed", str(e))
+        elif job.kind == "rediarize":
+            job.progress_total = 1
+            db.commit()
+            if diarization_service is None:
+                _finish(db, job, "failed", "Diarization service unavailable")
+                return
+            if not (transcript.audio_path and os.path.exists(transcript.audio_path)):
+                _finish(db, job, "failed", "No stored audio for this transcript")
+                return
+            from services.settings import get_user_settings
+            user_settings = get_user_settings(db, job.user_id)
+            try:
+                merged, speaker_count = await diarization_service.diarize_and_merge(
+                    transcript.audio_path,
+                    num_speakers=transcript.num_speakers,
+                    segments=transcript.segments or [],
+                    hf_token=user_settings.get("hf_token"),
+                )
+                transcript.segments = merged
+                transcript.speaker_count = speaker_count
+                transcript.updated_at = datetime.datetime.utcnow()
+                job.progress_done = 1
+                db.commit()
+                _finish(db, job, "completed")
+            except Exception as e:
+                _finish(db, job, "failed", str(e))
         else:
             _finish(db, job, "failed", f"Unknown job kind '{job.kind}'")
     except Exception as e:
@@ -190,7 +220,7 @@ async def run_llm_job(SessionLocal, job_id: int, transcription_service) -> None:
         db.close()
 
 
-async def llm_worker_tick(SessionLocal, transcription_service) -> None:
+async def llm_worker_tick(SessionLocal, transcription_service, diarization_service=None) -> None:
     db = SessionLocal()
     try:
         running = db.query(LlmJob).filter(LlmJob.status == "running").count()
@@ -214,14 +244,14 @@ async def llm_worker_tick(SessionLocal, transcription_service) -> None:
     finally:
         db.close()
 
-    await asyncio.gather(*(run_llm_job(SessionLocal, jid, transcription_service) for jid in job_ids))
+    await asyncio.gather(*(run_llm_job(SessionLocal, jid, transcription_service, diarization_service) for jid in job_ids))
 
 
-async def llm_worker_loop(SessionLocal, transcription_service, interval_seconds: float = 3.0) -> None:
+async def llm_worker_loop(SessionLocal, transcription_service, diarization_service=None, interval_seconds: float = 3.0) -> None:
     """Runs forever (until cancelled) — started from app.py's lifespan."""
     while True:
         try:
-            await llm_worker_tick(SessionLocal, transcription_service)
+            await llm_worker_tick(SessionLocal, transcription_service, diarization_service)
         except Exception as e:
             print(f"[llm-jobs] worker tick failed: {e}")
         await asyncio.sleep(interval_seconds)

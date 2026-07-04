@@ -84,7 +84,7 @@ voice_id_service = VoiceIdentificationService(str(VOICES_DIR))
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     worker_task = asyncio.create_task(queue_worker_loop(SessionLocal, diarization_service))
-    llm_worker_task = asyncio.create_task(llm_worker_loop(SessionLocal, transcription_service))
+    llm_worker_task = asyncio.create_task(llm_worker_loop(SessionLocal, transcription_service, diarization_service))
     yield
     worker_task.cancel()
     llm_worker_task.cancel()
@@ -533,24 +533,14 @@ async def _run_transcription_pipeline(
         # Run diarization if requested
         if diarize and transcript.segments:
             try:
-                if diarization_service._check_pyannote():
-                    # num_speakers=None lets pyannote auto-detect the count.
-                    result = await diarization_service.diarize_pyannote(
-                        str(save_path), num_speakers=num_speakers, hf_token=user_settings.get("hf_token")
-                    )
-                else:
-                    # Heuristic fallback can't auto-detect — needs a real
-                    # count, default to 2 if the user left it blank.
-                    result = await diarization_service.diarize_heuristic(
-                        str(save_path),
-                        num_speakers=num_speakers or 2,
-                        segments=transcript.segments,
-                    )
-                merged = await diarization_service.combine_with_transcript(
-                    result, transcript.segments
+                merged, speaker_count = await diarization_service.diarize_and_merge(
+                    str(save_path),
+                    num_speakers=num_speakers,
+                    segments=transcript.segments,
+                    hf_token=user_settings.get("hf_token"),
                 )
                 transcript.segments = merged
-                transcript.speaker_count = result.speaker_count
+                transcript.speaker_count = speaker_count
                 db.commit()
             except Exception as e:
                 # Non-fatal: diarization enhancement failed. Transcript still
@@ -839,6 +829,37 @@ async def correct_transcript_route(
         raise HTTPException(status_code=400, detail=f"No {provider} API key saved — add one in the service panel")
 
     job = enqueue_llm_job(db, current_user.id, transcript_id, "correction", provider, model)
+    return {"job": serialize_llm_job(job)}
+
+
+@app.post("/api/transcripts/{transcript_id}/rediarize")
+async def rediarize_transcript(
+    transcript_id: int,
+    num_speakers: Optional[int] = Form(None),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Queue an in-place re-diarization of the stored audio — speaker labels
+    are merged onto the existing segments. num_speakers=None lets pyannote
+    auto-detect. Runs as a background job (watch the Queue screen)."""
+    t = db.query(Transcript).filter(
+        Transcript.id == transcript_id, Transcript.user_id == current_user.id
+    ).first()
+    if not t:
+        raise HTTPException(status_code=404, detail="Transcript not found")
+    if t.status not in ("completed", "partial"):
+        raise HTTPException(status_code=400, detail=f"Transcript {transcript_id} is not completed")
+    if not (t.audio_path and os.path.exists(t.audio_path)):
+        raise HTTPException(
+            status_code=400,
+            detail="No stored audio for this transcript — it predates audio retention or the file was removed",
+        )
+    # The job reads its parameters from the transcript row (LlmJob has no
+    # params column), so persist the requested count before enqueueing.
+    t.num_speakers = num_speakers
+    t.diarize_requested = True
+    db.commit()
+    job = enqueue_llm_job(db, current_user.id, transcript_id, "rediarize", "", "")
     return {"job": serialize_llm_job(job)}
 
 
