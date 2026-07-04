@@ -21,6 +21,8 @@ class VoiceIdentificationService:
         self.voices_dir = voices_dir
         os.makedirs(voices_dir, exist_ok=True)
         self._backend = self._detect_backend()
+        self._classifier = None  # cached speechbrain EncoderClassifier
+        self._last_backend_error = None
 
     def _detect_backend(self) -> str:
         """Detect which embedding backend is available."""
@@ -29,11 +31,9 @@ class VoiceIdentificationService:
             return "speechbrain"
         except ImportError:
             pass
-        try:
-            import pyannote.audio  # noqa
-            return "pyannote"
-        except ImportError:
-            pass
+        # NOTE: pyannote.audio is not wired to an embedding extractor below —
+        # detecting it here would silently return None from every enroll/
+        # identify call. Skip it until _embed_pyannote exists.
         try:
             import librosa  # noqa
             return "librosa_mfcc"
@@ -65,12 +65,14 @@ class VoiceIdentificationService:
             if self._backend == "none":
                 raise ValueError(
                     "No voice embedding backend available. "
-                    "Install speechbrain: pip install speechbrain"
+                    "Install speechbrain (pip install speechbrain) or librosa "
+                    "(pip install librosa) to enable voice enrollment."
                 )
+            reason = f" ({self._last_backend_error})" if self._last_backend_error else ""
             raise ValueError(
                 f"Voice embedding extraction failed using the {self.backend_name} "
                 f"backend. Check that the audio file is valid and the backend's "
-                f"dependencies (e.g. torch, torchaudio) are working correctly."
+                f"dependencies (e.g. torch, torchaudio) are working correctly.{reason}"
             )
 
         existing = db.query(VoiceProfile).filter(
@@ -148,25 +150,36 @@ class VoiceIdentificationService:
         return True
 
     def _extract_embedding(self, audio_path: str) -> Optional[np.ndarray]:
-        """Extract a speaker embedding vector from an audio file."""
+        """Extract a speaker embedding vector from an audio file. Falls back
+        to MFCC if the primary backend fails on this call, rather than
+        committing to whatever _detect_backend guessed at startup."""
         if self._backend == "speechbrain":
-            return self._embed_speechbrain(audio_path)
+            embedding = self._embed_speechbrain(audio_path)
+            if embedding is not None:
+                return embedding
+            return self._embed_mfcc(audio_path)
         elif self._backend == "librosa_mfcc":
             return self._embed_mfcc(audio_path)
         return None
 
-    def _embed_speechbrain(self, audio_path: str) -> Optional[np.ndarray]:
-        """Extract embedding using SpeechBrain's ECAPA-TDNN."""
-        try:
-            import torch
-            import torchaudio
+    def _get_classifier(self):
+        """Build the SpeechBrain classifier once and cache it — loading it
+        from disk on every enroll/identify call is slow."""
+        if self._classifier is None:
             from speechbrain.inference.speaker import EncoderClassifier
-
-            classifier = EncoderClassifier.from_hparams(
+            self._classifier = EncoderClassifier.from_hparams(
                 source="speechbrain/spkrec-ecapa-voxceleb",
                 savedir=os.path.join(self.voices_dir, "_models", "ecapa"),
                 run_opts={"device": "cpu"},
             )
+        return self._classifier
+
+    def _embed_speechbrain(self, audio_path: str) -> Optional[np.ndarray]:
+        """Extract embedding using SpeechBrain's ECAPA-TDNN."""
+        try:
+            import torchaudio
+
+            classifier = self._get_classifier()
             signal, fs = torchaudio.load(audio_path)
             # Resample to 16kHz if needed
             if fs != 16000:
@@ -177,7 +190,8 @@ class VoiceIdentificationService:
                 signal = signal[:, :16000 * 30]
             embedding = classifier.encode_batch(signal).squeeze().numpy()
             return embedding
-        except Exception:
+        except Exception as e:
+            self._last_backend_error = f"speechbrain: {e}"
             return None
 
     def _embed_mfcc(self, audio_path: str) -> Optional[np.ndarray]:
@@ -189,7 +203,9 @@ class VoiceIdentificationService:
             # Aggregate over time
             embedding = np.mean(mfcc, axis=1)
             return embedding
-        except Exception:
+        except Exception as e:
+            if not self._last_backend_error:
+                self._last_backend_error = f"librosa_mfcc: {e}"
             return None
 
     @staticmethod

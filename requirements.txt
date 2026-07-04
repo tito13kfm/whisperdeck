@@ -1,6 +1,7 @@
 # See INSTALL.md for setup (Python version, API keys, optional diarization).
 # Optional extras:
 #   requirements-diarization.txt — real speaker diarization (pyannote.audio).
+librosa>=0.10.0  # voice enrollment embedding backend (MFCC fallback)
 fastapi>=0.115.0
 uvicorn[standard]>=0.30.0
 sqlalchemy>=2.0.0
