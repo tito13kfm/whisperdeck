@@ -441,7 +441,8 @@ textarea.inp { resize: vertical; }
   border-radius: 2px;
   cursor: pointer;
 }
-.btn:hover { background: var(--hover); }
+.btn:hover:not(:disabled) { background: var(--hover); }
+.btn:disabled { opacity: 0.45; cursor: default; }
 .btn--red { border-color: var(--red); color: var(--red); }
 .btn--red:hover { background: rgba(224, 85, 74, 0.12); }
 .btn--amber { background: var(--amber); border-color: var(--amber); color: var(--amber-ink); }

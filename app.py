@@ -22,7 +22,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 from sqlalchemy.orm import Session
 
-from database import init_db, backfill_user_id, Transcript, Summary, VoiceProfile, ProviderConfig, User
+from database import init_db, backfill_user_id, Transcript, Summary, VoiceProfile, ProviderConfig, User, LlmJob
 from services.auth import get_or_create_fallback_user, create_user, authenticate_user
 from services.settings import get_user_settings, update_user_settings
 from services.transcription import TranscriptionService
@@ -31,8 +31,12 @@ from services.voice_id import VoiceIdentificationService
 from services.audio_prep import transcode_for_upload, AudioPrepError, chunk_audio
 from services.queue import create_chunk_jobs, retry_failed_chunks, queue_worker_loop, compute_queue_status, cancel_transcript_jobs, resume_cancelled_chunks
 from services.hotwords import list_hotwords, add_hotword, delete_hotword
-from services.correction import extract_hotwords_from_doc, correct_transcript, run_auto_correction
+from services.correction import extract_hotwords_from_doc
 from services.model_catalog import get_correction_models
+from services.llm_jobs import (
+    enqueue_llm_job, enqueue_auto_correction, serialize_llm_job, latest_job,
+    cancel_llm_job, rerun_llm_job, llm_worker_loop,
+)
 from backends import list_providers, get_provider
 
 # ── App Setup ──────────────────────────────────────────────────────────────
@@ -79,8 +83,10 @@ voice_id_service = VoiceIdentificationService(str(VOICES_DIR))
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     worker_task = asyncio.create_task(queue_worker_loop(SessionLocal, diarization_service))
+    llm_worker_task = asyncio.create_task(llm_worker_loop(SessionLocal, transcription_service))
     yield
     worker_task.cancel()
+    llm_worker_task.cancel()
 
 
 app = FastAPI(
@@ -157,6 +163,10 @@ def _serialize_transcript(db: Session, t: Transcript) -> dict:
         "job_progress": job_progress,
         "processed_size_bytes": t.processed_size_bytes,
         "queue_status": compute_queue_status(db, t),
+        # latest LLM job per kind — the detail tabs render live progress
+        # ("correction running — section X of Y") straight from these.
+        "correction_job": serialize_llm_job(cj) if (cj := latest_job(db, t.id, "correction")) else None,
+        "summary_job": serialize_llm_job(sj) if (sj := latest_job(db, t.id, "summary")) else None,
     }
 
 
@@ -531,11 +541,10 @@ async def transcribe_audio(
                 # succeeds without speaker labels, but log so it's visible.
                 print(f"[diarization] non-fatal failure for transcript {transcript.id}: {e}")
 
-        # Post-hoc correction pass — best-effort, mirrors diarization's
-        # non-fatal handling. Provider/model come from user settings; the
-        # key comes from the central ProviderConfig pool.
+        # Post-hoc correction pass — queued as a background LlmJob (visible
+        # on the Queue screen) instead of blocking this response.
         if user_settings.get("auto_correct", True):
-            await run_auto_correction(db, transcript, user_settings)
+            enqueue_auto_correction(db, transcript, user_settings)
 
         return _serialize_transcript(db, transcript)
 
@@ -685,28 +694,22 @@ async def summarize_transcript(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Generate an LLM summary of a completed transcript."""
-    prov_cfg = db.query(ProviderConfig).filter(
-        ProviderConfig.user_id == current_user.id,
-        ProviderConfig.name == provider,
+    """Queue an LLM summary of a completed transcript (returns the job —
+    watch it on the Queue screen or poll the transcript)."""
+    t = db.query(Transcript).filter(
+        Transcript.id == transcript_id, Transcript.user_id == current_user.id
     ).first()
-    api_key = prov_cfg.api_key if prov_cfg else ""
+    if not t:
+        raise HTTPException(status_code=404, detail="Transcript not found")
+    if t.status != "completed":
+        raise HTTPException(status_code=400, detail=f"Transcript {transcript_id} is not completed")
+    from services.settings import resolve_provider_key
+    api_key, _ = resolve_provider_key(db, current_user.id, provider)
+    if provider != "local" and not api_key:
+        raise HTTPException(status_code=400, detail=f"No {provider} API key saved — add one in the service panel")
 
-    try:
-        summary = await transcription_service.summarize(
-            db,
-            current_user.id,
-            transcript_id=transcript_id,
-            api_key=api_key,
-            provider_name=provider,
-            provider_config={"api_key": api_key} if prov_cfg else {},
-            model=model,
-        )
-        return _serialize_summary(summary)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    job = enqueue_llm_job(db, current_user.id, transcript_id, "summary", provider, model)
+    return {"job": serialize_llm_job(job)}
 
 
 @app.post("/api/transcripts/{transcript_id}/correct")
@@ -732,11 +735,8 @@ async def correct_transcript_route(
     if provider != "local" and not api_key:
         raise HTTPException(status_code=400, detail=f"No {provider} API key saved — add one in the service panel")
 
-    await correct_transcript(
-        db, transcript, api_key=api_key, provider_name=provider, model=model,
-        provider_config=provider_config,
-    )
-    return _serialize_transcript(db, transcript)
+    job = enqueue_llm_job(db, current_user.id, transcript_id, "correction", provider, model)
+    return {"job": serialize_llm_job(job)}
 
 
 @app.get("/api/correction-models/{provider}")
@@ -744,6 +744,93 @@ async def correction_models(provider: str, current_user: User = Depends(get_curr
     """Curated, cost-aware model shortlist for the correction/summary pickers.
     OpenRouter entries are validated against its live catalog with pricing."""
     return {"provider": provider, "models": await get_correction_models(provider)}
+
+
+# ── Job queue (unified: transcription + LLM jobs) ─────────────────────────
+
+def _transcription_queue_entry(db, t: Transcript) -> dict:
+    """Normalize a transcript's chunk pipeline into the shared job shape."""
+    qs = compute_queue_status(db, t)
+    jobs = t.jobs or []
+    done = sum(1 for j in jobs if j.status == "completed")
+    total = len(jobs)
+    if t.status == "processing":
+        status = {"transcribing": "running", "rate_limited": "waiting"}.get(
+            (qs or {}).get("state"), "queued")
+    else:
+        status = t.status  # completed / failed / partial / cancelled
+    return {
+        "id": f"transcription-{t.id}",
+        "kind": "transcription",
+        "transcript_id": t.id,
+        "title": t.title or t.filename,
+        "status": status,
+        "progress": {"done": done, "total": total},
+        "provider": t.provider,
+        "model": t.model,
+        "error": t.error,
+        "created_at": t.created_at.isoformat() if t.created_at else None,
+    }
+
+
+@app.get("/api/jobs")
+async def list_jobs(limit: int = Query(50, le=200), db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    """Master queue: newest-first LLM jobs + transcription pipelines that
+    are active or ran through the chunk queue."""
+    llm = (
+        db.query(LlmJob)
+        .filter(LlmJob.user_id == current_user.id)
+        .order_by(LlmJob.id.desc())
+        .limit(limit)
+        .all()
+    )
+    transcripts = (
+        db.query(Transcript)
+        .filter(Transcript.user_id == current_user.id)
+        .order_by(Transcript.created_at.desc())
+        .limit(limit)
+        .all()
+    )
+    titles = {t.id: (t.title or t.filename) for t in transcripts}
+    missing = [j.transcript_id for j in llm if j.transcript_id not in titles]
+    if missing:
+        for t in db.query(Transcript).filter(Transcript.id.in_(missing)).all():
+            titles[t.id] = t.title or t.filename
+
+    entries = []
+    for t in transcripts:
+        if t.status == "processing" or t.jobs:
+            entries.append(_transcription_queue_entry(db, t))
+    for j in llm:
+        e = serialize_llm_job(j)
+        e["title"] = titles.get(j.transcript_id, f"Transcript {j.transcript_id}")
+        entries.append(e)
+
+    entries.sort(key=lambda e: e["created_at"] or "", reverse=True)
+    active = sum(1 for e in entries if e["status"] in ("pending", "running", "queued", "waiting"))
+    return {"jobs": entries[:limit], "active": active}
+
+
+@app.post("/api/jobs/{job_id}/cancel")
+async def cancel_job(job_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    try:
+        job = cancel_llm_job(db, current_user.id, job_id)
+    except LookupError:
+        raise HTTPException(status_code=404, detail="Job not found")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"ok": True, "job": serialize_llm_job(job)}
+
+
+@app.post("/api/jobs/{job_id}/rerun")
+async def rerun_job(job_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    try:
+        job = rerun_llm_job(db, current_user.id, job_id)
+    except LookupError:
+        raise HTTPException(status_code=404, detail="Job not found")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"ok": True, "job": serialize_llm_job(job)}
 
 
 @app.get("/api/transcripts/{transcript_id}/summary")

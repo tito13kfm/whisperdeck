@@ -482,8 +482,10 @@ async def _finalize_if_done(db, transcript_id: int, diarization_service) -> None
         from services.settings import get_user_settings  # local import avoids a module-load cycle with app.py
         user_settings = get_user_settings(db, transcript.user_id)
         if user_settings.get("auto_correct", True):
-            from services.correction import run_auto_correction
-            await run_auto_correction(db, transcript, user_settings)
+            # Queued as a background LlmJob — the LLM worker loop picks it
+            # up, so chunk finalization never blocks on a correction pass.
+            from services.llm_jobs import enqueue_auto_correction
+            enqueue_auto_correction(db, transcript, user_settings)
 
 
 async def queue_worker_tick(SessionLocal, diarization_service) -> None:

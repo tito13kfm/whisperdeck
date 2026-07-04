@@ -69,6 +69,25 @@ class TranscriptionJob(Base):
     transcript = relationship("Transcript", back_populates="jobs")
 
 
+class LlmJob(Base):
+    """Background LLM work (correction / summary) against a transcript.
+    Powers the Queue screen: status, batch progress, cancel/rerun."""
+    __tablename__ = "llm_jobs"
+
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    transcript_id = Column(Integer, ForeignKey("transcripts.id", ondelete="CASCADE"), nullable=False)
+    kind = Column(String(32), nullable=False)  # correction | summary
+    status = Column(String(32), default="pending")  # pending, running, completed, failed, cancelled
+    progress_done = Column(Integer, default=0)
+    progress_total = Column(Integer, default=0)
+    provider = Column(String(64), default="")
+    model = Column(String(128), default="")
+    error = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
+
+
 class HotwordEntry(Base):
     __tablename__ = "hotword_entries"
 
@@ -215,6 +234,6 @@ def init_db(db_path: str = "data/whisperdesk.db") -> tuple:
 
 
 __all__ = [
-    "Base", "User", "Transcript", "Summary", "VoiceProfile", "ProviderConfig", "TranscriptionJob", "HotwordEntry",
+    "Base", "User", "Transcript", "Summary", "VoiceProfile", "ProviderConfig", "TranscriptionJob", "LlmJob", "HotwordEntry",
     "init_db", "migrate_schema", "backfill_user_id", "ensure_columns",
 ]

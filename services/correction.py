@@ -103,7 +103,8 @@ def _batch_lines(lines: list[str], budget: int = _CHUNK_CHAR_BUDGET) -> list[lis
 async def correct_transcript(
     db, transcript, api_key: str, provider_name: str = "groq", model: str = _DEFAULT_MODEL,
     provider_config: dict | None = None,
-) -> None:
+    progress_cb=None, cancel_cb=None,
+) -> str:
     """Non-fatal: sets transcript.corrected_text + correction_model on
     success, or transcript.correction_error on failure. Never raises.
     full_text and segments are never modified.
@@ -111,7 +112,12 @@ async def correct_transcript(
     The transcript is handed to the LLM as speaker-labeled lines
     ('Speaker Name: text'), batched to stay inside output-token limits;
     the model is instructed to preserve labels and line structure so the
-    corrected text renders with the same speakers."""
+    corrected text renders with the same speakers.
+
+    progress_cb(done, total) fires after each batch; cancel_cb() is checked
+    before each batch — returning True stops cleanly without touching the
+    transcript. Returns 'ok' | 'failed' | 'cancelled' (job runners use it;
+    fire-and-forget callers may ignore it)."""
     glossary = [h.term for h in list_hotwords(db, transcript.user_id)]
     glossary_block = (
         f"Known names/jargon that may appear (spell these correctly if you "
@@ -123,6 +129,8 @@ async def correct_transcript(
 
     try:
         for i, batch in enumerate(batches):
+            if cancel_cb and cancel_cb():
+                return "cancelled"
             context_block = ""
             if corrected_parts:
                 tail = "\n".join(corrected_parts[-1].splitlines()[-_CONTEXT_TAIL_LINES:])
@@ -152,14 +160,19 @@ async def correct_transcript(
                 provider_config=provider_config,
             )
             corrected_parts.append(part.strip())
+            if progress_cb:
+                progress_cb(i + 1, len(batches))
 
         transcript.corrected_text = "\n\n".join(corrected_parts)
         transcript.correction_model = f"{provider_name}/{model}"
         transcript.correction_error = None
+        result = "ok"
     except Exception as e:
         transcript.correction_error = str(e)
+        result = "failed"
 
     db.commit()
+    return result
 
 
 async def run_auto_correction(db, transcript, user_settings: dict) -> None:

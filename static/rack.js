@@ -255,7 +255,7 @@ function statusView(t) {
 }
 
 /* ══════════════════ navigation ══════════════════ */
-const PAGES = ['dashboard', 'transcribe', 'transcripts', 'detail', 'voices', 'settings'];
+const PAGES = ['dashboard', 'transcribe', 'transcripts', 'queue', 'detail', 'voices', 'settings'];
 
 function navigate(page, data) {
   if (!PAGES.includes(page)) page = 'dashboard';
@@ -270,6 +270,7 @@ function navigate(page, data) {
     dashboard: loadDashboard,
     transcribe: renderTranscribe,
     transcripts: loadTranscripts,
+    queue: loadQueue,
     detail: () => loadTranscriptDetail(S.detailId),
     voices: loadVoices,
     settings: loadSettingsPage,
@@ -400,6 +401,7 @@ async function loadDashboard() {
     updateRailStorage(st.total_minutes ?? 0);
     $('nav-badge-transcripts').textContent = String(st.total_transcripts ?? 0).padStart(2, '0');
     $('nav-badge-voices').textContent = String(st.voice_profiles ?? 0).padStart(2, '0');
+    refreshQueueBadge();
 
     $('dash-recents').innerHTML = (recents && recents.length) ? recents.map(t => {
       const sv = statusView(t);
@@ -1342,16 +1344,155 @@ async function loadTranscripts() {
   }
 }
 
+/* ══════════════════ master job queue ══════════════════ */
+let queuePollTimer = null;
+
+function jobStatusView(j) {
+  const total = j.progress && j.progress.total ? j.progress.total : 0;
+  const done = j.progress ? j.progress.done : 0;
+  const pct = total ? Math.round(done / total * 100) : 0;
+  switch (j.status) {
+    case 'completed': return { color: GREEN, lit: 11, nix: '100%', variant: '', word: 'done' };
+    case 'failed': return { color: RED, lit: 3, nix: 'ERR', variant: 'fault', word: 'failed' };
+    case 'partial': return { color: AMBER, lit: Math.max(1, Math.round(pct / 100 * 11)), nix: pct + '%', variant: '', word: 'partial' };
+    case 'cancelled': return { color: AMBER, lit: 0, nix: pct + '%', variant: 'dim', word: 'cancelled' };
+    case 'running': return { color: AMBER, lit: total ? Math.max(1, Math.round(pct / 100 * 11)) : 1, nix: total ? pct + '%' : '···', variant: '', word: 'running' };
+    case 'waiting': return { color: AMBER, lit: Math.round(pct / 100 * 11), nix: pct + '%', variant: '', word: 'waiting' };
+    default: return { color: null, lit: 0, nix: '·· %', variant: 'dim', word: 'queued' };
+  }
+}
+
+function jobActions(j) {
+  const acts = [];
+  const btn = (act, label, red = false) =>
+    `<button class="btn${red ? ' btn--red' : ''}" style="font-size:12px;padding:6px 12px;${red ? '' : 'border-color:var(--inset-edge)'}" data-jact="${act}" data-jid="${j.id}" data-tid="${j.transcript_id}">${label}</button>`;
+  if (j.kind === 'transcription') {
+    if (['running', 'queued', 'waiting'].includes(j.status)) acts.push(btn('t-cancel', 'Cancel — resumable'));
+    if (j.status === 'cancelled') acts.push(btn('t-resume', 'Resume'));
+    if (j.status === 'failed' || j.status === 'partial') acts.push(btn('t-retry', 'Retry'));
+  } else {
+    if (j.status === 'pending' || j.status === 'running') acts.push(btn('j-cancel', 'Cancel'));
+    if (j.status === 'failed' || j.status === 'cancelled') acts.push(btn('j-rerun', 'Rerun'));
+  }
+  acts.push(btn('open', 'Open transcript'));
+  return acts.join('');
+}
+
+const KIND_LABELS = { transcription: 'TRANSCRIBE', correction: 'CORRECT', summary: 'SUMMARIZE' };
+
+async function loadQueue() {
+  const root = $('page-queue');
+  let data;
+  try { data = await api('/api/jobs?limit=50'); } catch (e) { toast(e.message, 'error'); return; }
+  const jobs = data.jobs || [];
+  updateQueueBadge(data.active || 0);
+
+  const rows = jobs.map(j => {
+    const sv = jobStatusView(j);
+    const cells = [...Array(11)].map((_, i) => ({ on: sv.color !== null && i < sv.lit, color: sv.color }));
+    const prog = j.progress && j.progress.total
+      ? ' · section ' + Math.min(j.progress.done + (j.status === 'running' ? 1 : 0), j.progress.total) + ' of ' + j.progress.total
+      : '';
+    const meta = [(j.provider || '—') + (j.model ? ' · ' + j.model : ''),
+                  j.status === 'running' ? 'working' + prog : null,
+                  j.error || null,
+                  timeAgo(j.created_at)].filter(Boolean).join(' · ');
+    return `
+    <details class="unit" data-qid="${escapeHtml(String(j.id))}">
+      <summary style="list-style:none;cursor:pointer;padding:12px 22px 12px 34px;display:grid;grid-template-columns:88px 1fr 170px 100px;align-items:center;gap:14px">
+        <span class="vfd" style="width:88px"><span>${KIND_LABELS[j.kind] || j.kind}</span></span>
+        <div style="min-width:0">
+          <div style="font-weight:600;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(j.title || 'Untitled')}</div>
+          <div style="font-family:var(--f-mono);font-size:10.5px;color:${j.error ? 'var(--red)' : 'var(--label-dim)'};margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(meta)}</div>
+        </div>
+        ${bargraph(cells)}
+        <div style="display:flex;flex-direction:column;align-items:flex-end;gap:3px">
+          ${nixie(sv.nix, sv.variant)}
+          <div style="font-family:var(--f-mono);font-size:10px;text-transform:uppercase;letter-spacing:0.05em;color:${sv.color || 'var(--label-dim)'}">${escapeHtml(sv.word)}</div>
+        </div>
+      </summary>
+      <div style="padding:12px 22px 14px 34px;border-top:1px solid var(--panel-lo);display:flex;gap:8px;flex-wrap:wrap">
+        ${jobActions(j)}
+      </div>
+    </details>`;
+  }).join('');
+
+  const active = data.active || 0;
+  root.innerHTML = `
+    <div class="page-head">
+      <h1 class="t-title">Queue</h1>
+      <div class="page-status" style="color:${active ? AMBER : GREEN}">${ledDot(active ? AMBER : GREEN, true, 9)}${jobs.length} jobs · ${active} active</div>
+    </div>
+    ${jobs.length ? rows : '<div class="empty-unit">Queue idle — jobs appear here when the machine is working</div>'}`;
+
+  root.querySelectorAll('[data-jact]').forEach(b => b.addEventListener('click', async (e) => {
+    e.preventDefault();
+    const act = b.dataset.jact, jid = b.dataset.jid, tid = Number(b.dataset.tid);
+    try {
+      if (act === 'open') { navigate('detail', tid); return; }
+      if (act === 'j-cancel') { await api('/api/jobs/' + jid + '/cancel', { method: 'POST' }); toast('Job cancelled', 'info'); }
+      if (act === 'j-rerun') { await api('/api/jobs/' + jid + '/rerun', { method: 'POST' }); toast('Job requeued', 'info'); }
+      if (act === 't-cancel') { await api('/api/transcripts/' + tid + '/cancel', { method: 'POST' }); toast('Cancelled — resumable later', 'info'); }
+      if (act === 't-resume') { const r = await api('/api/transcripts/' + tid + '/resume', { method: 'POST' }); toast('Resumed ' + r.resumed + ' sections', 'info'); }
+      if (act === 't-retry') { const r = await api('/api/transcripts/' + tid + '/retry-failed-chunks', { method: 'POST' }); toast('Retrying ' + r.retried + ' sections', 'info'); }
+      loadQueue();
+    } catch (err) { toast(err.message, 'error'); }
+  }));
+
+  clearTimeout(queuePollTimer);
+  if (active > 0 && S.page === 'queue') {
+    queuePollTimer = setTimeout(() => { if (S.page === 'queue') loadQueue(); }, 3000);
+  }
+}
+
+function updateQueueBadge(active) {
+  $('nav-badge-queue').textContent = active ? String(active).padStart(2, '0') : '';
+}
+
+async function refreshQueueBadge() {
+  try {
+    const data = await api('/api/jobs?limit=50');
+    updateQueueBadge(data.active || 0);
+  } catch { /* badge is best-effort */ }
+}
+
 /* ══════════════════ transcript detail ══════════════════ */
 let detailData = null;
 
-async function loadTranscriptDetail(id) {
+let detailPollTimer = null;
+
+async function loadTranscriptDetail(id, opts = {}) {
   if (id == null) { navigate('transcripts'); return; }
   try {
     detailData = await api('/api/transcripts/' + id);
   } catch (e) { toast(e.message, 'error'); return; }
-  S.query = '';
+  if (!opts.preserveQuery) S.query = '';
   renderDetail();
+  scheduleDetailPoll();
+}
+
+function _jobFingerprint(t) {
+  const f = (j) => j ? j.status + ':' + (j.progress ? j.progress.done : 0) : '-';
+  return f(t.correction_job) + '|' + f(t.summary_job);
+}
+
+// While an LLM job is active for the open transcript, refresh quietly and
+// re-render only when the job actually moved — no flicker mid-read.
+function scheduleDetailPoll() {
+  clearTimeout(detailPollTimer);
+  const t = detailData;
+  if (!t || !(llmJobActive(t.correction_job) || llmJobActive(t.summary_job))) return;
+  const fp = _jobFingerprint(t), id = t.id;
+  detailPollTimer = setTimeout(async () => {
+    if (S.page !== 'detail' || !detailData || detailData.id !== id) return;
+    try {
+      const fresh = await api('/api/transcripts/' + id);
+      if (S.page !== 'detail' || !detailData || detailData.id !== id) return;
+      detailData = fresh;
+      if (_jobFingerprint(fresh) !== fp) renderDetail();
+      scheduleDetailPoll();
+    } catch { /* transient — poll dies, next action revives it */ }
+  }, 2500);
 }
 
 function detailTabsHtml() {
@@ -1389,7 +1530,26 @@ function segmentsHtml(t) {
   }).join('');
 }
 
+function llmJobActive(job) {
+  return job && (job.status === 'pending' || job.status === 'running');
+}
+
+function jobRunningUnit(job, label) {
+  const total = (job.progress && job.progress.total) || 0;
+  const done = job.progress ? job.progress.done : 0;
+  const section = total ? ' — section ' + Math.min(done + 1, total) + ' of ' + total : '';
+  const text = job.status === 'pending' ? label + ' queued — waiting for a worker slot'
+    : label + ' running' + section;
+  return `
+  <div class="unit" style="padding:20px 32px;display:flex;align-items:center;gap:12px">
+    ${ledDot(AMBER, true, 9)}
+    <span style="font-family:var(--f-mono);font-size:11px;text-transform:uppercase;letter-spacing:0.08em;color:${AMBER}">${escapeHtml(text)}</span>
+    <span style="font-family:var(--f-mono);font-size:10px;color:var(--label-dim);margin-left:auto">${escapeHtml((job.provider || '') + (job.model ? ' · ' + job.model : ''))}</span>
+  </div>`;
+}
+
 function correctedHtml(t) {
+  if (llmJobActive(t.correction_job)) return jobRunningUnit(t.correction_job, 'Correction');
   if (t.correction_error) {
     return '<div class="unit" style="padding:20px 32px;font-size:13px;color:var(--red)">' +
       '<div class="t-cap" style="color:var(--red);margin-bottom:6px">Correction ' +
@@ -1436,6 +1596,12 @@ function correctedHtml(t) {
 }
 
 async function summaryHtml(t) {
+  if (llmJobActive(t.summary_job)) return jobRunningUnit(t.summary_job, 'Summary');
+  if (t.summary_job && t.summary_job.status === 'failed' && !t.has_summary) {
+    return '<div class="unit" style="padding:20px 32px;font-size:13px;color:var(--red)">' +
+      '<div class="t-cap" style="color:var(--red);margin-bottom:6px">Summary failed</div>' +
+      escapeHtml(t.summary_job.error || 'unknown error') + ' — rerun it from the Queue screen.</div>';
+  }
   if (!t.has_summary) return '<div class="empty-unit">No summary yet — press Summarize above</div>';
   try {
     const s = await api('/api/transcripts/' + t.id + '/summary');
@@ -1471,8 +1637,8 @@ function renderDetail() {
       <h1 class="t-title" style="min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(t.title || t.filename || 'Untitled')}</h1>
       <div style="display:flex;gap:8px;flex-shrink:0">
         ${extraActs.join('')}
-        <button class="btn" style="font-size:12px;padding:7px 14px;border-color:var(--inset-edge)" data-dact="summarize">Summarize</button>
-        <button class="btn" style="font-size:12px;padding:7px 14px;border-color:var(--inset-edge)" data-dact="rerun">Re-run correction</button>
+        <button class="btn" style="font-size:12px;padding:7px 14px;border-color:var(--inset-edge)" data-dact="summarize" ${llmJobActive(t.summary_job) ? 'disabled title="Summary job already queued"' : ''}>Summarize</button>
+        <button class="btn" style="font-size:12px;padding:7px 14px;border-color:var(--inset-edge)" data-dact="rerun" ${llmJobActive(t.correction_job) ? 'disabled title="Correction job already queued"' : ''}>Re-run correction</button>
         <button class="btn btn--red" style="font-size:12px;padding:7px 14px" data-dact="delete">Delete</button>
       </div>
     </div>
@@ -1543,14 +1709,15 @@ async function detailAction(act) {
       return;
     }
     if (act === 'summarize') {
-      toast('Summarizing…', 'info');
       let settings = {};
       try { settings = await api('/api/settings'); } catch { /* backend defaults apply */ }
       const fd = new FormData();
       fd.append('provider', settings.summary_provider || 'groq');
       fd.append('model', settings.summary_model || 'llama-3.3-70b-versatile');
       await api('/api/transcripts/' + t.id + '/summarize', { method: 'POST', body: fd });
+      toast('Summary queued — progress shows on the Summary tab and the Queue screen', 'info');
       S.detailTab = 'summary';
+      refreshQueueBadge();
       await loadTranscriptDetail(t.id);
       return;
     }
@@ -1627,16 +1794,12 @@ async function rerunCorrection() {
   const fd = new FormData();
   fd.append('provider', provider);
   fd.append('model', model);
-  toast('Running correction…', 'info');
   try {
-    // route returns 200 even when the pass fails — the error rides in the body
-    const res = await api('/api/transcripts/' + t.id + '/correct', { method: 'POST', body: fd });
-    if (res && res.correction_error) {
-      toast('Correction failed: ' + res.correction_error, 'error');
-    } else {
-      toast('Correction complete');
-    }
+    await api('/api/transcripts/' + t.id + '/correct', { method: 'POST', body: fd });
+    toast('Correction queued — progress shows on the Corrected tab and the Queue screen', 'info');
+    $('rerun-picker').style.display = 'none';
     S.detailTab = 'corrected';
+    refreshQueueBadge();
     await loadTranscriptDetail(t.id);
   } catch (e) { toast(e.message, 'error'); }
 }
