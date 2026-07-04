@@ -707,6 +707,44 @@ async def resume_transcript(transcript_id: int, db: Session = Depends(get_db), c
     return {"ok": True, "resumed": count}
 
 
+@app.post("/api/transcripts/{transcript_id}/retranscribe")
+async def retranscribe_transcript(
+    transcript_id: int,
+    provider: str = Form(...),
+    model: Optional[str] = Form(None),
+    language: Optional[str] = Form(None),
+    diarize: Optional[bool] = Form(None),
+    num_speakers: Optional[int] = Form(None),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Re-run transcription on the stored audio with a different
+    provider/model. Creates a NEW transcript row (the original is kept for
+    side-by-side comparison); unspecified options default to the source
+    transcript's values."""
+    t = db.query(Transcript).filter(
+        Transcript.id == transcript_id, Transcript.user_id == current_user.id
+    ).first()
+    if not t:
+        raise HTTPException(status_code=404, detail="Transcript not found")
+    if not (t.audio_path and os.path.exists(t.audio_path)):
+        raise HTTPException(
+            status_code=400,
+            detail="No stored audio for this transcript — it predates audio retention or the file was removed",
+        )
+    return await _run_transcription_pipeline(
+        db, current_user, Path(t.audio_path),
+        filename=t.filename,
+        title=t.title,
+        provider=provider,
+        model=model,
+        language=language if language is not None else t.language,
+        temperature=0.0,
+        diarize=diarize if diarize is not None else bool(t.diarize_requested),
+        num_speakers=num_speakers if num_speakers is not None else t.num_speakers,
+    )
+
+
 # ── Diarization ───────────────────────────────────────────────────────────
 
 @app.post("/api/diarize")
