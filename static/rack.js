@@ -1161,33 +1161,45 @@ async function startLiveCapture() {
     }
   }
 
-  const actx = new AudioContext();
-  const dest = actx.createMediaStreamDestination();
-  const merger = actx.createChannelMerger(2);
-  merger.connect(dest);
-  CAP.buf = new Uint8Array(256);
+  // From here on the streams are live but not yet owned by CAP — any throw
+  // (AudioContext, MediaRecorder) must stop their tracks or they leak.
+  let actx = null, rec;
+  try {
+    actx = new AudioContext();
+    const dest = actx.createMediaStreamDestination();
+    const merger = actx.createChannelMerger(2);
+    merger.connect(dest);
+    CAP.buf = new Uint8Array(256);
 
-  const micSrc = actx.createMediaStreamSource(mic);
-  CAP.micAn = actx.createAnalyser();
-  CAP.micAn.fftSize = 256;
-  micSrc.connect(CAP.micAn);
-  micSrc.connect(merger, 0, 0);
+    const micSrc = actx.createMediaStreamSource(mic);
+    CAP.micAn = actx.createAnalyser();
+    CAP.micAn.fftSize = 256;
+    micSrc.connect(CAP.micAn);
+    micSrc.connect(merger, 0, 0);
 
-  CAP.sysAn = null;
-  if (disp) {
-    const sysSrc = actx.createMediaStreamSource(disp);
-    CAP.sysAn = actx.createAnalyser();
-    CAP.sysAn.fftSize = 256;
-    sysSrc.connect(CAP.sysAn);
-    sysSrc.connect(merger, 0, 1);
+    CAP.sysAn = null;
+    if (disp) {
+      const sysSrc = actx.createMediaStreamSource(disp);
+      CAP.sysAn = actx.createAnalyser();
+      CAP.sysAn.fftSize = 256;
+      sysSrc.connect(CAP.sysAn);
+      sysSrc.connect(merger, 0, 1);
+    }
+
+    const mime = MediaRecorder.isTypeSupported('audio/webm;codecs=opus') ? 'audio/webm;codecs=opus' : 'audio/webm';
+    rec = new MediaRecorder(dest.stream, { mimeType: mime });
+    CAP.chunks = [];
+    rec.ondataavailable = (e) => { if (e.data.size) CAP.chunks.push(e.data); };
+    rec.onstop = finishLiveCapture;
+    rec.start(1000);
+  } catch (e) {
+    [mic, disp].forEach(s => s && s.getTracks().forEach(t => t.stop()));
+    if (actx) actx.close();
+    CAP.micAn = null;
+    CAP.sysAn = null;
+    toast('Could not start the recorder: ' + e.message, 'error');
+    return;
   }
-
-  const mime = MediaRecorder.isTypeSupported('audio/webm;codecs=opus') ? 'audio/webm;codecs=opus' : 'audio/webm';
-  const rec = new MediaRecorder(dest.stream, { mimeType: mime });
-  CAP.chunks = [];
-  rec.ondataavailable = (e) => { if (e.data.size) CAP.chunks.push(e.data); };
-  rec.onstop = finishLiveCapture;
-  rec.start(1000);
 
   CAP.rec = rec;
   CAP.mic = mic;
@@ -1501,6 +1513,8 @@ async function detailAction(act) {
     if (act === 'summarize') {
       toast('Summarizing…', 'info');
       const fd = new FormData();
+      fd.append('provider', 'groq');
+      fd.append('model', 'llama-3.3-70b-versatile');
       await api('/api/transcripts/' + t.id + '/summarize', { method: 'POST', body: fd });
       S.detailTab = 'summary';
       await loadTranscriptDetail(t.id);
