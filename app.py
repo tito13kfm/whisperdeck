@@ -161,6 +161,9 @@ def _serialize_transcript(db: Session, t: Transcript) -> dict:
         "created_at": t.created_at.isoformat() if t.created_at else None,
         "updated_at": t.updated_at.isoformat() if t.updated_at else None,
         "has_summary": t.summary is not None,
+        # Gates the post-hoc re-transcribe/re-diarize buttons: needs the
+        # stored source file, not just a path that once existed.
+        "has_audio": bool(t.audio_path and os.path.exists(t.audio_path)),
         "job_progress": job_progress,
         "processed_size_bytes": t.processed_size_bytes,
         "queue_status": compute_queue_status(db, t),
