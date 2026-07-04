@@ -863,6 +863,36 @@ async def rediarize_transcript(
     return {"job": serialize_llm_job(job)}
 
 
+@app.post("/api/transcripts/{transcript_id}/context")
+async def add_transcript_context(
+    transcript_id: int,
+    context_doc: str = Form(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Paste a meeting-context doc after the fact — extracts names/jargon
+    into the hotword glossary so a correction re-run can apply them.
+    Unlike the upload-time path (a silent side effect), this is an explicit
+    user action, so a missing key is an error the user can act on."""
+    t = db.query(Transcript).filter(
+        Transcript.id == transcript_id, Transcript.user_id == current_user.id
+    ).first()
+    if not t:
+        raise HTTPException(status_code=404, detail="Transcript not found")
+    if not context_doc.strip():
+        raise HTTPException(status_code=400, detail="Context document is empty")
+    groq_cfg = db.query(ProviderConfig).filter(
+        ProviderConfig.user_id == current_user.id,
+        ProviderConfig.name == "groq",
+    ).first()
+    if not (groq_cfg and groq_cfg.api_key):
+        raise HTTPException(status_code=400, detail="Context extraction needs a Groq API key (service panel)")
+    terms = await extract_hotwords_from_doc(
+        db, current_user.id, context_doc, api_key=groq_cfg.api_key
+    )
+    return {"terms": terms}
+
+
 @app.get("/api/correction-models/{provider}")
 async def correction_models(provider: str, current_user: User = Depends(get_current_user)):
     """Curated, cost-aware model shortlist for the correction/summary pickers.
