@@ -861,7 +861,7 @@ function stageLeds() {
   // transcript is still processing (backend merges + diarizes then).
   const st = S.stage;
   const defs = [
-    { label: 'Upload', done: st !== 'upload', on: st === 'upload' },
+    { label: 'Initialize', done: st !== 'upload', on: st === 'upload' },
     { label: 'Transcribe', done: st === 'diarize' || st === 'finalize', on: st === 'transcribe' },
     { label: 'Diarize', done: st === 'finalize', on: st === 'diarize' },
     { label: 'Finalize', done: false, on: st === 'finalize' },
