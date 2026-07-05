@@ -296,6 +296,38 @@ function closeModal() {
   $('modal-box').innerHTML = '';
 }
 
+function styledConfirm(message) {
+  return new Promise(resolve => {
+    openModal(`
+      <div style="font-family:var(--f-cond);font-weight:700;font-size:16px;text-transform:uppercase;letter-spacing:0.04em;margin-bottom:14px">${escapeHtml(message)}</div>
+      <div style="display:flex;justify-content:flex-end;gap:8px">
+        <button class="btn" id="styled-confirm-cancel" style="font-size:12px;border-color:var(--inset-edge)">Cancel</button>
+        <button class="btn btn--red" id="styled-confirm-ok" style="font-size:12px">Confirm</button>
+      </div>`);
+    $('styled-confirm-cancel').addEventListener('click', () => { closeModal(); resolve(false); });
+    $('styled-confirm-ok').addEventListener('click', () => { closeModal(); resolve(true); });
+  });
+}
+
+function styledPrompt(message, defaultValue) {
+  return new Promise(resolve => {
+    openModal(`
+      <div style="font-family:var(--f-cond);font-weight:700;font-size:16px;text-transform:uppercase;letter-spacing:0.04em;margin-bottom:12px">${escapeHtml(message)}</div>
+      <input class="inp" id="styled-prompt-input" type="text" value="${escapeHtml(defaultValue || '')}" style="font-size:13px;padding:8px 10px;width:100%;margin-bottom:16px">
+      <div style="display:flex;justify-content:flex-end;gap:8px">
+        <button class="btn" id="styled-prompt-cancel" style="font-size:12px;border-color:var(--inset-edge)">Cancel</button>
+        <button id="styled-prompt-ok" style="font-family:var(--f-mono);font-size:11px;font-weight:700;background:${AMBER};color:var(--amber-ink);border:none;padding:8px 14px;border-radius:2px;cursor:pointer">OK</button>
+      </div>`);
+    const input = $('styled-prompt-input');
+    input.focus();
+    input.select();
+    const submit = () => { const v = input.value; closeModal(); resolve(v); };
+    $('styled-prompt-cancel').addEventListener('click', () => { closeModal(); resolve(null); });
+    $('styled-prompt-ok').addEventListener('click', submit);
+    input.addEventListener('keydown', e => { if (e.key === 'Enter') submit(); });
+  });
+}
+
 /* ══════════════════ auth ══════════════════ */
 function showLogin() {
   $('page-login').style.display = 'flex';
@@ -1411,7 +1443,7 @@ async function loadTranscripts() {
       if (act === 'resume') { const r = await api('/api/transcripts/' + id + '/resume', { method: 'POST' }); toast('Resumed ' + r.resumed + ' sections', 'info'); }
       if (act === 'retry') { const r = await api('/api/transcripts/' + id + '/retry-failed-chunks', { method: 'POST' }); toast('Retrying ' + r.retried + ' sections', 'info'); }
       if (act === 'delete') {
-        if (!window.confirm('Delete this transcript permanently?')) return;
+        if (!(await styledConfirm('Delete this transcript permanently?'))) return;
         await api('/api/transcripts/' + id, { method: 'DELETE' });
         toast('Transcript deleted');
       }
@@ -1721,7 +1753,7 @@ function toggleSeed(btn) {
 async function renameSpeaker(speaker) {
   const t = detailData;
   if (!t) return;
-  const name = (window.prompt('Rename "' + speaker + '" to:', speaker) || '').trim();
+  const name = ((await styledPrompt('Rename "' + speaker + '" to:', speaker)) || '').trim();
   if (!name || name === speaker) return;
   try {
     const r = await api('/api/transcripts/' + t.id + '/speakers/rename', {
@@ -2012,7 +2044,7 @@ async function detailAction(act) {
   if (!t) return;
   try {
     if (act === 'delete') {
-      if (!window.confirm('Delete this transcript permanently?')) return;
+      if (!(await styledConfirm('Delete this transcript permanently?'))) return;
       await api('/api/transcripts/' + t.id, { method: 'DELETE' });
       toast('Transcript deleted');
       navigate('transcripts');
@@ -2306,7 +2338,7 @@ async function loadVoices() {
   $('voice-identify-btn').addEventListener('click', openIdentifyModal);
   root.querySelectorAll('[data-vdel]').forEach(b => b.addEventListener('click', async (e) => {
     e.stopPropagation();
-    if (!window.confirm('Remove this voice profile from the roster?')) return;
+    if (!(await styledConfirm('Remove this voice profile from the roster?'))) return;
     try {
       await api('/api/voices/' + b.dataset.vdel, { method: 'DELETE' });
       toast('Profile removed');
@@ -2324,7 +2356,7 @@ async function loadVoices() {
     clipAudio.play().catch(err => toast(err.message, 'error'));
   }));
   root.querySelectorAll('[data-clip-del]').forEach(btn => btn.addEventListener('click', async () => {
-    if (!window.confirm('Remove this clip?')) return;
+    if (!(await styledConfirm('Remove this clip?'))) return;
     try {
       await api('/api/voices/' + btn.dataset.vid + '/clips/' + btn.dataset.clipDel, { method: 'DELETE' });
       toast('Clip removed');
