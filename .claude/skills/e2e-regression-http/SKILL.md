@@ -1,9 +1,9 @@
 ---
-name: e2e-test-app
-description: Full end-to-end feature test of WhisperDeck via Playwright MCP against an isolated local server instance (Moonshine STT, local diarization, Lemonade LLM). Use when asked to run the e2e test, verify all features work, or regression-test WhisperDeck before a release.
+name: e2e-regression-http
+description: Scripted 16-scenario feature-regression test of WhisperDeck, validated via direct HTTP API calls (not a real browser — see "Validation status" below) against an isolated local server instance (Moonshine STT, local diarization, Lemonade LLM). Use when asked to regression-test WhisperDeck's backend behavior before a release. For a real-browser, exploratory UX pass, use e2e-ux-audit instead.
 ---
 
-# WhisperDeck End-to-End Test
+# WhisperDeck End-to-End Regression Test (HTTP-only)
 
 Drives every feature of WhisperDeck through a real browser against a
 throwaway server instance. Local/keyless backends only — no API keys, no
@@ -234,22 +234,20 @@ Report: `[PASS|FAIL|SKIPPED(reason)] Scenario 6: Live capture`
    - Check: `$TRANSCRIPT_ID` from Scenario 5 appears in the list (`GET
      /api/transcripts`; rendered per-row around `static/rack.js:1380`).
 2. Open its detail view (`GET /api/transcripts/{id}`; header rendered at
-   `static/rack.js:1933` as `<h1 class="t-title">`).
+   `static/rack.js:2128` as `<h1 class="t-title">`).
    - Check: segments/text render (or, per Scenario 5's caveat, the empty-
      state renders cleanly with no error if the fixture produced no
      segments).
-3. Rename its title. **Verified via direct API call, not the UI**: the
-   detail view's title (`static/rack.js:1933`) is plain text with no click
-   handler, and `static/rack.js` has no PATCH call anywhere — the only
-   in-app rename affordance is the *speaker* rename `window.prompt` at
-   `static/rack.js:1724`, which is unrelated. Since `PATCH
-   /api/transcripts/{id}` with `{"title": "..."}` exists and works
-   (confirmed live: title updated and persisted), exercise it directly via
-   HTTP rather than a UI control, and note
-   `SKIPPED(no title-rename UI control exists — verified via API only)`
-   on the UI-specific portion of this check.
+3. Rename its title via the Tape library list's **Rename** button
+   (`data-act="rename"`, `static/rack.js:1525`), which opens a styled
+   prompt (`styledPrompt()`, `static/rack.js:332`) pre-filled with the
+   current title/filename and calls `PATCH /api/transcripts/{id}` with
+   `{"title": "..."}` on confirm. (Earlier revisions of this scenario used
+   a direct API call because no UI control existed yet — that gap is
+   closed; use the UI control now. The detail-view title itself is still
+   plain text with no click handler; renaming happens from the list.)
    - Check: the new title shows in both detail view and list view after
-     reload (both confirmed live via `GET /api/transcripts/{id}` and `GET
+     the rename (confirmed via `GET /api/transcripts/{id}` and `GET
      /api/transcripts`).
 4. Create a second throwaway transcript (repeat Scenario 5's upload with
    `test.mp4`) purely to delete it here, so Scenario 5's main transcript
@@ -384,10 +382,11 @@ Same fixture gate as Scenario 10.
 
 1. Rename one detected speaker label (e.g. `Speaker 1` -> `Alice`) via the
    UI.
-   - Check: click on the speaker label rendered at `static/rack.js:1636`
-     (`data-seg-rename` attribute). This opens a prompt and calls `POST
+   - Check: click on the speaker label rendered at `static/rack.js:1759`
+     (`data-seg-rename` attribute). This opens the app's styled prompt
+     modal (`styledPrompt()`) and calls `POST
      /api/transcripts/{id}/speakers/rename` at `app.py:773` via the
-     `renameSpeaker()` function at `rack.js:1721`. The new name appears on
+     `renameSpeaker()` function at `rack.js:1847`. The new name appears on
      all of that speaker's segments in the transcript view, not just one.
      **Confirmed live**: renaming `SPEAKER_04` -> `Alice` on
      `$TRANSCRIPT_ID` relabeled 41 of 69 segments in one call
