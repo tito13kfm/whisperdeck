@@ -91,12 +91,22 @@ which journeys run at full fidelity vs. get marked
 6. Navigate to `http://localhost:9782/` and confirm the page loads
    before starting Journey 1.
 
-7. Give the `local` provider a non-empty placeholder API key, working
-   around issue #2 before any LLM-job journey step needs it:
+7. Give the `local` provider a non-empty placeholder API key (working
+   around issue #2 before any LLM-job journey step needs it) and point it
+   at Lemonade, which does not default here:
 
 ```powershell
 Invoke-RestMethod -Uri "http://localhost:9782/api/providers/local" -Method Put `
-  -ContentType "application/json" -Body '{"api_key":"not-needed"}'
+  -ContentType "application/json" -Body '{"api_key":"not-needed","api_url":"http://localhost:13305/v1","default_model":"gpt-oss-20b-mxfp4-GGUF"}'
+```
+
+8. Set the user's `correction_provider` setting to `local` so
+   `POST /api/transcripts/{id}/context` (Journey 4, step 2) resolves to
+   Lemonade instead of its `groq` default:
+
+```powershell
+Invoke-RestMethod -Uri "http://localhost:9782/api/settings" -Method Put `
+  -ContentType "application/json" -Body '{"correction_provider":"local","correction_model":"gpt-oss-20b-mxfp4-GGUF"}'
 ```
 
 ## Findings format
