@@ -78,6 +78,71 @@ which scenarios run at full fidelity vs. get marked
 6. Navigate to `http://localhost:9782/` and confirm the page loads (title
    or root element present) before starting Scenario 1.
 
+## Scenario 1: Auth (register / login / logout / session persistence)
+
+1. Navigate to `http://localhost:9782/`. If a login/register form is shown,
+   fill username `e2e_test_user`, password `e2e_test_pass_123`, submit
+   register.
+   - Check: `GET http://localhost:9782/api/me` (via browser fetch or
+     Playwright network inspection) returns 200 with
+     `"username": "e2e_test_user"`.
+2. Reload the page.
+   - Check: still authenticated — no login form shown, `/api/me` still
+     200. This is the session-persistence check.
+3. Trigger logout (find and click the logout control in the UI).
+   - Check: `/api/me` now returns 401, login form is shown again.
+4. Log back in with the same credentials for the rest of the run.
+   - Check: `/api/me` 200 again with the same username.
+
+Report: `[PASS|FAIL] Scenario 1: Auth`
+
+## Scenario 2: Settings (view / update / persists)
+
+1. Open the settings panel in the UI.
+   - Check: current settings load without error (values populate, no
+     error toast).
+2. Change one setting (e.g. a numeric field like max concurrent chunks) to
+   a new value and save.
+   - Check: a success indicator appears (toast, or field reflects saved
+     state).
+3. Reload the page and reopen settings.
+   - Check: the changed value is still the new value, not reverted to
+     default.
+
+Report: `[PASS|FAIL] Scenario 2: Settings`
+
+## Scenario 3: Hotwords (add / list / delete / dedup)
+
+1. Open the hotwords panel.
+2. Add a hotword, e.g. `Kubernetes`.
+   - Check: it now appears in the hotwords list.
+3. Add the same word again in a different case, e.g. `kubernetes`.
+   - Check: the list still shows only one entry for it (case-insensitive
+     dedup) — confirms the fix at `services/hotwords.py`'s
+     `add_hotword()` still holds.
+4. Delete the hotword.
+   - Check: it no longer appears in the list.
+
+Report: `[PASS|FAIL] Scenario 3: Hotwords`
+
+## Scenario 4: Providers panel (switch / save config / models load)
+
+1. Open the providers/services panel.
+   - Check: Moonshine appears in the provider list.
+2. Configure the local LLM provider: set provider `local`, `api_url` to
+   `http://localhost:13305/v1`, model `gpt-oss-20b-mxfp4-GGUF`. Save.
+   - Check: save succeeds (no error toast); reload the panel and confirm
+     the saved `api_url` and model persisted.
+3. Select Moonshine as the active transcription provider (default anyway,
+   but explicitly confirm) and check its model list loads without error.
+
+Report: `[PASS|FAIL] Scenario 4: Providers`
+
+If `http://localhost:13305/v1/models` was unreachable in Setup step 4,
+still attempt step 2 (saving config doesn't require the server to be up)
+but note `SKIPPED(Lemonade unreachable, config saved but unverified live)`
+instead of a hard PASS on the "loads without error" sub-check.
+
 ## Teardown
 
 Run this after all scenarios, even if some failed:
