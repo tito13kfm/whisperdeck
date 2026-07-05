@@ -8,6 +8,30 @@ from fastapi.testclient import TestClient
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+
+def pytest_configure(config):
+    """Fail fast with a clear message if the suite is run under the wrong
+    interpreter. `librosa` is a required base dependency (requirements.txt,
+    not an optional extra) — it's the always-available voice-ID fallback
+    backend. If it's missing, this isn't running under this project's
+    `.venv`, and the real symptom is a handful of confusing, unrelated-looking
+    failures in test_voice_id.py/test_voice_match_job.py rather than an
+    obvious "wrong interpreter" error. Catch that here instead."""
+    try:
+        import librosa  # noqa: F401
+    except ImportError:
+        import pytest as _pytest
+        _pytest.exit(
+            "\nWrong Python interpreter: 'librosa' is not importable.\n"
+            "Run tests with this project's virtualenv, not a bare `python`/`pytest` on PATH:\n"
+            "    .venv\\Scripts\\python.exe -m pytest\n"
+            "(A bare `python` on PATH may resolve to a system install without this "
+            "project's dependencies, which otherwise produces misleading failures in "
+            "test_voice_id.py / test_voice_match_job.py instead of a clear error.)\n",
+            returncode=1,
+        )
+
+
 import app as app_module
 from database import init_db
 
