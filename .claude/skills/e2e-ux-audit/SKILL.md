@@ -197,6 +197,52 @@ Report: `[PASS|FAIL|SKIPPED(reason)] Journey 2: Live capture`
 
 Log any findings noticed during steps 1-5 using the Findings format.
 
+## Journey 3: Voice roster built across meetings
+
+Same fixture gate as Journey 1 (requires `tests/fixtures/e2e_multispeaker.mp3`);
+if missing, `SKIPPED(no multispeaker fixture)`.
+
+Tests whether the voice bank is a real, discoverable UX loop across
+multiple meetings — not just whether the underlying API calls succeed.
+
+1. Upload `tests/fixtures/e2e_multispeaker.mp3` with diarization enabled
+   (the "Speakers" toggle before submitting). Poll until terminal
+   status. Record as `$J3_TRANSCRIPT_ID`.
+2. Rename one detected speaker to a real name, e.g. `Alice`, via the
+   speaker-rename UI control.
+   - Watch: is the rename control easy to find (does the user have to
+     already know to click directly on a speaker label)?
+3. Enroll a voice profile for `Alice` using the "Enroll marked clips"
+   flow (mark a segment, then enroll).
+   - Watch: is it clear afterward that the enrollment succeeded (e.g.
+     confirmation, or the profile visibly appearing in a voice roster
+     view)?
+4. Upload the same fixture a second time (simulating a second meeting
+   with the same speakers), without pre-labeling anyone. Poll until
+   terminal status. Record as `$J3_TRANSCRIPT_ID_2`.
+5. Without being told which button to press, look at the transcript
+   detail view and the diarization result for `$J3_TRANSCRIPT_ID_2`.
+   - Watch: does the UI proactively suggest or highlight a possible
+     match against the enrolled `Alice` profile (e.g. a badge, a
+     suggested label, an unprompted notification)? Or does the user
+     have to already know to seek out and trigger a separate
+     "Identify"/"Match" action?
+   - This is the core judgment call of this journey: if there is no
+     visible cue that voice matching is available at all, log an
+     `unreachable-feature` or `missing-feedback` finding (choose based
+     on whether the control exists but is unadvertised, vs. genuinely
+     absent from this view).
+6. Trigger the match/identify action explicitly (if not already
+   surfaced in step 5) and confirm segments in `$J3_TRANSCRIPT_ID_2` get
+   labeled against the enrolled `Alice` profile.
+7. Delete the enrolled `Alice` voice profile via the Voice Roster view.
+   - Watch: is there a confirmation step before deleting (accidental
+     deletion risk), or does it delete immediately on click?
+
+Report: `[PASS|FAIL|SKIPPED(reason)] Journey 3: Voice roster`
+
+Log any findings noticed during steps 1-7 using the Findings format.
+
 ## Teardown
 
 Run this after all journeys, even if some failed:
