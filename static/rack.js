@@ -2031,6 +2031,7 @@ async function handleExportClick(kind, copy) {
     try { text = await summaryPlainText(t.id); }
     catch (e) { toast('Could not load summary to export: ' + e.message, 'error'); return; }
   }
+  if (!text.trim()) { toast('Nothing to export yet', 'info'); return; }
   if (copy) copyToClipboard(text);
   else downloadTextFile((t.title || t.filename || 'transcript').replace(/[^\w.-]+/g, '_') + '-' + kind + '.txt', text);
 }
