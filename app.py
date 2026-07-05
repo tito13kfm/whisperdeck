@@ -42,7 +42,7 @@ from backends import list_providers, get_provider, LOCAL_PROVIDERS
 # ── App Setup ──────────────────────────────────────────────────────────────
 
 BASE_DIR = Path(__file__).parent.resolve()
-DATA_DIR = BASE_DIR / "data"
+DATA_DIR = Path(os.environ["WHISPERDECK_DATA_DIR"]) if os.environ.get("WHISPERDECK_DATA_DIR") else BASE_DIR / "data"
 UPLOAD_DIR = DATA_DIR / "uploads"
 TRANSCRIPT_DIR = DATA_DIR / "transcripts"
 VOICES_DIR = DATA_DIR / "voices"
@@ -1413,4 +1413,4 @@ if __name__ == "__main__":
     print("         WhisperDeck v0.6")
     print("  Transcribe - Diarize - Summarize - Identify")
     print("=" * 46)
-    uvicorn.run("app:app", host="0.0.0.0", port=9781, reload=False)
+    uvicorn.run("app:app", host="0.0.0.0", port=int(os.environ.get("PORT", 9781)), reload=False)

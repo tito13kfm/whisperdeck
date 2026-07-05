@@ -4,6 +4,7 @@ cd /d "%~dp0"
 
 set PYTHON=python\python.exe
 set FFMPEG_DIR=%~dp0ffmpeg
+set WHISPERDECK_DATA_DIR=%~dp0data
 set DEPS_MARKER=data\.deps_installed
 set PORT=__PORT__
 rem Note: the embeddable Python distribution's python3xx._pth file disables
