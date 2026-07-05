@@ -1456,6 +1456,17 @@ async function loadTranscripts() {
       if (act === 'cancel') { await api('/api/transcripts/' + id + '/cancel', { method: 'POST' }); toast('Cancelled — resumable later', 'info'); }
       if (act === 'resume') { const r = await api('/api/transcripts/' + id + '/resume', { method: 'POST' }); toast('Resumed ' + r.resumed + ' sections', 'info'); }
       if (act === 'retry') { const r = await api('/api/transcripts/' + id + '/retry-failed-chunks', { method: 'POST' }); toast('Retrying ' + r.retried + ' sections', 'info'); }
+      if (act === 'rename') {
+        const row = bankListCache.find(x => x.id === id);
+        const name = await styledPrompt('Rename this transcript:', row ? (row.title || row.filename) : '');
+        if (name === null || !name.trim()) return;
+        const updated = await api('/api/transcripts/' + id, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title: name.trim() }) });
+        const idx = bankListCache.findIndex(x => x.id === id);
+        if (idx >= 0) bankListCache[idx] = updated;
+        renderBankRows();
+        toast('Renamed', 'info');
+        return;
+      }
       if (act === 'delete') {
         if (!(await styledConfirm('Delete this transcript permanently?'))) return;
         await api('/api/transcripts/' + id, { method: 'DELETE' });
@@ -1511,6 +1522,7 @@ function renderBankRows(preservedOpenIds) {
       acts.push('<button class="btn" style="font-size:12px;padding:6px 12px;border-color:var(--inset-edge)" data-act="resume" data-id="' + t.id + '">Resume</button>');
     if (t.status === 'failed' || t.status === 'partial')
       acts.push('<button class="btn" style="font-size:12px;padding:6px 12px;border-color:var(--inset-edge)" data-act="retry" data-id="' + t.id + '">Retry</button>');
+    acts.push('<button class="btn" style="font-size:12px;padding:6px 12px;border-color:var(--inset-edge)" data-act="rename" data-id="' + t.id + '">Rename</button>');
     acts.push('<button class="btn btn--red" style="font-size:12px;padding:6px 12px" data-act="delete" data-id="' + t.id + '">Delete</button>');
     return `
     <details class="unit" data-tid="${t.id}" ${openIds.has(String(t.id)) ? 'open' : ''}>
