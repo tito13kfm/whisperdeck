@@ -278,6 +278,38 @@ Report: `[PASS|FAIL|SKIPPED(reason)] Journey 4: Wrap-up flow`
 
 Log any findings noticed during steps 1-5 using the Findings format.
 
+## Journey 5: Managing a growing transcript backlog
+
+By this point, Journeys 1-4 have created several transcripts and jobs —
+use that accumulated state rather than creating more.
+
+1. Open the transcript list view.
+   - Watch: with 3+ transcripts now present (from Journeys 1, 3, 4), is
+     there any way to search, sort, or filter, or is it a flat
+     unsorted/unlabeled list that would get unwieldy at real-world
+     volume? Log a finding if there's no way to distinguish transcripts
+     beyond scrolling and reading titles.
+2. Open the jobs panel.
+   - Watch: does it clearly list the jobs created by earlier journeys
+     (upload, diarize, summarize, correct) with distinguishable
+     statuses? Is it clear which transcript each job belongs to?
+3. Start one throwaway job specifically to cancel here: trigger a
+   summarize or correct call on any transcript, then immediately call
+   the cancel action on it (`j-cancel` UI control / `POST
+   /api/jobs/{job_id}/cancel`) before it completes.
+   - Watch: is the cancel control easy to find/use under time pressure
+     (i.e., does the user have to hunt for it while the job is racing to
+     finish)?
+4. Delete one non-essential transcript (e.g. create and immediately
+   delete a throwaway upload — do not delete `$J1_TRANSCRIPT_ID`,
+   `$J3_TRANSCRIPT_ID`, or `$J3_TRANSCRIPT_ID_2`).
+   - Watch: is there a confirmation step before deleting a transcript
+     (accidental data loss risk), or does it delete immediately?
+
+Report: `[PASS|FAIL] Journey 5: Backlog management`
+
+Log any findings noticed during steps 1-4 using the Findings format.
+
 ## Teardown
 
 Run this after all journeys, even if some failed:
