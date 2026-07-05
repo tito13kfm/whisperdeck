@@ -6,7 +6,9 @@ run_out.log
 run_err.log
 test.mp4
 test_audio.mp3
-.claude/
+.claude/*
+!.claude/skills/
+!.claude/skills/**
 .serena/
 *.log
 dist/
