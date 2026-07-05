@@ -6,6 +6,9 @@ set PYTHON=python\python.exe
 set FFMPEG_DIR=%~dp0ffmpeg
 set DEPS_MARKER=data\.deps_installed
 set PORT=__PORT__
+rem Note: the embeddable Python distribution's python3xx._pth file disables
+rem PYTHONPATH entirely (isolation mode), so the app directory is instead
+rem added directly to that ._pth file at build time (see build_release.ps1).
 
 echo ==============================================
 echo          WhisperDeck (portable)
@@ -17,7 +20,6 @@ if not exist "data" mkdir "data"
 
 if not exist "%DEPS_MARKER%" (
     echo [*] First launch - installing dependencies, this takes a minute...
-    "%PYTHON%" -m ensurepip --quiet
     "%PYTHON%" -m pip install --quiet -r app\requirements.txt
     if errorlevel 1 (
         echo.
