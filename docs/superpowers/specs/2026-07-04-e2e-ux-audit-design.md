@@ -109,9 +109,10 @@ with an inline `<img>` pointing at its screenshot via a relative path in
 the same folder (no base64 embedding — keeps the file small). Simple
 inline CSS, no build step, no external dependencies.
 
-After writing the report, the skill navigates the Playwright browser to
-the report's local `file://` path so it opens automatically for the user
-to review.
+After writing the report, the skill opens it in the user's real default
+browser (e.g. PowerShell `Start-Process <path>`), not the Playwright-
+controlled browser instance — the Playwright session may already be
+torn down by teardown, and it isn't a full browsing experience anyway.
 
 ## Out of scope
 
