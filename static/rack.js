@@ -292,14 +292,25 @@ function openModal(html) {
   $('modal-overlay').classList.add('open');
 }
 function closeModal() {
+  // Any dismissal path that closes the modal without an explicit button-click
+  // resolver (Escape key, clicking the overlay backdrop) must still settle the
+  // pending styledConfirm/styledPrompt Promise, or the awaiting coroutine hangs
+  // forever. Button-click handlers clear pendingStyledModal to null themselves
+  // (and resolve with their own value) before calling closeModal(), so this is
+  // a no-op in that case.
+  if (pendingStyledModal) {
+    const { resolve, cancelValue } = pendingStyledModal;
+    pendingStyledModal = null;
+    resolve(cancelValue);
+  }
   $('modal-overlay').classList.remove('open');
   $('modal-box').innerHTML = '';
 }
 
-// Tracks the pending styledConfirm/styledPrompt resolver (and its Escape-cancel
-// value) so the global Escape handler can settle the Promise instead of leaving
-// the awaiting coroutine suspended forever. Cleared whenever the modal resolves
-// via a button click.
+// Tracks the pending styledConfirm/styledPrompt resolver (and its cancel value
+// used for non-button dismissals) so closeModal() can settle the Promise
+// instead of leaving the awaiting coroutine suspended forever. Cleared
+// whenever the modal resolves via a button click (before closeModal() runs).
 let pendingStyledModal = null;
 
 function styledConfirm(message) {
@@ -2845,14 +2856,7 @@ document.addEventListener('DOMContentLoaded', () => {
   });
   document.addEventListener('keydown', (e) => {
     if (e.key !== 'Escape') return;
-    if (pendingStyledModal) {
-      const { resolve, cancelValue } = pendingStyledModal;
-      pendingStyledModal = null;
-      closeModal();
-      resolve(cancelValue);
-    } else {
-      closeModal();
-    }
+    closeModal();
   });
   $('file-input').addEventListener('change', (e) => {
     if (e.target.files[0]) loadTape(e.target.files[0]);
