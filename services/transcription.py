@@ -4,7 +4,7 @@ import datetime
 import json
 from typing import Optional
 
-from database import Transcript, Summary
+from database import Transcript, Summary, utcnow_naive
 from backends import get_provider, ProviderError
 from backends.base import BaseProvider, TranscriptionResult
 
@@ -115,7 +115,7 @@ class TranscriptionService:
                 for s in result.segments
             ]
             transcript.duration_seconds = result.duration_seconds
-            transcript.updated_at = datetime.datetime.utcnow()
+            transcript.updated_at = utcnow_naive()
 
             transcript_dir = os.path.join(os.path.dirname(self.upload_dir), "transcripts")
             os.makedirs(transcript_dir, exist_ok=True)
@@ -131,7 +131,7 @@ class TranscriptionService:
         except Exception as e:
             transcript.status = "failed"
             transcript.error = str(e)
-            transcript.updated_at = datetime.datetime.utcnow()
+            transcript.updated_at = utcnow_naive()
             db.commit()
             raise
 
@@ -270,7 +270,7 @@ Return ONLY valid JSON, no markdown, no code fences."""
             existing.action_items = summary_data.get("action_items", [])
             existing.decisions = summary_data.get("decisions", [])
             existing.model = model
-            existing.created_at = datetime.datetime.utcnow()
+            existing.created_at = utcnow_naive()
             summary = existing
         else:
             summary = Summary(

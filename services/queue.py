@@ -8,7 +8,7 @@ import asyncio
 import datetime
 from typing import Optional
 
-from database import Transcript, TranscriptionJob
+from database import Transcript, TranscriptionJob, utcnow_naive
 from backends import get_provider, ProviderError
 from database import ProviderConfig
 
@@ -47,7 +47,7 @@ def compute_audio_seconds_used(db, user_id: int, provider: str, window_seconds: 
         the individual TranscriptionJob.status values remain 'completed'
         permanently — only the transcript-side sum counts it from then on.
     """
-    cutoff = datetime.datetime.utcnow() - datetime.timedelta(seconds=window_seconds)
+    cutoff = utcnow_naive() - datetime.timedelta(seconds=window_seconds)
 
     transcript_total = (
         db.query(Transcript)
@@ -97,7 +97,7 @@ def _oldest_contributing_timestamp(db, user_id: int, provider: str, window_secon
     would count for this user+provider within the trailing window_seconds —
     i.e. the row whose usage will be the next to age out. Returns None if
     nothing is currently contributing (budget isn't actually constrained)."""
-    cutoff = datetime.datetime.utcnow() - datetime.timedelta(seconds=window_seconds)
+    cutoff = utcnow_naive() - datetime.timedelta(seconds=window_seconds)
 
     transcript_times = [
         t.updated_at for t in db.query(Transcript).filter(
@@ -133,7 +133,7 @@ def estimate_resume_seconds(db, user_id: int, provider: str, additional_seconds:
     doesn't account for other jobs adding new usage before then, since this
     is a UI estimate ("resuming in ~Nm"), not a scheduling guarantee."""
     limits = PROVIDER_LIMITS.get(provider, DEFAULT_LIMITS)
-    now = datetime.datetime.utcnow()
+    now = utcnow_naive()
     candidates = []
     for window_seconds, cap_key in ((3600, "ash"), (86400, "asd")):
         used = compute_audio_seconds_used(db, user_id, provider, window_seconds)
@@ -303,7 +303,7 @@ def cancel_transcript_jobs(db, transcript_id: int) -> int:
     transcript = db.query(Transcript).filter(Transcript.id == transcript_id).first()
     if transcript:
         transcript.status = "cancelled"
-        transcript.updated_at = datetime.datetime.utcnow()
+        transcript.updated_at = utcnow_naive()
     db.commit()
     return len(pending)
 
@@ -344,7 +344,7 @@ def _retry_eligible(job) -> bool:
     if job.attempts >= MAX_ATTEMPTS:
         return False
     backoff = min(60, 5 * (2 ** job.attempts))
-    elapsed = (datetime.datetime.utcnow() - job.updated_at).total_seconds()
+    elapsed = (utcnow_naive() - job.updated_at).total_seconds()
     return elapsed >= backoff
 
 
@@ -480,7 +480,7 @@ async def _finalize_if_done(db, transcript_id: int, diarization_service) -> None
     transcript.status = new_status
     if speaker_count is not None:
         transcript.speaker_count = speaker_count
-    transcript.updated_at = datetime.datetime.utcnow()
+    transcript.updated_at = utcnow_naive()
     db.commit()
 
     if new_status in ("completed", "partial"):

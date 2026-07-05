@@ -12,7 +12,7 @@ import numpy as np
 from pathlib import Path
 from typing import Optional
 
-from database import VoiceProfile, VoiceClip
+from database import VoiceProfile, VoiceClip, utcnow_naive
 
 # app.py's BASE_DIR (Path(__file__).parent.resolve()) is the project root;
 # this file lives one level down in services/, so parent.parent gets back
@@ -185,7 +185,7 @@ class VoiceIdentificationService:
             profile.embedding = np.mean(stacked, axis=0).tolist()
             profile.sample_count = len(clips)
         profile.embedding_model = self.backend_name
-        profile.updated_at = datetime.datetime.utcnow()
+        profile.updated_at = utcnow_naive()
         db.commit()
 
     def identify(self, db, user_id: int, audio_path: str, threshold: float = 0.65) -> list[dict]:
