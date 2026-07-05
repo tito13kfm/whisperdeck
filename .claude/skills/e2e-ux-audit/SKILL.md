@@ -243,6 +243,41 @@ Report: `[PASS|FAIL|SKIPPED(reason)] Journey 3: Voice roster`
 
 Log any findings noticed during steps 1-7 using the Findings format.
 
+## Journey 4: Wrap-up-the-meeting flow
+
+Same Lemonade gate as the scripted skill's summarize/correct/context
+scenarios; if `$lemonade_available` is `$false`,
+`SKIPPED(Lemonade unreachable)`. Uses `$J1_TRANSCRIPT_ID` from Journey 1.
+
+The issue #2 placeholder-API-key workaround was already applied in
+Setup step 7 — do not reapply here.
+
+1. On `$J1_TRANSCRIPT_ID`, trigger "Re-run correction" with
+   provider `local`, model `gpt-oss-20b-mxfp4-GGUF`. Poll until the job
+   reaches a terminal status.
+   - Watch: while the job runs, is there any visible indication a
+     background job is in progress (spinner, disabled button, status
+     text), or does the button just look clickable/idle the whole time?
+2. Add a short context document (a sentence or two naming a term/person
+   in the transcript) via the "Add context" control.
+3. Re-run correction again (same as step 1).
+4. Trigger "Summarize" with the same provider/model. Poll until
+   terminal status.
+   - Watch: once summarize completes, is the summary immediately visible
+     without extra navigation, or does the user have to hunt for it?
+5. With the correction and summary results visible, look for any
+   export, copy, download, or share affordance for either the corrected
+   transcript or the summary.
+   - Watch: this is genuinely unexplored territory — the scripted skill
+     never checked for this. If no such control exists anywhere in the
+     detail view, log an `unreachable-feature` finding noting that a
+     real user has no way to get their meeting notes out of the app
+     short of manually selecting text.
+
+Report: `[PASS|FAIL|SKIPPED(reason)] Journey 4: Wrap-up flow`
+
+Log any findings noticed during steps 1-5 using the Findings format.
+
 ## Teardown
 
 Run this after all journeys, even if some failed:
