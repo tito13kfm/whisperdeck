@@ -1423,7 +1423,7 @@ async function loadTranscripts() {
       <div class="page-status" id="bank-status" style="color:${GREEN}">${ledDot(GREEN, true, 9)}${list.length} channels · ${active} active</div>
     </div>
     <div style="display:flex;gap:10px;margin-bottom:14px;padding:0 4px">
-      <input id="bank-search" class="inp" type="text" placeholder="Search title or filename…" value="${escapeHtml(S.bankQuery || '')}" style="font-size:12px;padding:8px 10px;flex:1;max-width:320px">
+      <input id="bank-search" class="inp" type="text" placeholder="Search title or filename…" value="${escapeHtml(S.bankQuery || '')}" style="font-size:12px;padding:8px 10px 8px 16px;flex:1;max-width:320px">
       <select id="bank-sort" class="inp" style="font-size:12px;padding:8px 10px">
         <option value="date-desc" ${(!S.bankSort || S.bankSort === 'date-desc') ? 'selected' : ''}>Newest first</option>
         <option value="date-asc" ${S.bankSort === 'date-asc' ? 'selected' : ''}>Oldest first</option>
