@@ -9,7 +9,7 @@ it, the runner re-reads it between batches).
 import asyncio
 import datetime
 
-from database import LlmJob, Transcript, VoiceProfile
+from database import LlmJob, Transcript, VoiceProfile, utcnow_naive
 from services.audio_prep import extract_clips_concat
 from services.voice_id import voice_id_service
 
@@ -100,7 +100,7 @@ def cancel_llm_job(db, user_id: int, job_id: int) -> LlmJob:
         raise ValueError(f"Cannot cancel a job with status '{job.status}'")
     # pending dies instantly; a running correction notices between batches.
     job.status = "cancelled"
-    job.updated_at = datetime.datetime.utcnow()
+    job.updated_at = utcnow_naive()
     db.commit()
     return job
 
@@ -121,7 +121,7 @@ def _finish(db, job: LlmJob, status: str, error: str | None = None) -> None:
         return
     job.status = status
     job.error = error
-    job.updated_at = datetime.datetime.utcnow()
+    job.updated_at = utcnow_naive()
     db.commit()
 
 
@@ -202,7 +202,7 @@ async def run_llm_job(SessionLocal, job_id: int, transcription_service, diarizat
                 )
                 transcript.segments = merged
                 transcript.speaker_count = speaker_count
-                transcript.updated_at = datetime.datetime.utcnow()
+                transcript.updated_at = utcnow_naive()
                 job.progress_done = 1
                 db.commit()
                 _finish(db, job, "completed")
@@ -250,7 +250,7 @@ async def run_llm_job(SessionLocal, job_id: int, transcription_service, diarizat
                 job.progress_done = i + 1
                 db.commit()
             transcript.segments = new_segments
-            transcript.updated_at = datetime.datetime.utcnow()
+            transcript.updated_at = utcnow_naive()
             db.commit()
             error = f"{skipped} segment(s) skipped (extraction/embedding failed)" if skipped else None
             _finish(db, job, "completed", error)
@@ -286,7 +286,7 @@ async def llm_worker_tick(SessionLocal, transcription_service, diarization_servi
             return
         for job in claimed:
             job.status = "running"
-            job.updated_at = datetime.datetime.utcnow()
+            job.updated_at = utcnow_naive()
         db.commit()  # claim lands before any await — same invariant as the chunk queue
         job_ids = [job.id for job in claimed]
     finally:

@@ -22,7 +22,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 from sqlalchemy.orm import Session
 
-from database import init_db, backfill_user_id, Transcript, Summary, VoiceProfile, VoiceClip, ProviderConfig, User, LlmJob
+from database import init_db, backfill_user_id, Transcript, Summary, VoiceProfile, VoiceClip, ProviderConfig, User, LlmJob, utcnow_naive
 from services.auth import get_or_create_fallback_user, create_user, authenticate_user
 from services.settings import get_user_settings, update_user_settings
 from services.transcription import TranscriptionService
@@ -586,7 +586,7 @@ async def transcribe_audio(
     """Upload and transcribe an audio file."""
     # Save uploaded file
     file_ext = os.path.splitext(file.filename or "audio.mp3")[1] or ".mp3"
-    safe_name = f"{datetime.datetime.utcnow().strftime('%Y%m%d_%H%M%S')}_{hash(file.filename or 'audio')}{file_ext}"
+    safe_name = f"{utcnow_naive().strftime('%Y%m%d_%H%M%S')}_{hash(file.filename or 'audio')}{file_ext}"
     save_path = UPLOAD_DIR / safe_name
 
     with open(save_path, "wb") as f:
@@ -669,7 +669,7 @@ async def update_transcript(transcript_id: int, data: dict = Body(...), db: Sess
         t.segments = data["segments"]
     if "full_text" in data:
         t.full_text = data["full_text"]
-    t.updated_at = datetime.datetime.utcnow()
+    t.updated_at = utcnow_naive()
     db.commit()
     return _serialize_transcript(db, t)
 
@@ -812,7 +812,7 @@ async def rename_transcript_speaker(
             for line in t.corrected_text.splitlines()
         )
 
-    t.updated_at = datetime.datetime.utcnow()
+    t.updated_at = utcnow_naive()
     db.commit()
     return {"renamed": renamed, "transcript": _serialize_transcript(db, t)}
 
@@ -850,7 +850,7 @@ async def retag_transcript_segments(
         for i, seg in enumerate(segments)
     ]
     t.segments = new_segments
-    t.updated_at = datetime.datetime.utcnow()
+    t.updated_at = utcnow_naive()
     db.commit()
     return {"retagged": len(index_set), "transcript": _serialize_transcript(db, t)}
 
@@ -900,7 +900,7 @@ async def enroll_speaker_from_transcript(
             db.add(profile)
             db.commit()
             profile_created_here = True
-        permanent_path = VOICES_DIR / f"clip_{profile.id}_{datetime.datetime.utcnow().strftime('%Y%m%d_%H%M%S%f')}.wav"
+        permanent_path = VOICES_DIR / f"clip_{profile.id}_{utcnow_naive().strftime('%Y%m%d_%H%M%S%f')}.wav"
         shutil.copyfile(sample_path, permanent_path)
         clip = voice_id_service.add_clip(db, profile.id, current_user.id, str(permanent_path),
                                           source_transcript_id=t.id)
@@ -942,7 +942,7 @@ async def diarize_audio(
 ):
     """Run speaker diarization on an audio file."""
     file_ext = os.path.splitext(file.filename or "audio.mp3")[1] or ".mp3"
-    safe_name = f"diar_{datetime.datetime.utcnow().strftime('%Y%m%d_%H%M%S')}{file_ext}"
+    safe_name = f"diar_{utcnow_naive().strftime('%Y%m%d_%H%M%S')}{file_ext}"
     save_path = UPLOAD_DIR / safe_name
 
     with open(save_path, "wb") as f:
@@ -1236,7 +1236,7 @@ async def enroll_voice(
 ):
     """Enroll a new speaker from an audio sample."""
     file_ext = os.path.splitext(file.filename or "voice.wav")[1] or ".wav"
-    safe_name = f"enroll_{name}_{datetime.datetime.utcnow().strftime('%Y%m%d_%H%M%S')}{file_ext}"
+    safe_name = f"enroll_{name}_{utcnow_naive().strftime('%Y%m%d_%H%M%S')}{file_ext}"
     save_path = VOICES_DIR / safe_name
 
     with open(save_path, "wb") as f:
@@ -1265,7 +1265,7 @@ async def identify_speaker(
 ):
     """Identify a speaker from an audio sample against enrolled profiles."""
     file_ext = os.path.splitext(file.filename or "voice.wav")[1] or ".wav"
-    safe_name = f"ident_{datetime.datetime.utcnow().strftime('%Y%m%d_%H%M%S')}{file_ext}"
+    safe_name = f"ident_{utcnow_naive().strftime('%Y%m%d_%H%M%S')}{file_ext}"
     save_path = VOICES_DIR / safe_name
 
     with open(save_path, "wb") as f:
@@ -1301,7 +1301,7 @@ async def add_voice_clip(
     """Add one clip to an existing roster profile — recomputes the
     profile's match embedding as the mean of all its clips."""
     file_ext = os.path.splitext(file.filename or "clip.wav")[1] or ".wav"
-    safe_name = f"clip_{profile_id}_{datetime.datetime.utcnow().strftime('%Y%m%d_%H%M%S%f')}{file_ext}"
+    safe_name = f"clip_{profile_id}_{utcnow_naive().strftime('%Y%m%d_%H%M%S%f')}{file_ext}"
     save_path = VOICES_DIR / safe_name
     with open(save_path, "wb") as f:
         f.write(await file.read())

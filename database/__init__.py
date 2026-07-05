@@ -9,6 +9,11 @@ from sqlalchemy.orm import declarative_base, relationship, sessionmaker
 Base = declarative_base()
 
 
+def utcnow_naive():
+    """Current UTC time as a naive datetime (datetime.utcnow() is deprecated)."""
+    return datetime.datetime.now(datetime.UTC).replace(tzinfo=None)
+
+
 class User(Base):
     __tablename__ = "users"
 
@@ -17,7 +22,7 @@ class User(Base):
     password_hash = Column(String(128), nullable=False)
     password_salt = Column(String(64), nullable=False)
     settings = Column(JSON, default=dict)
-    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+    created_at = Column(DateTime, default=utcnow_naive)
 
 
 class Transcript(Base):
@@ -43,8 +48,8 @@ class Transcript(Base):
     corrected_text = Column(Text, nullable=True)
     correction_error = Column(Text, nullable=True)
     correction_model = Column(String(128), nullable=True)  # e.g. "groq/llama-3.3-70b-versatile"
-    created_at = Column(DateTime, default=datetime.datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
+    created_at = Column(DateTime, default=utcnow_naive)
+    updated_at = Column(DateTime, default=utcnow_naive, onupdate=utcnow_naive)
 
     summary = relationship("Summary", back_populates="transcript", uselist=False, cascade="all, delete-orphan")
     jobs = relationship("TranscriptionJob", back_populates="transcript", cascade="all, delete-orphan")
@@ -63,8 +68,8 @@ class TranscriptionJob(Base):
     attempts = Column(Integer, default=0)
     error = Column(Text, nullable=True)
     result_json = Column(JSON, nullable=True)  # raw {segments, full_text, language, model} once completed
-    created_at = Column(DateTime, default=datetime.datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
+    created_at = Column(DateTime, default=utcnow_naive)
+    updated_at = Column(DateTime, default=utcnow_naive, onupdate=utcnow_naive)
 
     transcript = relationship("Transcript", back_populates="jobs")
 
@@ -84,8 +89,8 @@ class LlmJob(Base):
     provider = Column(String(64), default="")
     model = Column(String(128), default="")
     error = Column(Text, nullable=True)
-    created_at = Column(DateTime, default=datetime.datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
+    created_at = Column(DateTime, default=utcnow_naive)
+    updated_at = Column(DateTime, default=utcnow_naive, onupdate=utcnow_naive)
 
 
 class HotwordEntry(Base):
@@ -95,7 +100,7 @@ class HotwordEntry(Base):
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     term = Column(String(255), nullable=False)
     source = Column(String(16), default="manual")  # "manual" | "extracted"
-    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+    created_at = Column(DateTime, default=utcnow_naive)
 
 
 class Summary(Base):
@@ -108,7 +113,7 @@ class Summary(Base):
     action_items = Column(JSON, default=list)
     decisions = Column(JSON, default=list)
     model = Column(String(64), default="")
-    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+    created_at = Column(DateTime, default=utcnow_naive)
 
     transcript = relationship("Transcript", back_populates="summary")
 
@@ -124,8 +129,8 @@ class VoiceProfile(Base):
     embedding_model = Column(String(64), default="speechbrain/spkrec-ecapa-voxceleb")
     sample_count = Column(Integer, default=0)
     notes = Column(Text, default="")
-    created_at = Column(DateTime, default=datetime.datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
+    created_at = Column(DateTime, default=utcnow_naive)
+    updated_at = Column(DateTime, default=utcnow_naive, onupdate=utcnow_naive)
 
 
 class VoiceClip(Base):
@@ -139,7 +144,7 @@ class VoiceClip(Base):
     audio_path = Column(String(512), nullable=False)
     embedding = Column(JSON, nullable=False)  # this clip's own embedding, list of floats
     source_transcript_id = Column(Integer, ForeignKey("transcripts.id"), nullable=True)
-    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+    created_at = Column(DateTime, default=utcnow_naive)
 
 
 class ProviderConfig(Base):
