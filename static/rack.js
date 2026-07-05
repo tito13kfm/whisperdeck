@@ -10,6 +10,8 @@ const S = {
   detailId: null,
   detailTab: 'transcript',
   query: '',
+  bankQuery: '',
+  bankSort: 'date-desc',
   // transcribe
   tapeLoaded: false,
   tapeName: '',
@@ -1372,6 +1374,7 @@ function finishLiveCapture() {
 }
 /* ══════════════════ channel bank ══════════════════ */
 let bankPollTimer = null;
+let bankListCache = [];
 
 // Per-state expanded fields — only values the API actually provides.
 function bankDetailFields(t, sv) {
@@ -1410,10 +1413,92 @@ async function loadTranscripts() {
     list = await api('/api/transcripts?limit=100');
   } catch (e) { toast(e.message, 'error'); return; }
 
+  bankListCache = list;
   const active = list.filter(t => t.status === 'processing').length;
   const openIds = new Set([...root.querySelectorAll('details[open]')].map(d => d.dataset.tid));
 
-  const rows = list.map(t => {
+  root.innerHTML = `
+    <div class="page-head">
+      <h1 class="t-title">Tape library</h1>
+      <div class="page-status" id="bank-status" style="color:${GREEN}">${ledDot(GREEN, true, 9)}${list.length} channels · ${active} active</div>
+    </div>
+    <div style="display:flex;gap:10px;margin-bottom:14px;padding:0 4px">
+      <input id="bank-search" class="inp" type="text" placeholder="Search title or filename…" value="${escapeHtml(S.bankQuery || '')}" style="font-size:12px;padding:8px 10px;flex:1;max-width:320px">
+      <select id="bank-sort" class="inp" style="font-size:12px;padding:8px 10px">
+        <option value="date-desc" ${(!S.bankSort || S.bankSort === 'date-desc') ? 'selected' : ''}>Newest first</option>
+        <option value="date-asc" ${S.bankSort === 'date-asc' ? 'selected' : ''}>Oldest first</option>
+        <option value="title-asc" ${S.bankSort === 'title-asc' ? 'selected' : ''}>Title A–Z</option>
+      </select>
+    </div>
+    <div id="bank-rows"></div>`;
+
+  renderBankRows(openIds);
+
+  $('bank-search').addEventListener('input', () => {
+    S.bankQuery = $('bank-search').value;
+    renderBankRows();
+  });
+  $('bank-sort').addEventListener('change', () => {
+    S.bankSort = $('bank-sort').value;
+    renderBankRows();
+  });
+
+  // Delegated on the stable `root` node (not per-row) so it keeps working
+  // after renderBankRows() replaces #bank-rows' contents. Assignment (not
+  // addEventListener) so it doesn't stack a duplicate handler on every poll.
+  root.onclick = async (e) => {
+    const b = e.target.closest('[data-act]');
+    if (!b) return;
+    e.preventDefault();
+    const id = Number(b.dataset.id), act = b.dataset.act;
+    try {
+      if (act === 'open') { navigate('detail', id); return; }
+      if (act === 'cancel') { await api('/api/transcripts/' + id + '/cancel', { method: 'POST' }); toast('Cancelled — resumable later', 'info'); }
+      if (act === 'resume') { const r = await api('/api/transcripts/' + id + '/resume', { method: 'POST' }); toast('Resumed ' + r.resumed + ' sections', 'info'); }
+      if (act === 'retry') { const r = await api('/api/transcripts/' + id + '/retry-failed-chunks', { method: 'POST' }); toast('Retrying ' + r.retried + ' sections', 'info'); }
+      if (act === 'delete') {
+        if (!(await styledConfirm('Delete this transcript permanently?'))) return;
+        await api('/api/transcripts/' + id, { method: 'DELETE' });
+        toast('Transcript deleted');
+      }
+      loadTranscripts();
+    } catch (err) { toast(err.message, 'error'); }
+  };
+
+  clearTimeout(bankPollTimer);
+  if (active > 0 && S.page === 'transcripts') {
+    bankPollTimer = setTimeout(() => { if (S.page === 'transcripts') loadTranscripts(); }, 4000);
+  }
+}
+
+function renderBankRows(preservedOpenIds) {
+  const rowsContainer = $('bank-rows');
+  const openIds = preservedOpenIds || new Set([...rowsContainer.querySelectorAll('details[open]')].map(d => d.dataset.tid));
+
+  const q = (S.bankQuery || '').trim().toLowerCase();
+  const filtered = q
+    ? bankListCache.filter(t => (t.title || '').toLowerCase().includes(q) || (t.filename || '').toLowerCase().includes(q))
+    : bankListCache.slice();
+  const sortFns = {
+    'date-desc': (a, b) => new Date(b.created_at) - new Date(a.created_at),
+    'date-asc': (a, b) => new Date(a.created_at) - new Date(b.created_at),
+    'title-asc': (a, b) => (a.title || a.filename || '').localeCompare(b.title || b.filename || ''),
+  };
+  filtered.sort(sortFns[S.bankSort || 'date-desc']);
+
+  const statusEl = $('bank-status');
+  if (statusEl) statusEl.innerHTML = `${ledDot(GREEN, true, 9)}${filtered.length} of ${bankListCache.length} channels`;
+
+  if (!bankListCache.length) {
+    rowsContainer.innerHTML = '<div class="empty-unit">No signals on the bank — load a tape on the Transcribe deck</div>';
+    return;
+  }
+  if (!filtered.length) {
+    rowsContainer.innerHTML = '<div class="empty-unit">No transcripts match your search</div>';
+    return;
+  }
+
+  rowsContainer.innerHTML = filtered.map(t => {
     const sv = statusView(t);
     const fields = bankDetailFields(t, sv);
     const acts = ['<button class="btn" style="font-size:12px;padding:6px 12px;border-color:var(--inset-edge)" data-act="open" data-id="' + t.id + '">Open transcript</button>'];
@@ -1446,35 +1531,6 @@ async function loadTranscripts() {
       </div>
     </details>`;
   }).join('');
-
-  root.innerHTML = `
-    <div class="page-head">
-      <h1 class="t-title">Tape library</h1>
-      <div class="page-status" style="color:${GREEN}">${ledDot(GREEN, true, 9)}${list.length} channels · ${active} active</div>
-    </div>
-    ${list.length ? rows : '<div class="empty-unit">No signals on the bank — load a tape on the Transcribe deck</div>'}`;
-
-  root.querySelectorAll('[data-act]').forEach(b => b.addEventListener('click', async (e) => {
-    e.preventDefault();
-    const id = Number(b.dataset.id), act = b.dataset.act;
-    try {
-      if (act === 'open') { navigate('detail', id); return; }
-      if (act === 'cancel') { await api('/api/transcripts/' + id + '/cancel', { method: 'POST' }); toast('Cancelled — resumable later', 'info'); }
-      if (act === 'resume') { const r = await api('/api/transcripts/' + id + '/resume', { method: 'POST' }); toast('Resumed ' + r.resumed + ' sections', 'info'); }
-      if (act === 'retry') { const r = await api('/api/transcripts/' + id + '/retry-failed-chunks', { method: 'POST' }); toast('Retrying ' + r.retried + ' sections', 'info'); }
-      if (act === 'delete') {
-        if (!(await styledConfirm('Delete this transcript permanently?'))) return;
-        await api('/api/transcripts/' + id, { method: 'DELETE' });
-        toast('Transcript deleted');
-      }
-      loadTranscripts();
-    } catch (err) { toast(err.message, 'error'); }
-  }));
-
-  clearTimeout(bankPollTimer);
-  if (active > 0 && S.page === 'transcripts') {
-    bankPollTimer = setTimeout(() => { if (S.page === 'transcripts') loadTranscripts(); }, 4000);
-  }
 }
 
 /* ══════════════════ master job queue ══════════════════ */
