@@ -1426,10 +1426,11 @@ async function loadTranscripts() {
     acts.push('<button class="btn btn--red" style="font-size:12px;padding:6px 12px" data-act="delete" data-id="' + t.id + '">Delete</button>');
     return `
     <details class="unit" data-tid="${t.id}" ${openIds.has(String(t.id)) ? 'open' : ''}>
-      <summary style="list-style:none;cursor:pointer;padding:12px 22px 12px 34px;display:grid;grid-template-columns:1fr 190px 112px;align-items:center;gap:16px">
+      <summary style="list-style:none;cursor:pointer;padding:12px 22px 12px 34px;display:grid;grid-template-columns:16px 1fr 190px 112px;align-items:center;gap:16px">
+        <span class="row-chevron" style="font-family:var(--f-mono);font-size:11px;color:var(--label-dim)" title="Click row to expand details">▸</span>
         <div style="min-width:0">
           <div style="font-weight:600;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(t.title || t.filename || 'Untitled')}</div>
-          <div style="font-family:var(--f-mono);font-size:11px;color:var(--label-dim);margin-top:2px">${escapeHtml(transcriptMeta(t))}</div>
+          <div style="font-family:var(--f-mono);font-size:11px;color:var(--label-dim);margin-top:2px">${escapeHtml(transcriptMeta(t))} · click to expand</div>
         </div>
         ${bargraph(sv.cells, 16)}
         <div style="display:flex;flex-direction:column;align-items:flex-end;gap:3px">

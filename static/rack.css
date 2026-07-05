@@ -535,3 +535,7 @@ textarea.inp { resize: vertical; }
 }
 body.no-motion .vfd > span.scroll { animation: none; }
 body.no-motion .reel-anim { animation: none !important; }
+
+/* tape library row expand-vs-open visual cue */
+details.unit[open] > summary .row-chevron { transform: rotate(90deg); }
+.row-chevron { display: inline-block; transition: transform 0.15s ease; }
