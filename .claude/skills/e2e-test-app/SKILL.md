@@ -14,6 +14,18 @@ Report format: after every scenario, emit one line:
 `[PASS|FAIL|SKIPPED(reason)] Scenario N: <name>`
 Continue to the next scenario on failure. Never abort the run early.
 
+## Validation status
+
+All "Confirmed live" / "Real run result" evidence in this file comes from
+direct HTTP API calls against the isolated server — no implementer
+subagent had a live browser/Playwright tool available while authoring
+this skill. UI selectors and click sequences described throughout are
+transcribed from reading the frontend source (`static/rack.js`,
+`static/index.html`), not exercised through a real browser. A future
+agent running this skill with a real Playwright MCP tool should treat
+the DOM/UI-interaction steps as unverified until run for real, even
+though the underlying backend behavior they trigger has been confirmed.
+
 ## Setup
 
 1. Pick an isolated data dir and port. On Windows PowerShell:
@@ -197,6 +209,13 @@ Only runs if Setup launched Chromium with
 `--use-file-for-fake-audio-capture`; otherwise `SKIPPED(no fixture/fake
 device)`.
 
+Note: unlike every other scenario in this file, this one has zero live
+evidence behind it in any form — not even indirectly via API. It was
+never exercised during this plan's authoring (no live browser tool was
+available; see "Validation status" above). Expect this to be the primary
+residual gap for whoever first runs this skill with a real Playwright
+browser tool.
+
 1. Trigger the "Live capture" control — `#key-rec` (`static/rack.js:686`
    defines the deck key, `static/rack.js:833` wires its click handler,
    `static/rack.js:975` toggles its title between "Live capture — asks
@@ -296,10 +315,12 @@ Report: `[PASS|FAIL] Scenario 8: Cancel/resume/retry`
 2. Poll until the new transcript's status is `completed` (or `failed`/
    `partial`).
    - Check: **retranscribe creates a brand-new transcript row, not a second
-     job under the original ID** — confirmed live: `$TRANSCRIPT_ID` (e.g.
-     id 2, model `base`) was untouched, and `POST
-     /api/transcripts/{id}/retranscribe` returned a new transcript (id 5,
-     same title, model `tiny`). The correct check is: `GET
+     job under the original ID** — confirmed live: `$TRANSCRIPT_ID` (id 1,
+     model `base`, per Scenario 5) was untouched, and `POST
+     /api/transcripts/{id}/retranscribe` returned a new transcript (a
+     different id than both `$TRANSCRIPT_ID` and
+     `$TRANSCRIPT_ID_DIARIZE`, e.g. id 3, same title, model `tiny`). The
+     correct check is: `GET
      /api/transcripts` now lists both the original `$TRANSCRIPT_ID` and the
      new transcript, sharing the same title/source audio but different
      `model`/`id` — not "job history shows two completed runs for this
