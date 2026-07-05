@@ -300,7 +300,7 @@ Report: `[PASS|FAIL] Scenario 8: Cancel/resume/retry`
 
 Report: `[PASS|FAIL] Scenario 9: Retranscribe`
 
-## Scenario 10: Diarization (standalone trigger + rediarize)
+## Scenario 10: Diarization (upload-time toggle + rediarize)
 
 Requires `$TRANSCRIPT_ID` to have been transcribed from a genuinely
 multi-speaker fixture. If Scenario 5 fell back to `test.mp4` (single
@@ -308,14 +308,26 @@ speaker, 3 seconds), mark this `SKIPPED(no multispeaker fixture)` and do
 not attempt it — a single-speaker recording cannot validate speaker
 separation.
 
-1. Trigger the standalone diarize action on `$TRANSCRIPT_ID`.
-   - Check: use the rediarize button at `static/rack.js:1937`
-     (`data-dact="rediarize"`, calls `POST /api/transcripts/{id}/rediarize`
-     at `app.py:1030`).
-2. Poll until the diarization job completes.
-   - Check: segments now show more than one distinct speaker label.
-3. Trigger "rediarize".
-   - Check: it re-runs and completes without error.
+There is no standalone post-hoc "diarize" trigger separate from
+rediarize — the only two distinct diarization actions in the app are the
+upload-time "Speakers" toggle and the post-hoc "Re-diarize" button.
+
+1. Start a fresh upload of the same multispeaker fixture used in
+   Scenario 5, explicitly enabling diarization first: click the
+   "Speakers" toggle at `static/rack.js:769-771` (`id="ctl-diarize"`,
+   `tog-diarize`) before submitting, then submit the upload.
+   - Check: poll until the job reaches a terminal status (same pattern as
+     Scenario 5), then confirm the completed transcript's segments show
+     more than one distinct speaker label — i.e. diarization ran as part
+     of the upload because the toggle was on.
+   - Record this transcript's ID as `$TRANSCRIPT_ID_DIARIZE` (throwaway,
+     not reused later).
+2. On `$TRANSCRIPT_ID` (the existing transcript from Scenario 5), trigger
+   "Re-diarize" — detail-view button at `static/rack.js:1937`
+   (`data-dact="rediarize"`), calling `POST
+   /api/transcripts/{id}/rediarize` at `app.py:1030`.
+   - Check: it re-runs and completes without error, and segments still
+     show more than one distinct speaker label afterward.
 
 Report: `[PASS|FAIL|SKIPPED(reason)] Scenario 10: Diarization`
 
@@ -353,14 +365,15 @@ Same fixture gate as Scenario 10.
      profile named `Alice` (or as entered) appears under `GET /api/voices`
      at `app.py:1223`.
 2. Upload a second transcript from the same multispeaker fixture (or a
-   different clip containing the same voice).
-3. Trigger "identify" against the voice bank on this new transcript.
+   different clip containing the same voice). Record its ID as
+   `$TRANSCRIPT_ID_2`.
+3. Trigger "identify" against the voice bank on `$TRANSCRIPT_ID_2`.
    - Check: navigate to the Voice Roster view and click the "Identify a voice…"
      button at `rack.js:2295`. This calls `POST /api/voices/identify` at
      `app.py:1259`. Or, trigger "Match against voice roster" button in the
      detail view at `rack.js:1938` (data-dact="voicematch"), which calls
      `POST /api/transcripts/{id}/voice-match` at `app.py:1061`. At least
-     one segment in the new transcript gets matched/labeled against the
+     one segment in `$TRANSCRIPT_ID_2` gets matched/labeled against the
      enrolled `Alice` profile.
 4. Delete the enrolled voice profile.
    - Check: in the Voice Roster view, trigger the delete button for the
