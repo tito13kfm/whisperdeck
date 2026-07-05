@@ -1706,6 +1706,9 @@ function segmentsHtml(t) {
 /* ── per-line playback, seed flags, speaker rename ── */
 
 function detailBodyClick(e) {
+  const copyBtn = e.target.closest('[data-export-copy]');
+  const dlBtn = e.target.closest('[data-export-dl]');
+  if (copyBtn || dlBtn) { handleExportClick((copyBtn || dlBtn).dataset.exportCopy || (copyBtn || dlBtn).dataset.exportDl, !!copyBtn); return; }
   const play = e.target.closest('[data-seg-play]');
   if (play) { segPlay(play); return; }
   const seed = e.target.closest('[data-seg-seed]');
@@ -1903,6 +1906,64 @@ function jobRunningUnit(job, label) {
   </div>`;
 }
 
+function transcriptPlainText(t) {
+  const lines = (t.segments || [])
+    .map(sg => (sg.speaker ? sg.speaker + ': ' : '') + (sg.text || '').trim())
+    .filter(Boolean);
+  return lines.length ? lines.join('\n') : (t.full_text || '').trim();
+}
+
+async function copyToClipboard(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    toast('Copied to clipboard', 'info');
+  } catch (e) {
+    toast('Copy failed: ' + e.message, 'error');
+  }
+}
+
+function downloadTextFile(filename, text) {
+  const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+function exportToolbarHtml(kind) {
+  return '<div style="display:flex;justify-content:flex-end;gap:8px;padding:0 32px 10px">' +
+    '<button class="btn" data-export-copy="' + kind + '" style="font-size:11px;padding:6px 12px;border-color:var(--inset-edge)">Copy</button>' +
+    '<button class="btn" data-export-dl="' + kind + '" style="font-size:11px;padding:6px 12px;border-color:var(--inset-edge)">Download .txt</button></div>';
+}
+
+async function summaryPlainText(transcriptId) {
+  const s = await api('/api/transcripts/' + transcriptId + '/summary');
+  const sections = [
+    ['Summary', s.short_summary ? [s.short_summary] : []],
+    ['Key points', s.key_points || []],
+    ['Action items', s.action_items || []],
+    ['Decisions', s.decisions || []],
+  ].filter(([, items]) => items.length);
+  return sections.map(([title, items]) => title + '\n' + items.map(it => '- ' + it).join('\n')).join('\n\n');
+}
+
+async function handleExportClick(kind, copy) {
+  const t = detailData;
+  let text = '';
+  if (kind === 'transcript') text = transcriptPlainText(t);
+  else if (kind === 'corrected') text = t.corrected_text || '';
+  else if (kind === 'summary') {
+    try { text = await summaryPlainText(t.id); }
+    catch (e) { toast('Could not load summary to export: ' + e.message, 'error'); return; }
+  }
+  if (copy) copyToClipboard(text);
+  else downloadTextFile((t.title || t.filename || 'transcript').replace(/[^\w.-]+/g, '_') + '-' + kind + '.txt', text);
+}
+
 function correctedHtml(t) {
   if (llmJobActive(t.correction_job)) return jobRunningUnit(t.correction_job, 'Correction');
   if (t.correction_error) {
@@ -2068,13 +2129,13 @@ async function renderDetailBody() {
         }
       } catch { /* roster fetch failing is non-fatal — just skip the nudge */ }
     }
-    body.innerHTML = vm + nudge + '<div class="unit" style="border-radius:3px;margin-top:' + (vm || nudge ? '10px' : '0') + ';padding:6px 32px">' + segmentsHtml(t) + '</div>';
+    body.innerHTML = vm + nudge + exportToolbarHtml('transcript') + '<div class="unit" style="border-radius:3px;margin-top:' + (vm || nudge ? '10px' : '0') + ';padding:6px 32px">' + segmentsHtml(t) + '</div>';
     body.querySelectorAll('[data-dact]').forEach(b => b.addEventListener('click', () => detailAction(b.dataset.dact)));
   } else if (S.detailTab === 'corrected') {
-    body.innerHTML = correctedHtml(t);
+    body.innerHTML = (t.corrected_text ? exportToolbarHtml('corrected') : '') + correctedHtml(t);
   } else {
     body.innerHTML = '<div class="empty-unit">Loading summary…</div>';
-    body.innerHTML = await summaryHtml(t);
+    body.innerHTML = (t.has_summary ? exportToolbarHtml('summary') : '') + await summaryHtml(t);
   }
 }
 
