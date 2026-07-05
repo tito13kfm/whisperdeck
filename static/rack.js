@@ -10,6 +10,8 @@ const S = {
   detailId: null,
   detailTab: 'transcript',
   query: '',
+  bankQuery: '',
+  bankSort: 'date-desc',
   // transcribe
   tapeLoaded: false,
   tapeName: '',
@@ -211,7 +213,7 @@ function armVfdMarquees(rootEl) {
 }
 
 /* ── the ONE status→presentation mapping used by every transcript view ──
-   (Monitor recents, Channel bank rows, detail meta must always agree.) */
+   (Monitor recents, Tape library rows, detail meta must always agree.) */
 const GREEN = '#5FCB7A', AMBER = '#E0A83E', RED = '#E0554A';
 // Percent is derived, not stored: chunked jobs report chunks_done/chunks_total
 // (queue_status while processing, job_progress otherwise); single-shot jobs
@@ -292,8 +294,59 @@ function openModal(html) {
   $('modal-overlay').classList.add('open');
 }
 function closeModal() {
+  // Any dismissal path that closes the modal without an explicit button-click
+  // resolver (Escape key, clicking the overlay backdrop) must still settle the
+  // pending styledConfirm/styledPrompt Promise, or the awaiting coroutine hangs
+  // forever. Button-click handlers clear pendingStyledModal to null themselves
+  // (and resolve with their own value) before calling closeModal(), so this is
+  // a no-op in that case.
+  if (pendingStyledModal) {
+    const { resolve, cancelValue } = pendingStyledModal;
+    pendingStyledModal = null;
+    resolve(cancelValue);
+  }
   $('modal-overlay').classList.remove('open');
   $('modal-box').innerHTML = '';
+}
+
+// Tracks the pending styledConfirm/styledPrompt resolver (and its cancel value
+// used for non-button dismissals) so closeModal() can settle the Promise
+// instead of leaving the awaiting coroutine suspended forever. Cleared
+// whenever the modal resolves via a button click (before closeModal() runs).
+let pendingStyledModal = null;
+
+function styledConfirm(message) {
+  return new Promise(resolve => {
+    openModal(`
+      <div style="font-family:var(--f-cond);font-weight:700;font-size:16px;text-transform:uppercase;letter-spacing:0.04em;margin-bottom:14px">${escapeHtml(message)}</div>
+      <div style="display:flex;justify-content:flex-end;gap:8px">
+        <button class="btn" id="styled-confirm-cancel" style="font-size:12px;border-color:var(--inset-edge)">Cancel</button>
+        <button class="btn btn--red" id="styled-confirm-ok" style="font-size:12px">Confirm</button>
+      </div>`);
+    pendingStyledModal = { resolve, cancelValue: false };
+    $('styled-confirm-cancel').addEventListener('click', () => { pendingStyledModal = null; closeModal(); resolve(false); });
+    $('styled-confirm-ok').addEventListener('click', () => { pendingStyledModal = null; closeModal(); resolve(true); });
+  });
+}
+
+function styledPrompt(message, defaultValue) {
+  return new Promise(resolve => {
+    openModal(`
+      <div style="font-family:var(--f-cond);font-weight:700;font-size:16px;text-transform:uppercase;letter-spacing:0.04em;margin-bottom:12px">${escapeHtml(message)}</div>
+      <input class="inp" id="styled-prompt-input" type="text" value="${escapeHtml(defaultValue || '')}" style="font-size:13px;padding:8px 10px;width:100%;margin-bottom:16px">
+      <div style="display:flex;justify-content:flex-end;gap:8px">
+        <button class="btn" id="styled-prompt-cancel" style="font-size:12px;border-color:var(--inset-edge)">Cancel</button>
+        <button id="styled-prompt-ok" style="font-family:var(--f-mono);font-size:11px;font-weight:700;background:${AMBER};color:var(--amber-ink);border:none;padding:8px 14px;border-radius:2px;cursor:pointer">OK</button>
+      </div>`);
+    const input = $('styled-prompt-input');
+    input.focus();
+    input.select();
+    const submit = () => { const v = input.value; pendingStyledModal = null; closeModal(); resolve(v); };
+    pendingStyledModal = { resolve, cancelValue: null };
+    $('styled-prompt-cancel').addEventListener('click', () => { pendingStyledModal = null; closeModal(); resolve(null); });
+    $('styled-prompt-ok').addEventListener('click', submit);
+    input.addEventListener('keydown', e => { if (e.key === 'Enter') submit(); });
+  });
 }
 
 /* ══════════════════ auth ══════════════════ */
@@ -1321,6 +1374,7 @@ function finishLiveCapture() {
 }
 /* ══════════════════ channel bank ══════════════════ */
 let bankPollTimer = null;
+let bankListCache = [];
 
 // Per-state expanded fields — only values the API actually provides.
 function bankDetailFields(t, sv) {
@@ -1359,10 +1413,106 @@ async function loadTranscripts() {
     list = await api('/api/transcripts?limit=100');
   } catch (e) { toast(e.message, 'error'); return; }
 
+  bankListCache = list;
   const active = list.filter(t => t.status === 'processing').length;
   const openIds = new Set([...root.querySelectorAll('details[open]')].map(d => d.dataset.tid));
 
-  const rows = list.map(t => {
+  root.innerHTML = `
+    <div class="page-head">
+      <h1 class="t-title">Tape library</h1>
+      <div class="page-status" id="bank-status" style="color:${GREEN}">${ledDot(GREEN, true, 9)}${list.length} channels · ${active} active</div>
+    </div>
+    <div style="display:flex;gap:10px;margin-bottom:14px;padding:0 4px">
+      <input id="bank-search" class="inp" type="text" placeholder="Search title or filename…" value="${escapeHtml(S.bankQuery || '')}" style="font-size:12px;padding:8px 10px 8px 16px;flex:1;max-width:320px">
+      <select id="bank-sort" class="inp" style="font-size:12px;padding:8px 10px">
+        <option value="date-desc" ${(!S.bankSort || S.bankSort === 'date-desc') ? 'selected' : ''}>Newest first</option>
+        <option value="date-asc" ${S.bankSort === 'date-asc' ? 'selected' : ''}>Oldest first</option>
+        <option value="title-asc" ${S.bankSort === 'title-asc' ? 'selected' : ''}>Title A–Z</option>
+      </select>
+    </div>
+    <div id="bank-rows"></div>`;
+
+  renderBankRows(openIds);
+
+  $('bank-search').addEventListener('input', () => {
+    S.bankQuery = $('bank-search').value;
+    renderBankRows();
+  });
+  $('bank-sort').addEventListener('change', () => {
+    S.bankSort = $('bank-sort').value;
+    renderBankRows();
+  });
+
+  // Delegated on the stable `root` node (not per-row) so it keeps working
+  // after renderBankRows() replaces #bank-rows' contents. Assignment (not
+  // addEventListener) so it doesn't stack a duplicate handler on every poll.
+  root.onclick = async (e) => {
+    const b = e.target.closest('[data-act]');
+    if (!b) return;
+    e.preventDefault();
+    const id = Number(b.dataset.id), act = b.dataset.act;
+    try {
+      if (act === 'open') { navigate('detail', id); return; }
+      if (act === 'cancel') { await api('/api/transcripts/' + id + '/cancel', { method: 'POST' }); toast('Cancelled — resumable later', 'info'); }
+      if (act === 'resume') { const r = await api('/api/transcripts/' + id + '/resume', { method: 'POST' }); toast('Resumed ' + r.resumed + ' sections', 'info'); }
+      if (act === 'retry') { const r = await api('/api/transcripts/' + id + '/retry-failed-chunks', { method: 'POST' }); toast('Retrying ' + r.retried + ' sections', 'info'); }
+      if (act === 'rename') {
+        const row = bankListCache.find(x => x.id === id);
+        const name = await styledPrompt('Rename this transcript:', row ? (row.title || row.filename) : '');
+        if (name === null || !name.trim()) return;
+        const updated = await api('/api/transcripts/' + id, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title: name.trim() }) });
+        const idx = bankListCache.findIndex(x => x.id === id);
+        if (idx >= 0) bankListCache[idx] = updated;
+        renderBankRows();
+        toast('Renamed', 'info');
+        return;
+      }
+      if (act === 'delete') {
+        if (!(await styledConfirm('Delete this transcript permanently?'))) return;
+        await api('/api/transcripts/' + id, { method: 'DELETE' });
+        toast('Transcript deleted');
+      }
+      loadTranscripts();
+    } catch (err) { toast(err.message, 'error'); }
+  };
+
+  clearTimeout(bankPollTimer);
+  if (active > 0 && S.page === 'transcripts') {
+    bankPollTimer = setTimeout(() => { if (S.page === 'transcripts') loadTranscripts(); }, 4000);
+  }
+}
+
+function renderBankRows(preservedOpenIds) {
+  const rowsContainer = $('bank-rows');
+  const openIds = preservedOpenIds || new Set([...rowsContainer.querySelectorAll('details[open]')].map(d => d.dataset.tid));
+
+  const q = (S.bankQuery || '').trim().toLowerCase();
+  const filtered = q
+    ? bankListCache.filter(t => (t.title || '').toLowerCase().includes(q) || (t.filename || '').toLowerCase().includes(q))
+    : bankListCache.slice();
+  const sortFns = {
+    'date-desc': (a, b) => new Date(b.created_at) - new Date(a.created_at),
+    'date-asc': (a, b) => new Date(a.created_at) - new Date(b.created_at),
+    'title-asc': (a, b) => (a.title || a.filename || '').localeCompare(b.title || b.filename || ''),
+  };
+  filtered.sort(sortFns[S.bankSort || 'date-desc']);
+
+  const statusEl = $('bank-status');
+  if (statusEl) {
+    const activeCount = bankListCache.filter(t => t.status === 'processing').length;
+    statusEl.innerHTML = `${ledDot(GREEN, true, 9)}${filtered.length} of ${bankListCache.length} channels · ${activeCount} active`;
+  }
+
+  if (!bankListCache.length) {
+    rowsContainer.innerHTML = '<div class="empty-unit">No signals on the bank — load a tape on the Transcribe deck</div>';
+    return;
+  }
+  if (!filtered.length) {
+    rowsContainer.innerHTML = '<div class="empty-unit">No transcripts match your search</div>';
+    return;
+  }
+
+  rowsContainer.innerHTML = filtered.map(t => {
     const sv = statusView(t);
     const fields = bankDetailFields(t, sv);
     const acts = ['<button class="btn" style="font-size:12px;padding:6px 12px;border-color:var(--inset-edge)" data-act="open" data-id="' + t.id + '">Open transcript</button>'];
@@ -1372,13 +1522,15 @@ async function loadTranscripts() {
       acts.push('<button class="btn" style="font-size:12px;padding:6px 12px;border-color:var(--inset-edge)" data-act="resume" data-id="' + t.id + '">Resume</button>');
     if (t.status === 'failed' || t.status === 'partial')
       acts.push('<button class="btn" style="font-size:12px;padding:6px 12px;border-color:var(--inset-edge)" data-act="retry" data-id="' + t.id + '">Retry</button>');
+    acts.push('<button class="btn" style="font-size:12px;padding:6px 12px;border-color:var(--inset-edge)" data-act="rename" data-id="' + t.id + '">Rename</button>');
     acts.push('<button class="btn btn--red" style="font-size:12px;padding:6px 12px" data-act="delete" data-id="' + t.id + '">Delete</button>');
     return `
     <details class="unit" data-tid="${t.id}" ${openIds.has(String(t.id)) ? 'open' : ''}>
-      <summary style="list-style:none;cursor:pointer;padding:12px 22px 12px 34px;display:grid;grid-template-columns:1fr 190px 112px;align-items:center;gap:16px">
+      <summary style="list-style:none;cursor:pointer;padding:12px 22px 12px 34px;display:grid;grid-template-columns:16px 1fr 190px 112px;align-items:center;gap:16px">
+        <span class="row-chevron" style="font-family:var(--f-mono);font-size:11px;color:var(--label-dim)" title="Click row to expand details">▸</span>
         <div style="min-width:0">
           <div style="font-weight:600;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(t.title || t.filename || 'Untitled')}</div>
-          <div style="font-family:var(--f-mono);font-size:11px;color:var(--label-dim);margin-top:2px">${escapeHtml(transcriptMeta(t))}</div>
+          <div style="font-family:var(--f-mono);font-size:11px;color:var(--label-dim);margin-top:2px">${escapeHtml(transcriptMeta(t))} · click to expand</div>
         </div>
         ${bargraph(sv.cells, 16)}
         <div style="display:flex;flex-direction:column;align-items:flex-end;gap:3px">
@@ -1394,35 +1546,6 @@ async function loadTranscripts() {
       </div>
     </details>`;
   }).join('');
-
-  root.innerHTML = `
-    <div class="page-head">
-      <h1 class="t-title">Channel bank</h1>
-      <div class="page-status" style="color:${GREEN}">${ledDot(GREEN, true, 9)}${list.length} channels · ${active} active</div>
-    </div>
-    ${list.length ? rows : '<div class="empty-unit">No signals on the bank — load a tape on the Transcribe deck</div>'}`;
-
-  root.querySelectorAll('[data-act]').forEach(b => b.addEventListener('click', async (e) => {
-    e.preventDefault();
-    const id = Number(b.dataset.id), act = b.dataset.act;
-    try {
-      if (act === 'open') { navigate('detail', id); return; }
-      if (act === 'cancel') { await api('/api/transcripts/' + id + '/cancel', { method: 'POST' }); toast('Cancelled — resumable later', 'info'); }
-      if (act === 'resume') { const r = await api('/api/transcripts/' + id + '/resume', { method: 'POST' }); toast('Resumed ' + r.resumed + ' sections', 'info'); }
-      if (act === 'retry') { const r = await api('/api/transcripts/' + id + '/retry-failed-chunks', { method: 'POST' }); toast('Retrying ' + r.retried + ' sections', 'info'); }
-      if (act === 'delete') {
-        if (!window.confirm('Delete this transcript permanently?')) return;
-        await api('/api/transcripts/' + id, { method: 'DELETE' });
-        toast('Transcript deleted');
-      }
-      loadTranscripts();
-    } catch (err) { toast(err.message, 'error'); }
-  }));
-
-  clearTimeout(bankPollTimer);
-  if (active > 0 && S.page === 'transcripts') {
-    bankPollTimer = setTimeout(() => { if (S.page === 'transcripts') loadTranscripts(); }, 4000);
-  }
 }
 
 /* ══════════════════ master job queue ══════════════════ */
@@ -1654,6 +1777,9 @@ function segmentsHtml(t) {
 /* ── per-line playback, seed flags, speaker rename ── */
 
 function detailBodyClick(e) {
+  const copyBtn = e.target.closest('[data-export-copy]');
+  const dlBtn = e.target.closest('[data-export-dl]');
+  if (copyBtn || dlBtn) { handleExportClick((copyBtn || dlBtn).dataset.exportCopy || (copyBtn || dlBtn).dataset.exportDl, !!copyBtn); return; }
   const play = e.target.closest('[data-seg-play]');
   if (play) { segPlay(play); return; }
   const seed = e.target.closest('[data-seg-seed]');
@@ -1721,7 +1847,7 @@ function toggleSeed(btn) {
 async function renameSpeaker(speaker) {
   const t = detailData;
   if (!t) return;
-  const name = (window.prompt('Rename "' + speaker + '" to:', speaker) || '').trim();
+  const name = ((await styledPrompt('Rename "' + speaker + '" to:', speaker)) || '').trim();
   if (!name || name === speaker) return;
   try {
     const r = await api('/api/transcripts/' + t.id + '/speakers/rename', {
@@ -1736,6 +1862,13 @@ async function renameSpeaker(speaker) {
 
 function markedSpeakers() {
   return Object.keys(seedClips).filter(sp => (seedClips[sp] || []).length);
+}
+
+function hasUnlabeledSpeakers(t) {
+  return (t.segments || []).some(sg => {
+    const sp = (sg.speaker || '').trim();
+    return !sp || /^Speaker \d+$/i.test(sp);
+  });
 }
 
 async function openEnrollMarkedModal() {
@@ -1844,6 +1977,65 @@ function jobRunningUnit(job, label) {
   </div>`;
 }
 
+function transcriptPlainText(t) {
+  const lines = (t.segments || [])
+    .map(sg => (sg.speaker ? sg.speaker + ': ' : '') + (sg.text || '').trim())
+    .filter(Boolean);
+  return lines.length ? lines.join('\n') : (t.full_text || '').trim();
+}
+
+async function copyToClipboard(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    toast('Copied to clipboard', 'info');
+  } catch (e) {
+    toast('Copy failed: ' + e.message, 'error');
+  }
+}
+
+function downloadTextFile(filename, text) {
+  const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+function exportToolbarHtml(kind) {
+  return '<div style="display:flex;justify-content:flex-end;gap:8px;padding:0 32px 10px">' +
+    '<button class="btn" data-export-copy="' + kind + '" style="font-size:11px;padding:6px 12px;border-color:var(--inset-edge)">Copy</button>' +
+    '<button class="btn" data-export-dl="' + kind + '" style="font-size:11px;padding:6px 12px;border-color:var(--inset-edge)">Download .txt</button></div>';
+}
+
+async function summaryPlainText(transcriptId) {
+  const s = await api('/api/transcripts/' + transcriptId + '/summary');
+  const sections = [
+    ['Summary', s.short_summary ? [s.short_summary] : []],
+    ['Key points', s.key_points || []],
+    ['Action items', s.action_items || []],
+    ['Decisions', s.decisions || []],
+  ].filter(([, items]) => items.length);
+  return sections.map(([title, items]) => title + '\n' + items.map(it => '- ' + it).join('\n')).join('\n\n');
+}
+
+async function handleExportClick(kind, copy) {
+  const t = detailData;
+  let text = '';
+  if (kind === 'transcript') text = transcriptPlainText(t);
+  else if (kind === 'corrected') text = t.corrected_text || '';
+  else if (kind === 'summary') {
+    try { text = await summaryPlainText(t.id); }
+    catch (e) { toast('Could not load summary to export: ' + e.message, 'error'); return; }
+  }
+  if (!text.trim()) { toast('Nothing to export yet', 'info'); return; }
+  if (copy) copyToClipboard(text);
+  else downloadTextFile((t.title || t.filename || 'transcript').replace(/[^\w.-]+/g, '_') + '-' + kind + '.txt', text);
+}
+
 function correctedHtml(t) {
   if (llmJobActive(t.correction_job)) return jobRunningUnit(t.correction_job, 'Correction');
   if (t.correction_error) {
@@ -1893,12 +2085,15 @@ function correctedHtml(t) {
 
 async function summaryHtml(t) {
   if (llmJobActive(t.summary_job)) return jobRunningUnit(t.summary_job, 'Summary');
-  if (t.summary_job && t.summary_job.status === 'failed' && !t.has_summary) {
-    return '<div class="unit" style="padding:20px 32px;font-size:13px;color:var(--red)">' +
+  const failedBanner = (t.summary_job && t.summary_job.status === 'failed')
+    ? '<div class="unit" style="padding:14px 32px;margin-bottom:10px;font-size:13px;color:var(--red)">' +
       '<div class="t-cap" style="color:var(--red);margin-bottom:6px">Summary failed</div>' +
-      escapeHtml(t.summary_job.error || 'unknown error') + ' — rerun it from the Queue screen.</div>';
+      escapeHtml(t.summary_job.error || 'unknown error') + ' — rerun it from the Queue screen.' +
+      (t.has_summary ? ' Showing the last successful summary below.' : '') + '</div>'
+    : '';
+  if (!t.has_summary) {
+    return failedBanner || '<div class="empty-unit">No summary yet — press Summarize above</div>';
   }
-  if (!t.has_summary) return '<div class="empty-unit">No summary yet — press Summarize above</div>';
   try {
     const s = await api('/api/transcripts/' + t.id + '/summary');
     const cards = [
@@ -1907,7 +2102,7 @@ async function summaryHtml(t) {
       { title: 'Action items', items: s.action_items || [] },
       { title: 'Decisions', items: s.decisions || [] },
     ].filter(c => c.items.length);
-    return cards.map(c => `
+    return failedBanner + cards.map(c => `
       <div class="unit" style="padding:16px 32px">
         <div style="font-family:var(--f-cond);font-weight:600;font-size:13px;text-transform:uppercase;letter-spacing:0.05em;margin-bottom:8px;color:${AMBER}">${escapeHtml(c.title)}</div>
         ${c.items.map(it => `<div style="display:flex;gap:9px;font-size:13px;line-height:1.55;color:var(--body);padding:2px 0"><span style="color:${GREEN}">▪</span><span>${escapeHtml(it)}</span></div>`).join('')}
@@ -1995,12 +2190,24 @@ async function renderDetailBody() {
   const body = $('detail-body');
   if (S.detailTab === 'transcript') {
     const vm = llmJobActive(t.voice_match_job) ? jobRunningUnit(t.voice_match_job, 'Voice match') : '';
-    body.innerHTML = vm + '<div class="unit" style="border-radius:3px;margin-top:' + (vm ? '10px' : '0') + ';padding:6px 32px">' + segmentsHtml(t) + '</div>';
+    let nudge = '';
+    if (!vm && t.has_audio && hasUnlabeledSpeakers(t)) {
+      try {
+        const voices = await api('/api/voices');
+        if (voices.length) {
+          nudge = '<div class="unit" style="padding:12px 32px;margin-bottom:10px;font-size:13px;color:var(--body);display:flex;align-items:center;justify-content:space-between;gap:12px">' +
+            '<span>' + voices.length + ' enrolled voice' + (voices.length !== 1 ? 's' : '') + ' might match unlabeled speakers here.</span>' +
+            '<button class="btn" data-dact="voicematch" style="font-size:11px;padding:6px 12px;border-color:var(--inset-edge)">Match now</button></div>';
+        }
+      } catch { /* roster fetch failing is non-fatal — just skip the nudge */ }
+    }
+    body.innerHTML = vm + nudge + exportToolbarHtml('transcript') + '<div class="unit" style="border-radius:3px;margin-top:' + (vm || nudge ? '10px' : '0') + ';padding:6px 32px">' + segmentsHtml(t) + '</div>';
+    body.querySelectorAll('[data-dact]').forEach(b => b.addEventListener('click', () => detailAction(b.dataset.dact)));
   } else if (S.detailTab === 'corrected') {
-    body.innerHTML = correctedHtml(t);
+    body.innerHTML = (t.corrected_text ? exportToolbarHtml('corrected') : '') + correctedHtml(t);
   } else {
     body.innerHTML = '<div class="empty-unit">Loading summary…</div>';
-    body.innerHTML = await summaryHtml(t);
+    body.innerHTML = (t.has_summary ? exportToolbarHtml('summary') : '') + await summaryHtml(t);
   }
 }
 
@@ -2009,7 +2216,7 @@ async function detailAction(act) {
   if (!t) return;
   try {
     if (act === 'delete') {
-      if (!window.confirm('Delete this transcript permanently?')) return;
+      if (!(await styledConfirm('Delete this transcript permanently?'))) return;
       await api('/api/transcripts/' + t.id, { method: 'DELETE' });
       toast('Transcript deleted');
       navigate('transcripts');
@@ -2303,7 +2510,7 @@ async function loadVoices() {
   $('voice-identify-btn').addEventListener('click', openIdentifyModal);
   root.querySelectorAll('[data-vdel]').forEach(b => b.addEventListener('click', async (e) => {
     e.stopPropagation();
-    if (!window.confirm('Remove this voice profile from the roster?')) return;
+    if (!(await styledConfirm('Remove this voice profile from the roster?'))) return;
     try {
       await api('/api/voices/' + b.dataset.vdel, { method: 'DELETE' });
       toast('Profile removed');
@@ -2321,7 +2528,7 @@ async function loadVoices() {
     clipAudio.play().catch(err => toast(err.message, 'error'));
   }));
   root.querySelectorAll('[data-clip-del]').forEach(btn => btn.addEventListener('click', async () => {
-    if (!window.confirm('Remove this clip?')) return;
+    if (!(await styledConfirm('Remove this clip?'))) return;
     try {
       await api('/api/voices/' + btn.dataset.vid + '/clips/' + btn.dataset.clipDel, { method: 'DELETE' });
       toast('Clip removed');
@@ -2800,7 +3007,10 @@ document.addEventListener('DOMContentLoaded', () => {
   $('modal-overlay').addEventListener('click', (e) => {
     if (e.target === $('modal-overlay')) closeModal();
   });
-  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeModal(); });
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return;
+    closeModal();
+  });
   $('file-input').addEventListener('change', (e) => {
     if (e.target.files[0]) loadTape(e.target.files[0]);
     e.target.value = '';

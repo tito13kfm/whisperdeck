@@ -78,6 +78,18 @@ def test_local_provider_uses_saved_api_url(db_session):
     assert fake_post.await_args.args[0].startswith("http://box:8080/v1")
 
 
+def test_local_provider_omits_auth_header_when_no_key(db_session):
+    user, transcript = _make_user_and_transcript(db_session)
+    fake_post = AsyncMock(return_value=_chat_response("fixed"))
+    with patch("httpx.AsyncClient.post", fake_post):
+        asyncio.run(correct_transcript(
+            db_session, transcript, api_key="", provider_name="local", model="llama3",
+            provider_config={"api_url": "http://box:8080/v1"},
+        ))
+    headers = fake_post.await_args.kwargs["headers"]
+    assert "Authorization" not in headers
+
+
 # ── speaker-labeled chunked prompt ────────────────────────────────────────
 
 def test_prompt_carries_speaker_labels_and_preserve_instruction(db_session):

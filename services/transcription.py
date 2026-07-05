@@ -233,13 +233,14 @@ Return ONLY valid JSON, no markdown, no code fences."""
         if provider_name in ("groq", "openai", "openrouter"):
             request_body["response_format"] = {"type": "json_object"}
 
+        headers = {"Content-Type": "application/json"}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+
         async with httpx.AsyncClient(timeout=120) as client:
             resp = await client.post(
                 f"{api_base}/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                },
+                headers=headers,
                 json=request_body,
             )
 

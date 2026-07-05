@@ -59,10 +59,14 @@ async def _chat_completion(
     if json_mode and provider_name in _JSON_MODE_PROVIDERS:
         request_body["response_format"] = {"type": "json_object"}
 
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
     async with httpx.AsyncClient(timeout=120) as client:
         response = await client.post(
             f"{_api_base(provider_name, provider_config)}/chat/completions",
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            headers=headers,
             json=request_body,
         )
 
