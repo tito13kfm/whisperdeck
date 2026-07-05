@@ -310,6 +310,38 @@ Report: `[PASS|FAIL] Journey 5: Backlog management`
 
 Log any findings noticed during steps 1-4 using the Findings format.
 
+## Journey 6: Misconfiguration recovery
+
+Deliberately breaks a provider configuration and checks whether the
+resulting failure gives the user a useful signal, or fails silently.
+This is the one journey that intentionally exercises the failure path
+rather than the happy path.
+
+1. Record the current `local` provider config via `GET
+   /api/providers/local` for restoration in step 4.
+2. Set the `local` provider's `api_url` to an unreachable address, e.g.
+   `http://localhost:1/v1` (`PUT /api/providers/local` with
+   `{"api_url": "http://localhost:1/v1"}`).
+3. Attempt a summarize or correct call on any existing transcript
+   (e.g. `$J1_TRANSCRIPT_ID`) using the `local` provider. Poll until
+   terminal status.
+   - Watch: does the job reach `failed` with a clear, human-readable
+     error surfaced in the UI (toast, inline message), or does it look
+     like nothing happened (silent failure) or produce a confusing raw
+     error?
+   - Watch: does the UI make it easy to figure out *what* to fix (e.g.
+     pointing back at the providers panel), or does the user have no
+     path forward without already knowing to check provider settings?
+4. Restore the `local` provider's original `api_url` from step 1 (`PUT
+   /api/providers/local`).
+   - Check: a subsequent summarize/correct call on the `local` provider
+     succeeds again, confirming the app recovers cleanly once
+     configuration is fixed.
+
+Report: `[PASS|FAIL] Journey 6: Misconfiguration recovery`
+
+Log any findings noticed during steps 1-4 using the Findings format.
+
 ## Teardown
 
 Run this after all journeys, even if some failed:
