@@ -1487,7 +1487,10 @@ function renderBankRows(preservedOpenIds) {
   filtered.sort(sortFns[S.bankSort || 'date-desc']);
 
   const statusEl = $('bank-status');
-  if (statusEl) statusEl.innerHTML = `${ledDot(GREEN, true, 9)}${filtered.length} of ${bankListCache.length} channels`;
+  if (statusEl) {
+    const activeCount = bankListCache.filter(t => t.status === 'processing').length;
+    statusEl.innerHTML = `${ledDot(GREEN, true, 9)}${filtered.length} of ${bankListCache.length} channels · ${activeCount} active`;
+  }
 
   if (!bankListCache.length) {
     rowsContainer.innerHTML = '<div class="empty-unit">No signals on the bank — load a tape on the Transcribe deck</div>';
