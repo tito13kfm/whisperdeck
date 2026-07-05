@@ -296,6 +296,12 @@ function closeModal() {
   $('modal-box').innerHTML = '';
 }
 
+// Tracks the pending styledConfirm/styledPrompt resolver (and its Escape-cancel
+// value) so the global Escape handler can settle the Promise instead of leaving
+// the awaiting coroutine suspended forever. Cleared whenever the modal resolves
+// via a button click.
+let pendingStyledModal = null;
+
 function styledConfirm(message) {
   return new Promise(resolve => {
     openModal(`
@@ -304,8 +310,9 @@ function styledConfirm(message) {
         <button class="btn" id="styled-confirm-cancel" style="font-size:12px;border-color:var(--inset-edge)">Cancel</button>
         <button class="btn btn--red" id="styled-confirm-ok" style="font-size:12px">Confirm</button>
       </div>`);
-    $('styled-confirm-cancel').addEventListener('click', () => { closeModal(); resolve(false); });
-    $('styled-confirm-ok').addEventListener('click', () => { closeModal(); resolve(true); });
+    pendingStyledModal = { resolve, cancelValue: false };
+    $('styled-confirm-cancel').addEventListener('click', () => { pendingStyledModal = null; closeModal(); resolve(false); });
+    $('styled-confirm-ok').addEventListener('click', () => { pendingStyledModal = null; closeModal(); resolve(true); });
   });
 }
 
@@ -321,8 +328,9 @@ function styledPrompt(message, defaultValue) {
     const input = $('styled-prompt-input');
     input.focus();
     input.select();
-    const submit = () => { const v = input.value; closeModal(); resolve(v); };
-    $('styled-prompt-cancel').addEventListener('click', () => { closeModal(); resolve(null); });
+    const submit = () => { const v = input.value; pendingStyledModal = null; closeModal(); resolve(v); };
+    pendingStyledModal = { resolve, cancelValue: null };
+    $('styled-prompt-cancel').addEventListener('click', () => { pendingStyledModal = null; closeModal(); resolve(null); });
     $('styled-prompt-ok').addEventListener('click', submit);
     input.addEventListener('keydown', e => { if (e.key === 'Enter') submit(); });
   });
@@ -2835,7 +2843,17 @@ document.addEventListener('DOMContentLoaded', () => {
   $('modal-overlay').addEventListener('click', (e) => {
     if (e.target === $('modal-overlay')) closeModal();
   });
-  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeModal(); });
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return;
+    if (pendingStyledModal) {
+      const { resolve, cancelValue } = pendingStyledModal;
+      pendingStyledModal = null;
+      closeModal();
+      resolve(cancelValue);
+    } else {
+      closeModal();
+    }
+  });
   $('file-input').addEventListener('change', (e) => {
     if (e.target.files[0]) loadTape(e.target.files[0]);
     e.target.value = '';
