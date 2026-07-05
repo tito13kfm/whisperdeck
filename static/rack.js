@@ -1790,6 +1790,13 @@ function markedSpeakers() {
   return Object.keys(seedClips).filter(sp => (seedClips[sp] || []).length);
 }
 
+function hasUnlabeledSpeakers(t) {
+  return (t.segments || []).some(sg => {
+    const sp = (sg.speaker || '').trim();
+    return !sp || /^Speaker \d+$/i.test(sp);
+  });
+}
+
 async function openEnrollMarkedModal() {
   const speakers = markedSpeakers();
   if (!speakers.length) { toast('No clips flagged — use the ◈ button on a line first', 'error'); return; }
@@ -2050,7 +2057,19 @@ async function renderDetailBody() {
   const body = $('detail-body');
   if (S.detailTab === 'transcript') {
     const vm = llmJobActive(t.voice_match_job) ? jobRunningUnit(t.voice_match_job, 'Voice match') : '';
-    body.innerHTML = vm + '<div class="unit" style="border-radius:3px;margin-top:' + (vm ? '10px' : '0') + ';padding:6px 32px">' + segmentsHtml(t) + '</div>';
+    let nudge = '';
+    if (!vm && t.has_audio && hasUnlabeledSpeakers(t)) {
+      try {
+        const voices = await api('/api/voices');
+        if (voices.length) {
+          nudge = '<div class="unit" style="padding:12px 32px;margin-bottom:10px;font-size:13px;color:var(--body);display:flex;align-items:center;justify-content:space-between;gap:12px">' +
+            '<span>' + voices.length + ' enrolled voice' + (voices.length !== 1 ? 's' : '') + ' might match unlabeled speakers here.</span>' +
+            '<button class="btn" data-dact="voicematch" style="font-size:11px;padding:6px 12px;border-color:var(--inset-edge)">Match now</button></div>';
+        }
+      } catch { /* roster fetch failing is non-fatal — just skip the nudge */ }
+    }
+    body.innerHTML = vm + nudge + '<div class="unit" style="border-radius:3px;margin-top:' + (vm || nudge ? '10px' : '0') + ';padding:6px 32px">' + segmentsHtml(t) + '</div>';
+    body.querySelectorAll('[data-dact]').forEach(b => b.addEventListener('click', () => detailAction(b.dataset.dact)));
   } else if (S.detailTab === 'corrected') {
     body.innerHTML = correctedHtml(t);
   } else {
