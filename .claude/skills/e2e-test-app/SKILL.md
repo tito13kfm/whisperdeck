@@ -71,7 +71,7 @@ which scenarios run at full fidelity vs. get marked
 5. Launch Chromium via the Playwright MCP browser tool with fake media
    device flags, pointed at `http://localhost:9782`:
    - `--use-fake-device-for-media-stream`
-   - `--use-file-for-fake-audio-capture=<repo-root>\tests\fixtures\e2e_multispeaker.wav`
+   - `--use-file-for-fake-audio-capture=<repo-root>\tests\fixtures\e2e_multispeaker.mp3`
    (If the fixture isn't present yet, omit this flag — live-capture
    scenario 6 will be `SKIPPED(no fixture)`.)
 
@@ -147,38 +147,47 @@ instead of a hard PASS on the "loads without error" sub-check.
 
 1. Use the file input (`static/rack.js:2804`, wired to `#file-input` and
    triggered by the drop zone / `#key-rec`'s sibling upload control around
-   `static/rack.js:830`) to upload `tests/fixtures/e2e_multispeaker.<ext>`
-   (fall back to the repo's existing `test.mp4` if the multispeaker fixture
-   isn't present yet — note `SKIPPED(reduced fixture)` on any later scenario
-   that needs multiple speakers, e.g. Scenarios 10-12).
+   `static/rack.js:830`) to upload `tests/fixtures/e2e_multispeaker.mp3`
+   (a real 5-minute business-call recording; fall back to the repo's
+   existing `test.mp4` only if the multispeaker fixture is ever missing —
+   note `SKIPPED(reduced fixture)` on any later scenario that needs
+   multiple speakers, e.g. Scenarios 10-12). The upload endpoint is `POST
+   /api/transcribe` (multipart form fields `file`, `provider`, `model`,
+   `diarize`, etc.) — **not** `POST /api/transcripts`, which doesn't exist;
+   only `GET`/`PATCH`/`DELETE` are defined on `/api/transcripts/{id}` and
+   `GET` on the collection.
 2. Confirm the provider is Moonshine (from Scenario 4) and submit.
 3. Poll `GET /api/transcripts/{id}` every 3s, up to 3 minutes, until
    `status` is `completed`, `failed`, or `partial` (these are the actual
    terminal values the backend uses — see `app.py`'s `Transcript.status`
    writes in `services/transcription.py:101/132` and `services/queue.py:419-423`;
    there is no bare `complete` state).
-   - Check: status reaches `completed` within the window. On a real local
-     server this was observed to complete in well under a second for a
-     3-second `test.mp4` (inline, non-chunked path — Moonshine on CPU is
-     far faster than real time for a clip this short).
-   - Check: the transcript view renders at least one segment with text —
-     **caveat observed in a live run**: the repo's placeholder `test.mp4`
-     produced `status: completed` with `segments: []` and `full_text: ""`
-     from Moonshine (verified directly against `moonshine_voice.Transcriber`
-     on both the 3-second original and a 6.5-minute looped copy — zero
-     lines either way), i.e. its audio track has no content Moonshine
-     recognizes as speech. This is a fixture problem, not a pipeline bug:
-     the same `Transcriber` call against a Windows SAPI text-to-speech WAV
-     ("The quick brown fox...") produced 2 correct segments in the same
-     run, confirming Moonshine itself works. If the empty-output behavior
-     on `test.mp4` still holds, treat a `completed` status
-     with empty `segments`/`full_text` as a **PASS for the job-lifecycle
-     check** (upload → process → terminal status, with no `error`) but note
-     `SKIPPED(fixture has no recognizable speech)` on the "renders a
-     segment with text" sub-check specifically. Do not treat empty output
-     alone as a pipeline failure — confirm `t.error` is null first.
+   - Check: status reaches `completed` within the window. **Confirmed live
+     against the real `e2e_multispeaker.mp3` fixture**: a 300-second clip
+     completed in under 10 seconds on Moonshine/CPU (inline, non-chunked
+     path).
+   - Check: the transcript view renders at least one segment with text.
+     **Confirmed live**: `full_text` came back as ~500 words of real
+     recognized speech across 70 segments — the empty-output caveat below
+     no longer applies when using the real fixture; it's retained here only
+     as a fallback note for the degenerate `test.mp4` case.
+     <details>
+     Historical caveat (still true for `test.mp4`, not for
+     `e2e_multispeaker.mp3`): the repo's placeholder `test.mp4` produced
+     `status: completed` with `segments: []` and `full_text: ""` from
+     Moonshine (verified directly against `moonshine_voice.Transcriber` on
+     both the 3-second original and a 6.5-minute looped copy — zero lines
+     either way), i.e. its audio track has no content Moonshine recognizes
+     as speech. If ever falling back to `test.mp4`, treat a `completed`
+     status with empty `segments`/`full_text` as a **PASS for the
+     job-lifecycle check** (upload → process → terminal status, with no
+     `error`) but note `SKIPPED(fixture has no recognizable speech)` on the
+     "renders a segment with text" sub-check specifically. Do not treat
+     empty output alone as a pipeline failure — confirm `t.error` is null
+     first.
+     </details>
 4. Record this transcript's ID as `$TRANSCRIPT_ID` — later scenarios reuse
-   it.
+   it. **Confirmed live**: transcript id 1.
 
 Report: `[PASS|FAIL] Scenario 5: Upload transcribe`
 
@@ -315,21 +324,38 @@ upload-time "Speakers" toggle and the post-hoc "Re-diarize" button.
 1. Start a fresh upload of the same multispeaker fixture used in
    Scenario 5, explicitly enabling diarization first: click the
    "Speakers" toggle at `static/rack.js:769-771` (`id="ctl-diarize"`,
-   `tog-diarize`) before submitting, then submit the upload.
+   `tog-diarize`) before submitting, then submit the upload (form field
+   `diarize=true` on `POST /api/transcribe`).
    - Check: poll until the job reaches a terminal status (same pattern as
      Scenario 5), then confirm the completed transcript's segments show
      more than one distinct speaker label — i.e. diarization ran as part
-     of the upload because the toggle was on.
+     of the upload because the toggle was on. **Confirmed live against
+     `e2e_multispeaker.mp3`**: `speaker_count: 6`, distinct labels
+     `SPEAKER_00`..`SPEAKER_05` (pyannote backend), `status: completed`.
    - Record this transcript's ID as `$TRANSCRIPT_ID_DIARIZE` (throwaway,
-     not reused later).
+     not reused later). Confirmed live: id 2.
 2. On `$TRANSCRIPT_ID` (the existing transcript from Scenario 5), trigger
    "Re-diarize" — detail-view button at `static/rack.js:1937`
    (`data-dact="rediarize"`), calling `POST
    /api/transcripts/{id}/rediarize` at `app.py:1030`.
+   - Note: this endpoint is asynchronous — it returns `{"job": {...,
+     "status": "pending", "kind": "rediarize"}}` immediately, not the
+     updated transcript. Poll either `GET /api/transcripts/{id}` (simplest —
+     watch `speaker_count`/`segments` update) or `GET /api/jobs`, whose
+     response shape is `{"jobs": [...], "active": N}` — **note the wrapper
+     object**, the job list is the `.jobs` field, not the top-level
+     response. Confirmed live: a `rediarize` job does appear in that
+     `.jobs` array (alongside `correction`/`summary`/`voice_match` — no
+     kind-based filtering in `app.py`'s `list_jobs`), so either poll target
+     works; the transcript endpoint is just less to unwrap.
    - Check: it re-runs and completes without error, and segments still
-     show more than one distinct speaker label afterward.
+     show more than one distinct speaker label afterward. **Confirmed
+     live**: after rediarizing `$TRANSCRIPT_ID` (id 1), `speaker_count`
+     became 6 with the same `SPEAKER_00`..`SPEAKER_05` labeling.
 
 Report: `[PASS|FAIL|SKIPPED(reason)] Scenario 10: Diarization`
+
+**Real run result: PASS** (both steps, against `e2e_multispeaker.mp3`).
 
 ## Scenario 11: Speaker rename + segment retag
 
@@ -342,15 +368,23 @@ Same fixture gate as Scenario 10.
      /api/transcripts/{id}/speakers/rename` at `app.py:773` via the
      `renameSpeaker()` function at `rack.js:1721`. The new name appears on
      all of that speaker's segments in the transcript view, not just one.
+     **Confirmed live**: renaming `SPEAKER_04` -> `Alice` on
+     `$TRANSCRIPT_ID` relabeled 41 of 69 segments in one call
+     (`{"renamed": 41, ...}`), and the remaining `SPEAKER_00/01/02/03/05`
+     labels were untouched.
 2. Retag a single segment to a different speaker.
    - Check: use the "Select lines…" button at `rack.js:1962`, select a
      segment, then click "Re-tag selected" button (also `rack.js:1962`).
      This opens the retag modal and calls `POST /api/transcripts/{id}/segments/retag`
      at `app.py:820`. That segment now shows the reassigned speaker label, and
      total segment count is unchanged (retagging doesn't create/delete
-     segments).
+     segments). **Confirmed live**: retagging one `SPEAKER_00` segment
+     (index 52) to `Alice` returned `{"retagged": 1, ...}`; total segment
+     count stayed at 69 before and after.
 
 Report: `[PASS|FAIL|SKIPPED(reason)] Scenario 11: Speaker rename/retag`
+
+**Real run result: PASS** (both steps, against `e2e_multispeaker.mp3`).
 
 ## Scenario 12: Voice bank (enroll / list / identify / delete)
 
@@ -361,12 +395,18 @@ Same fixture gate as Scenario 10.
    - Check: use the "Enroll marked clips" button at `rack.js:1960`
      (id="enroll-marked-btn"). Mark a segment with the ◈ flag first, then
      click the button to open the enroll modal. This calls `POST
-     /api/transcripts/{id}/enroll-speaker` at `app.py:858`. A new voice
+     /api/transcripts/{id}/enroll-speaker` at `app.py:858` with a JSON body
+     `{"name": "Alice", "clips": [{"start": ..., "end": ...}, ...]}` (1-10
+     clips, each an Alice-labeled segment's `start`/`end`). A new voice
      profile named `Alice` (or as entered) appears under `GET /api/voices`
-     at `app.py:1223`.
+     at `app.py:1223`. **Confirmed live**: enrolling 3 Alice segments
+     returned `{"id": 1, "name": "Alice", "sample_count": 1, ...}`, and it
+     appeared in `GET /api/voices`.
 2. Upload a second transcript from the same multispeaker fixture (or a
    different clip containing the same voice). Record its ID as
-   `$TRANSCRIPT_ID_2`.
+   `$TRANSCRIPT_ID_2`. In practice the diarized transcript already created
+   in Scenario 10 step 1 (`$TRANSCRIPT_ID_DIARIZE`) works fine as
+   `$TRANSCRIPT_ID_2` — no need for a third upload.
 3. Trigger "identify" against the voice bank on `$TRANSCRIPT_ID_2`.
    - Check: navigate to the Voice Roster view and click the "Identify a voice…"
      button at `rack.js:2295`. This calls `POST /api/voices/identify` at
@@ -374,13 +414,27 @@ Same fixture gate as Scenario 10.
      detail view at `rack.js:1938` (data-dact="voicematch"), which calls
      `POST /api/transcripts/{id}/voice-match` at `app.py:1061`. At least
      one segment in `$TRANSCRIPT_ID_2` gets matched/labeled against the
-     enrolled `Alice` profile.
+     enrolled `Alice` profile. **Confirmed live**: `voice-match` is
+     asynchronous — it returns `{"job": {..., "status": "pending", "kind":
+     "voice_match"}}`; poll `GET /api/transcripts/{id}` and check its
+     embedded `voice_match_job.status` until `completed` (or use `GET
+     /api/jobs` — see Scenario 10 step 2's note on that endpoint's
+     `{"jobs": [...], "active": N}` response shape; `voice_match` jobs
+     appear there the same as every other kind, no special-casing). On
+     `$TRANSCRIPT_ID_DIARIZE`, the completed job relabeled all 70/70
+     segments to `Alice` — expected here since it's the same source audio
+     as the enrollment clips, which produces a very close embedding match.
 4. Delete the enrolled voice profile.
    - Check: in the Voice Roster view, trigger the delete button for the
      `Alice` profile. This calls `DELETE /api/voices/{profile_id}` at
-     `app.py:1286`. It no longer appears under `GET /api/voices`.
+     `app.py:1286`. It no longer appears under `GET /api/voices`. **Confirmed
+     live**: deleting profile id 1 returned `{"ok": true}`, and `GET
+     /api/voices` came back empty afterward.
 
 Report: `[PASS|FAIL|SKIPPED(reason)] Scenario 12: Voice bank`
+
+**Real run result: PASS** (all four steps, against `e2e_multispeaker.mp3`
+and its diarized sibling transcript).
 
 ## Scenario 13: Summarize (Lemonade)
 
@@ -433,6 +487,12 @@ any non-empty string works. Do this once per run before Scenario 13.
 
 Report: `[PASS|FAIL|SKIPPED(reason)] Scenario 13: Summarize`
 
+**Real run result: PASS, re-confirmed against `e2e_multispeaker.mp3`**:
+summarize on `$TRANSCRIPT_ID` (real ~500-word business-call transcript)
+completed in about 6 seconds and returned a non-empty `short_summary`
+plus 7 `key_points`, 4 `action_items`, and 3 `decisions` — all populated
+from real content instead of the empty-fixture caveat above.
+
 ## Scenario 14: Correction pass (Lemonade)
 
 Same Lemonade gate as Scenario 13, and the same `local`-provider placeholder
@@ -468,6 +528,13 @@ API key workaround applies (correction goes through the same
      that's a model-quality result, not a lifecycle failure.)
 
 Report: `[PASS|FAIL|SKIPPED(reason)] Scenario 14: Correction`
+
+**Real run result: PASS, re-confirmed against `e2e_multispeaker.mp3`**:
+correction on `$TRANSCRIPT_ID` completed with `corrected_text` non-empty
+(4493 chars) and not identical to `full_text` — the model added
+punctuation/paragraph breaks and (since this transcript had already been
+through Scenario 11's speaker rename/retag) prefixed each line with its
+speaker label, e.g. `Alice: So this is the same as Arnold Page, so.`.
 
 ## Scenario 15: Context refinement
 
