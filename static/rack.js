@@ -211,7 +211,7 @@ function armVfdMarquees(rootEl) {
 }
 
 /* ── the ONE status→presentation mapping used by every transcript view ──
-   (Monitor recents, Channel bank rows, detail meta must always agree.) */
+   (Monitor recents, Tape library rows, detail meta must always agree.) */
 const GREEN = '#5FCB7A', AMBER = '#E0A83E', RED = '#E0554A';
 // Percent is derived, not stored: chunked jobs report chunks_done/chunks_total
 // (queue_status while processing, job_progress otherwise); single-shot jobs
@@ -1448,7 +1448,7 @@ async function loadTranscripts() {
 
   root.innerHTML = `
     <div class="page-head">
-      <h1 class="t-title">Channel bank</h1>
+      <h1 class="t-title">Tape library</h1>
       <div class="page-status" style="color:${GREEN}">${ledDot(GREEN, true, 9)}${list.length} channels · ${active} active</div>
     </div>
     ${list.length ? rows : '<div class="empty-unit">No signals on the bank — load a tape on the Transcribe deck</div>'}`;
