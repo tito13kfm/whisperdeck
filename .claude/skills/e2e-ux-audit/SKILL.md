@@ -122,6 +122,46 @@ a finding.
 Keep a running list of all findings across all 6 journeys; the Report
 section below consumes this list.
 
+## Journey 1: First meeting, cold start
+
+Registers a user, configures the transcription provider, uploads a
+recording, and reads the resulting transcript — as a first-time user
+would, with no prior knowledge of the app.
+
+1. Navigate to `http://localhost:9782/`. If a login/register form is
+   shown, fill username `uxaudit_user`, password `uxaudit_pass_123`,
+   submit register.
+   - Watch: is it obvious this is a register form vs. login? Is there
+     visible guidance (password requirements, confirmation field) or
+     does a bad password just silently fail?
+2. After registering, look at the very first screen shown.
+   - Watch: is it clear what to do next (e.g. an obvious "upload" or
+     "start recording" affordance), or does the screen look empty/blank
+     with no call to action? Log a finding if a first-time user would be
+     stuck here.
+3. Configure the transcription provider: open the providers/services
+   panel, confirm Moonshine is available and selected. If not already
+   the default, select it.
+   - Watch: does the panel make it clear which provider is currently
+     active vs. just available?
+4. Upload `tests/fixtures/e2e_multispeaker.mp3` via the file input /
+   drop zone and submit.
+   - Watch: is there a visible progress indicator between submit and
+     completion, or does the UI look frozen/unchanged during processing?
+5. Poll `GET http://localhost:9782/api/transcripts/{id}` every 3s, up to
+   3 minutes, until `status` is `completed`, `failed`, or `partial`.
+   Record the ID as `$J1_TRANSCRIPT_ID`.
+   - Watch: once complete, does the UI update on its own (e.g.
+     auto-navigate to the transcript, live status change) or does the
+     user have to manually refresh/re-navigate to see the result?
+6. Open the completed transcript's detail view.
+   - Watch: does it render segments/text clearly? Is it obvious how to
+     get back to the list of all transcripts?
+
+Report: `[PASS|FAIL] Journey 1: Cold start`
+
+Log any findings noticed during steps 1-6 using the Findings format.
+
 ## Teardown
 
 Run this after all journeys, even if some failed:
