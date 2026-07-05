@@ -8,10 +8,10 @@ description: Browser-driven exploratory UX audit of WhisperDeck via Playwright M
 Drives 6 realistic user journeys through a real browser against a
 throwaway server instance, judging whether the app is usable — not just
 whether the backend did what was asked. This complements
-`.claude/skills/e2e-test-app/SKILL.md` (scripted PASS/FAIL backend
-regression); this skill looks for friction a real user would hit: dead
-controls, confusing labels, too many steps, stale UI, missing feedback,
-unreachable features.
+`.claude/skills/e2e-regression-http/SKILL.md` (scripted PASS/FAIL backend
+regression, HTTP-only); this skill looks for friction a real user would
+hit: dead controls, confusing labels, too many steps, stale UI, missing
+feedback, unreachable features.
 
 Run **inline in this session** — one continuous Playwright browser
 instance across all 6 journeys, not dispatched to subagents. State
@@ -190,8 +190,8 @@ current Playwright MCP session (no CLI control over browser launch args),
 this journey needs a manual assist — see step 2.
 
 This is the least-verified path in the app — the scripted
-`e2e-test-app` skill has zero live evidence for it. Pay close attention
-to the recording UI itself, not just the resulting job status.
+`e2e-regression-http` skill has zero live evidence for it. Pay close
+attention to the recording UI itself, not just the resulting job status.
 
 1. Trigger the "Live capture" control (`#key-rec` in `static/rack.js`),
    then confirm through the app's own "Start a live capture?" modal.
@@ -256,16 +256,13 @@ multiple meetings — not just whether the underlying API calls succeed.
    terminal status. Record as `$J3_TRANSCRIPT_ID_2`.
 5. Without being told which button to press, look at the transcript
    detail view and the diarization result for `$J3_TRANSCRIPT_ID_2`.
-   - Watch: does the UI proactively suggest or highlight a possible
-     match against the enrolled `Alice` profile (e.g. a badge, a
-     suggested label, an unprompted notification)? Or does the user
-     have to already know to seek out and trigger a separate
-     "Identify"/"Match" action?
-   - This is the core judgment call of this journey: if there is no
-     visible cue that voice matching is available at all, log an
-     `unreachable-feature` or `missing-feedback` finding (choose based
-     on whether the control exists but is unadvertised, vs. genuinely
-     absent from this view).
+   - Watch: a nudge banner should appear on the transcript tab suggesting
+     a voice-roster match (added specifically because an earlier audit
+     found no such cue). Confirm it actually appears, states something
+     sensible (e.g. enrolled-voice count), and its "Match now" button
+     works. Log a finding if it's missing, misleading, or broken —
+     this journey exists to catch a regression here, not just a first
+     discovery.
 6. Trigger the match/identify action explicitly (if not already
    surfaced in step 5) and confirm segments in `$J3_TRANSCRIPT_ID_2` get
    labeled against the enrolled `Alice` profile.
@@ -299,14 +296,12 @@ Setup step 7 — do not reapply here.
    terminal status.
    - Watch: once summarize completes, is the summary immediately visible
      without extra navigation, or does the user have to hunt for it?
-5. With the correction and summary results visible, look for any
-   export, copy, download, or share affordance for either the corrected
-   transcript or the summary.
-   - Watch: this is genuinely unexplored territory — the scripted skill
-     never checked for this. If no such control exists anywhere in the
-     detail view, log an `unreachable-feature` finding noting that a
-     real user has no way to get their meeting notes out of the app
-     short of manually selecting text.
+5. With the correction and summary results visible, use the Copy/Download
+   export controls on the transcript, corrected, and summary tabs.
+   - Watch: does Copy actually produce the expected plain-text content on
+     paste, and does Download produce a sane, non-empty file? If any tab
+     lacks an export control, or a control is present but produces empty/
+     wrong content, log a finding.
 
 Report: `[PASS|FAIL|SKIPPED(reason)] Journey 4: Wrap-up flow`
 
@@ -317,12 +312,13 @@ Log any findings noticed during steps 1-5 using the Findings format.
 By this point, Journeys 1-4 have created several transcripts and jobs —
 use that accumulated state rather than creating more.
 
-1. Open the transcript list view.
-   - Watch: with 3+ transcripts now present (from Journeys 1, 3, 4), is
-     there any way to search, sort, or filter, or is it a flat
-     unsorted/unlabeled list that would get unwieldy at real-world
-     volume? Log a finding if there's no way to distinguish transcripts
-     beyond scrolling and reading titles.
+1. Open the transcript list view (Tape library).
+   - Watch: with 3+ transcripts now present (from Journeys 1, 3, 4), use
+     the search box and sort dropdown — does search actually narrow the
+     list by title/filename, and does sort actually reorder rows? Also
+     try the per-row Rename control. Log a finding if any of these don't
+     work as expected, or if transcripts are still hard to distinguish
+     despite them.
 2. Open the jobs panel.
    - Watch: does it clearly list the jobs created by earlier journeys
      (upload, diarize, summarize, correct) with distinguishable
