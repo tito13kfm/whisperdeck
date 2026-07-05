@@ -382,6 +382,186 @@ Same fixture gate as Scenario 10.
 
 Report: `[PASS|FAIL|SKIPPED(reason)] Scenario 12: Voice bank`
 
+## Scenario 13: Summarize (Lemonade)
+
+Requires Lemonade reachable (Setup step 4); otherwise
+`SKIPPED(Lemonade unreachable)`.
+
+**Real bug found in a live run, work around it before triggering the job**:
+`POST /api/transcripts/{id}/summarize` and `POST /api/transcripts/{id}/correct`
+both route through `services/correction.py`'s `_chat_completion()`
+(`services/correction.py:65`), which unconditionally sends
+`Authorization: Bearer {api_key}` — including when `api_key` is the empty
+string, which Scenario 4 leaves it as for the `local` provider (no key
+needed to talk to Lemonade). That produces the header value `"Bearer "`
+(trailing space, no token), which `httpx` rejects outright before the
+request is even sent: the job fails immediately with
+`error: "Illegal header value b'Bearer '"` (confirmed live — job id 2 in a
+real run). Work around it by giving the `local` provider config a non-empty
+placeholder key first: `PUT /api/providers/local` with
+`{"api_key": "not-needed"}`. Lemonade itself ignores the header entirely, so
+any non-empty string works. Do this once per run before Scenario 13.
+
+1. Trigger "summarize" on `$TRANSCRIPT_ID` — `POST
+   /api/transcripts/{id}/summarize` with form fields `provider=local`,
+   `model=gpt-oss-20b-mxfp4-GGUF` (UI equivalent: detail-view "Summarize"
+   button, `static/rack.js:1940`, `data-dact="summarize"`).
+2. Poll the LLM job status via `GET /api/jobs` (match by `id`/`kind:
+   "summary"`) every 5s, up to 2 minutes. **Observed live timing on this
+   hardware** (Lemonade running gpt-oss-20b-mxfp4-GGUF on a ROCm llama.cpp
+   backend): a summarize job on a real ~15-second/40-word transcript
+   completed in about 2 seconds end to end (job `created_at` to
+   `updated_at`); a job against an empty-text transcript completed in about
+   1 second. This is far faster than the plan's original "up to 5 minutes"
+   estimate — 2 minutes is already generous headroom here, but if a future
+   run on different hardware or a much longer transcript is still `pending`/
+   `running` past 2 minutes, don't fail early; extend the wait rather than
+   declaring `FAIL`.
+   - Check: job status reaches `completed`, not `failed`.
+   - Check: `GET /api/transcripts/{id}/summary` returns non-empty
+     `short_summary`/`key_points`. **Caveat observed live**: if
+     `$TRANSCRIPT_ID` is the empty-text `test.mp4` fixture from Scenario 5's
+     caveat, the summarize job still reaches `completed` (PASS for the
+     job-lifecycle check) but `short_summary`, `key_points`,
+     `action_items`, and `decisions` all come back empty (`""`/`[]`) since
+     there was no source text to summarize — note
+     `SKIPPED(fixture has no recognizable speech)` on the "non-empty text"
+     sub-check specifically, same treatment as Scenario 5. Use a transcript
+     with real recognized speech (e.g. Scenario 5's multispeaker fixture,
+     or any transcript with non-empty `full_text`) to exercise the
+     non-empty-text check for real.
+
+Report: `[PASS|FAIL|SKIPPED(reason)] Scenario 13: Summarize`
+
+## Scenario 14: Correction pass (Lemonade)
+
+Same Lemonade gate as Scenario 13, and the same `local`-provider placeholder
+API key workaround applies (correction goes through the same
+`_chat_completion()` code path).
+
+1. Record the transcript's current `corrected_text` (pre-correction, likely
+   `null`) via `GET /api/transcripts/{id}` for comparison.
+2. Trigger "correct" on `$TRANSCRIPT_ID` — `POST
+   /api/transcripts/{id}/correct` with form fields `provider=local`,
+   `model=gpt-oss-20b-mxfp4-GGUF` (UI: "Re-run correction" button,
+   `static/rack.js:1941`, `data-dact="rerun"`, opens the picker at
+   `toggleRerunPicker()`/`rerunCorrection()`, `static/rack.js:2101-2135`).
+3. Poll via `GET /api/jobs` (or the `correction_job` field embedded in `GET
+   /api/transcripts/{id}`) every 5s, up to 2 minutes — same real-hardware
+   timing basis as Scenario 13. **Observed live**: two separate correction
+   runs on the same short real-speech transcript completed in about 9
+   seconds and about 3 seconds respectively (job `created_at` to
+   `updated_at`) — noticeably slower than summarize since correction makes
+   one LLM call per line-batch rather than one call total, but still well
+   under a minute for a short transcript. As with Scenario 13, 2 minutes is
+   generous headroom for this hardware/transcript size; extend rather than
+   fail if a longer transcript needs more time.
+   - Check: job status reaches `completed`.
+   - Check: `corrected_text` on `GET /api/transcripts/{id}` is non-empty.
+   - Check: corrected output text is not byte-identical to the
+     pre-correction text recorded in step 1. (This is a hard check, not a
+     quality judgment — it only proves the correction pass ran and
+     produced *a* transformation, not that the transformation is good.
+     Confirmed live: the model added sentence-level punctuation/paragraph
+     breaks; it did not fix an actual mis-transcription in the same run,
+     e.g. "Sarah" mis-heard as "Cereal" survived correction unchanged —
+     that's a model-quality result, not a lifecycle failure.)
+
+Report: `[PASS|FAIL|SKIPPED(reason)] Scenario 14: Correction`
+
+## Scenario 15: Context refinement
+
+Same Lemonade gate and placeholder-API-key workaround as Scenario 13. Also
+set the user's `correction_provider` setting to `local` first (`PUT
+/api/settings` with `{"correction_provider": "local", "correction_model":
+"gpt-oss-20b-mxfp4-GGUF"}`) — `POST /api/transcripts/{id}/context` resolves
+its own provider from this setting (default `groq`), independent of what
+was configured on the transcript-level correct/summarize calls, and 400s
+with a "no API key" error if it resolves to a hosted provider with no key
+saved.
+
+1. Add a short context document (a few sentences of relevant background/
+   glossary text, e.g. naming a person or term the transcript mis-heard) to
+   `$TRANSCRIPT_ID` via `POST /api/transcripts/{id}/context` with form field
+   `context_doc` (UI: "Add context" button, `static/rack.js:1939`,
+   `data-dact="context"`, opens `toggleContextPicker()`,
+   `static/rack.js:2225-2251`, textarea `#ctx-doc`, submit `#ctx-go`).
+   - **Caveat observed live, not a failure**: this call is synchronous (no
+     job to poll) and returns `{"terms": [...]}` — extracted glossary
+     terms it added to the hotword list. Against the `local` provider it
+     reliably returned `terms: []` even for a document containing an
+     obvious name, because term extraction requires JSON-mode
+     (`_JSON_MODE_PROVIDERS` in `services/correction.py:23` covers only
+     `groq`/`openai`/`openrouter`, not `local`), and
+     `extract_hotwords_from_doc()` (`services/correction.py:204-230`)
+     silently swallows any JSON-parse failure and returns `[]` — this is
+     documented, non-fatal-by-design behavior, not a bug to chase. Don't
+     treat an empty `terms` list against the `local` provider as a
+     failure; it's expected. If validating that extraction can find terms
+     at all, temporarily point `correction_provider` at `groq`/`openai`/
+     `openrouter` with a saved key instead — out of scope for the
+     local-only run this skill otherwise sticks to.
+2. Re-run correction on `$TRANSCRIPT_ID` (same call as Scenario 14 step 2) —
+   this is the "transcription-refinement... whichever the UI wires context
+   into" step: context wires into the hotword glossary the correction pass
+   already reads on every run, there's no separate "correct with this
+   context" parameter.
+3. Poll up to 2 minutes (same basis as Scenario 13/14; observed live at
+   about 3 seconds for a short transcript).
+   - Check: job status reaches `completed`, not `failed`.
+
+Report: `[PASS|FAIL|SKIPPED(reason)] Scenario 15: Context refinement`
+
+## Scenario 16: Jobs panel (list / cancel / rerun)
+
+1. Open the jobs panel — `loadQueue()` (`static/rack.js:1464-1520ish`),
+   fetching `GET /api/jobs?limit=50`.
+   - Check: it lists the jobs created by Scenarios 5-15 (upload,
+     diarize, summarize, correct, etc.) with their statuses. Confirmed
+     live: a real `GET /api/jobs` response after Scenarios 13-15 listed
+     every summary/correction job created, newest first, each with
+     `status`/`provider`/`model`/`title`.
+2. Start one more job specifically to cancel it here (don't reuse a job
+   another scenario still needs). **Use an LLM job (summarize or correct),
+   not a plain transcribe upload** — `POST /api/jobs/{job_id}/cancel`
+   (`app.py:1186`) only accepts an `LlmJob` id; the transcription-queue
+   entries the same panel also lists (id format `"transcription-{id}"`) are
+   cancelled through the transcript-level `POST
+   /api/transcripts/{id}/cancel` instead (already exercised in Scenario 8
+   via the `t-cancel` UI action, `static/rack.js:1516`) — not through this
+   endpoint. A short local `test.mp4` upload also finishes inline before
+   there's anything to cancel anyway, same caveat as Scenario 8. Trigger a
+   correction or summarize job on any transcript, then immediately call
+   `POST /api/jobs/{job_id}/cancel` (UI: `j-cancel`, `static/rack.js:1514`).
+   - Check: cancel succeeds and the job's status becomes `cancelled`, not
+     `completed`/`failed`. Confirmed live: `POST /api/jobs/9/cancel` on a
+     still-`pending` correction job returned
+     `{"ok":true,"job":{"status":"cancelled",...}}` immediately. Note this
+     is timing-sensitive the same way Scenario 8's cancel is — cancel only
+     succeeds while the job is `pending`/`running`
+     (`services/llm_jobs.py`'s `cancel_llm_job`); a job that has already
+     reached `completed`/`failed` returns `400 Cannot cancel a job with
+     status '...'`. Given local jobs complete in single-digit seconds
+     (Scenario 13/14's observed timing), issue cancel immediately after the
+     trigger call returns, same discipline as Scenario 8.
+3. Trigger "rerun" on any `failed` or `cancelled` job — `POST
+   /api/jobs/{job_id}/rerun` (`app.py:1197`, UI: `j-rerun`,
+   `static/rack.js:1515`). Note: `rerun_llm_job` (`services/llm_jobs.py:108`)
+   only accepts jobs in `failed`/`cancelled` status — attempting it on a
+   `completed` job 400s with `"Can only rerun failed or cancelled jobs
+   (this one is 'completed')"`, so pick one of the `failed` auto-correction
+   jobs left over from Scenario 5's upload (provider `groq`, no key saved)
+   or the job just cancelled in step 2.
+   - Check: a new job entry appears (new `id`, same `kind`/`transcript_id`)
+     and reaches a terminal status (`completed` or `failed`). Confirmed
+     live: `POST /api/jobs/4/rerun` (a `failed` groq correction job with no
+     API key) returned a new job id 8, which reached `failed` again within
+     ~2 seconds (same "no groq API key saved" error) — a legitimate
+     terminal-status result for this check even though it re-fails, since
+     the check is "reaches a terminal status", not "succeeds".
+
+Report: `[PASS|FAIL] Scenario 16: Jobs panel`
+
 ## Teardown
 
 Run this after all scenarios, even if some failed:
@@ -397,3 +577,8 @@ Close the Playwright browser session.
 
 After teardown, print the full list of `[PASS|FAIL|SKIPPED]` lines from
 every scenario as a single summary table.
+
+## End of run
+
+Print every scenario's report line in order (1 through 16) as the final
+output of this skill, then confirm Teardown ran.
