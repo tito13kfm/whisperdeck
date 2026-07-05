@@ -1893,12 +1893,15 @@ function correctedHtml(t) {
 
 async function summaryHtml(t) {
   if (llmJobActive(t.summary_job)) return jobRunningUnit(t.summary_job, 'Summary');
-  if (t.summary_job && t.summary_job.status === 'failed' && !t.has_summary) {
-    return '<div class="unit" style="padding:20px 32px;font-size:13px;color:var(--red)">' +
+  const failedBanner = (t.summary_job && t.summary_job.status === 'failed')
+    ? '<div class="unit" style="padding:14px 32px;margin-bottom:10px;font-size:13px;color:var(--red)">' +
       '<div class="t-cap" style="color:var(--red);margin-bottom:6px">Summary failed</div>' +
-      escapeHtml(t.summary_job.error || 'unknown error') + ' — rerun it from the Queue screen.</div>';
+      escapeHtml(t.summary_job.error || 'unknown error') + ' — rerun it from the Queue screen.' +
+      (t.has_summary ? ' Showing the last successful summary below.' : '') + '</div>'
+    : '';
+  if (!t.has_summary) {
+    return failedBanner || '<div class="empty-unit">No summary yet — press Summarize above</div>';
   }
-  if (!t.has_summary) return '<div class="empty-unit">No summary yet — press Summarize above</div>';
   try {
     const s = await api('/api/transcripts/' + t.id + '/summary');
     const cards = [
@@ -1907,7 +1910,7 @@ async function summaryHtml(t) {
       { title: 'Action items', items: s.action_items || [] },
       { title: 'Decisions', items: s.decisions || [] },
     ].filter(c => c.items.length);
-    return cards.map(c => `
+    return failedBanner + cards.map(c => `
       <div class="unit" style="padding:16px 32px">
         <div style="font-family:var(--f-cond);font-weight:600;font-size:13px;text-transform:uppercase;letter-spacing:0.05em;margin-bottom:8px;color:${AMBER}">${escapeHtml(c.title)}</div>
         ${c.items.map(it => `<div style="display:flex;gap:9px;font-size:13px;line-height:1.55;color:var(--body);padding:2px 0"><span style="color:${GREEN}">▪</span><span>${escapeHtml(it)}</span></div>`).join('')}
