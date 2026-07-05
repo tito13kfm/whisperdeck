@@ -352,3 +352,75 @@ Remove-Item -Recurse -Force $env:WHISPERDECK_DATA_DIR -ErrorAction SilentlyConti
 ```
 
 Close the Playwright browser session.
+
+## Report
+
+After Teardown, generate a static HTML report and open it for review.
+
+1. Build the report content: a journey summary table (one row per
+   Journey 1-6, columns Journey/Status) followed by all logged findings
+   grouped by severity (`blocker` first, then `major`, then `minor`),
+   each rendered as a list item with its Journey/step, Type, Note, and
+   an `<img>` tag if a Screenshot path was recorded.
+
+2. Write the HTML file. Example structure (fill in actual journey
+   statuses and findings collected during the run):
+
+```powershell
+$timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
+$reportPath = "docs/superpowers/e2e-findings/report-$timestamp.html"
+
+$html = @"
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>WhisperDeck UX Audit Report</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 900px; margin: 2rem auto; padding: 0 1rem; }
+  table { border-collapse: collapse; width: 100%; margin-bottom: 2rem; }
+  th, td { border: 1px solid #ccc; padding: 0.5rem; text-align: left; }
+  .PASS { color: #1a7f37; }
+  .FAIL { color: #cf222e; }
+  .SKIPPED { color: #9a6700; }
+  .finding { border-left: 4px solid #ccc; padding: 0.5rem 1rem; margin-bottom: 1rem; }
+  .blocker { border-left-color: #cf222e; }
+  .major { border-left-color: #bf8700; }
+  .minor { border-left-color: #57606a; }
+  img { max-width: 100%; border: 1px solid #ddd; margin-top: 0.5rem; }
+</style>
+</head>
+<body>
+<h1>WhisperDeck UX Audit Report</h1>
+<h2>Journey summary</h2>
+<table>
+<tr><th>Journey</th><th>Status</th></tr>
+<!-- one <tr><td>Journey N: name</td><td class="STATUS">STATUS</td></tr> per journey -->
+</table>
+<h2>Findings</h2>
+<!-- one .finding div per finding, grouped blocker/major/minor, e.g.:
+<div class="finding blocker">
+  <strong>Journey 2, step: stop recording</strong><br>
+  Type: missing-feedback<br>
+  Note: No visible indicator during recording; user can't tell it's live.<br>
+  <img src="journey2-live-capture-1.png">
+</div>
+-->
+</body>
+</html>
+"@
+
+Set-Content -Path $reportPath -Value $html -Encoding UTF8
+```
+
+3. Open the report in the user's real default browser (not the
+   Playwright-controlled instance — it may already be torn down, and
+   it's not a full browsing experience anyway):
+
+```powershell
+Start-Process (Resolve-Path $reportPath)
+```
+
+4. Print the full list of `[PASS|FAIL|SKIPPED]` lines from every
+   journey, plus the report file path, as the final output of this
+   skill.
