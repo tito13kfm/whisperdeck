@@ -13,3 +13,4 @@ test_audio.mp3
 *.log
 dist/
 scripts/.build-cache/
+.playwright-mcp/

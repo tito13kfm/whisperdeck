@@ -30,6 +30,13 @@ stale.
 (API-only via `PATCH /api/transcripts/{id}`) is an already-decided,
 intentional gap — do not log it as a new finding if encountered again.
 
+**Optional arg — `skip-mic-capture`:** if invoked with this arg (e.g.
+`/e2e-ux-audit skip-mic-capture`), skip Journey 2 entirely without
+attempting the mic-permission flow — report it as
+`SKIPPED(mic capture skipped by request)` and move straight to Journey 3.
+Use this when a fast, hands-off run is wanted and live-capture coverage
+isn't needed this time.
+
 ## Setup
 
 1. Pick an isolated data dir and port. On Windows PowerShell:
@@ -174,20 +181,37 @@ Log any findings noticed during steps 1-6 using the Findings format.
 
 ## Journey 2: Live capture end-to-end
 
-Only runs if Setup launched Chromium with
-`--use-file-for-fake-audio-capture`; otherwise
-`SKIPPED(no fixture/fake device)`.
+Skip immediately with `SKIPPED(mic capture skipped by request)` if the
+skill was invoked with the `skip-mic-capture` arg (see top of this file).
+
+Otherwise, only runs if Setup launched Chromium with
+`--use-file-for-fake-audio-capture`; if that flag wasn't accepted by the
+current Playwright MCP session (no CLI control over browser launch args),
+this journey needs a manual assist — see step 2.
 
 This is the least-verified path in the app — the scripted
 `e2e-test-app` skill has zero live evidence for it. Pay close attention
 to the recording UI itself, not just the resulting job status.
 
-1. Trigger the "Live capture" control (`#key-rec` in `static/rack.js`).
+1. Trigger the "Live capture" control (`#key-rec` in `static/rack.js`),
+   then confirm through the app's own "Start a live capture?" modal.
    - Watch: does the button's visual state change immediately (e.g. to
      a "recording" look) or is there a delay/no feedback at all?
-2. Grant the (fake) microphone permission prompt if one appears.
-   - Watch: if a permission prompt appears, is it clear to the user
-     what's being requested and why?
+2. Calling `getUserMedia` without a working fake-device flag pops a real
+   OS/browser mic-permission dialog that Playwright cannot see or
+   dismiss — the automation just hangs at this point with no visible
+   change in the accessibility snapshot. **Do not retry the click or the
+   evaluate call in a loop when this happens; that will hang the browser
+   session again.** Instead:
+   - Pause and tell the user: a mic-permission dialog needs a manual
+     accept — ask them to click Allow in the browser window, then say
+     "continue" once done.
+   - Wait for the user's go-ahead before re-checking the page state.
+   - If the user says to skip it instead, mark this journey
+     `SKIPPED(mic permission needs manual accept)` and move to Journey 3.
+   - If a fake-device flag WAS honored (no real dialog appears and the
+     recording state changes on its own), proceed automatically —
+     no pause needed.
 3. While "recording" (5-10 seconds), observe the UI.
    - Watch: is there a visible timer, waveform, or other live indicator
      that recording is actually happening? A control with no feedback

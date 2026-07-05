@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>WhisperDeck UX Audit Report</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 900px; margin: 2rem auto; padding: 0 1rem; }
+  table { border-collapse: collapse; width: 100%; margin-bottom: 2rem; }
+  th, td { border: 1px solid #ccc; padding: 0.5rem; text-align: left; }
+  .PASS { color: #1a7f37; }
+  .FAIL { color: #cf222e; }
+  .SKIPPED { color: #9a6700; }
+  .finding { border-left: 4px solid #ccc; padding: 0.5rem 1rem; margin-bottom: 1rem; }
+  .blocker { border-left-color: #cf222e; }
+  .major { border-left-color: #bf8700; }
+  .minor { border-left-color: #57606a; }
+  img { max-width: 100%; border: 1px solid #ddd; margin-top: 0.5rem; }
+  a { color: #0969da; }
+</style>
+</head>
+<body>
+<h1>WhisperDeck UX Audit Report</h1>
+<p>Run against isolated local server (Moonshine STT, local diarization, Lemonade LLM). All findings filed as GitHub issues #4&ndash;#9.</p>
+
+<h2>Journey summary</h2>
+<table>
+<tr><th>Journey</th><th>Status</th></tr>
+<tr><td>Journey 1: Cold start</td><td class="PASS">PASS</td></tr>
+<tr><td>Journey 2: Live capture</td><td class="SKIPPED">SKIPPED (no fake-device support in this Playwright MCP session)</td></tr>
+<tr><td>Journey 3: Voice roster</td><td class="PASS">PASS</td></tr>
+<tr><td>Journey 4: Wrap-up flow</td><td class="PASS">PASS</td></tr>
+<tr><td>Journey 5: Backlog management</td><td class="PASS">PASS</td></tr>
+<tr><td>Journey 6: Misconfiguration recovery</td><td class="PASS">PASS</td></tr>
+</table>
+
+<h2>Findings</h2>
+
+<div class="finding major">
+  <strong>Journey 6/4, step: summarize/correction fails</strong><br>
+  Type: missing-feedback<br>
+  Note: Failed background jobs give zero feedback in the transcript view &mdash; stale output stays visible with no error cue; failure only visible in the separate Queue panel.<br>
+  Issue: <a href="https://github.com/tito13kfm/whisperdesk/issues/5">#5</a>
+</div>
+
+<div class="finding major">
+  <strong>Journey 4, step: check for export</strong><br>
+  Type: unreachable-feature<br>
+  Note: No copy/export/download affordance anywhere for transcript, corrected text, or summary.<br>
+  Issue: <a href="https://github.com/tito13kfm/whisperdesk/issues/7">#7</a>
+</div>
+
+<div class="finding minor">
+  <strong>Journey 1, step: first screen / nav</strong><br>
+  Type: mislabeled<br>
+  Note: "Channel bank" nav label doesn't read as "transcript list" to a first-time user.<br>
+  Issue: <a href="https://github.com/tito13kfm/whisperdesk/issues/4">#4</a>
+</div>
+
+<div class="finding minor">
+  <strong>Journey 3/5, step: rename speaker / remove profile / delete transcript</strong><br>
+  Type: other<br>
+  Note: Native browser prompt()/confirm() dialogs used instead of the app's own themed modals.<br>
+  Issue: <a href="https://github.com/tito13kfm/whisperdesk/issues/6">#6</a>
+</div>
+
+<div class="finding minor">
+  <strong>Journey 5, step: open transcript list</strong><br>
+  Type: too-many-steps<br>
+  Note: No search/sort/filter; duplicate filenames indistinguishable beyond relative timestamp.<br>
+  Issue: <a href="https://github.com/tito13kfm/whisperdesk/issues/8">#8</a>
+</div>
+
+<div class="finding minor">
+  <strong>Journey 1/4, step: open transcript from list; Journey 3, step: voice match on new upload</strong><br>
+  Type: too-many-steps / missing-feedback<br>
+  Note: Channel bank row click only expands (2 clicks to open); no proactive nudge that an enrolled voice profile could match a new transcript.<br>
+  Issue: <a href="https://github.com/tito13kfm/whisperdesk/issues/9">#9</a>
+</div>
+
+<h2>Notes</h2>
+<ul>
+  <li>Journey 2 (live capture) could not run: the Playwright MCP browser session in this environment doesn't expose Chromium launch flags (<code>--use-fake-device-for-media-stream</code>), so <code>getUserMedia</code> has no fake device to grant. The app's own pre-recording confirmation modal ("Start a live capture?") is good UX and worked correctly up to the permission boundary.</li>
+  <li>Journey 5's job-cancel step was inconclusive rather than a finding: local Lemonade jobs on this test fixture complete in a few seconds, faster than the UI could be raced to the Queue panel to cancel. The cancel endpoint exists and responds; a real cancel-under-load test would need a longer-running job.</li>
+  <li>Positive notes: the Monitor dashboard gives a clear first-run CTA; the Transcribe deck shows live progress text throughout upload/transcription; the pre-recording confirmation modal and the "Enroll marked clips" dialog are both well-styled and clear; the app recovered cleanly once the broken provider config was restored (Journey 6).</li>
+</ul>
+</body>
+</html>
