@@ -162,6 +162,41 @@ Report: `[PASS|FAIL] Journey 1: Cold start`
 
 Log any findings noticed during steps 1-6 using the Findings format.
 
+## Journey 2: Live capture end-to-end
+
+Only runs if Setup launched Chromium with
+`--use-file-for-fake-audio-capture`; otherwise
+`SKIPPED(no fixture/fake device)`.
+
+This is the least-verified path in the app — the scripted
+`e2e-test-app` skill has zero live evidence for it. Pay close attention
+to the recording UI itself, not just the resulting job status.
+
+1. Trigger the "Live capture" control (`#key-rec` in `static/rack.js`).
+   - Watch: does the button's visual state change immediately (e.g. to
+     a "recording" look) or is there a delay/no feedback at all?
+2. Grant the (fake) microphone permission prompt if one appears.
+   - Watch: if a permission prompt appears, is it clear to the user
+     what's being requested and why?
+3. While "recording" (5-10 seconds), observe the UI.
+   - Watch: is there a visible timer, waveform, or other live indicator
+     that recording is actually happening? A control with no feedback
+     during an active recording is a strong candidate for a
+     `missing-feedback` finding.
+4. Stop recording via the same control (its title/state should toggle,
+   per `static/rack.js`'s toggle logic).
+   - Watch: is it obvious the recording stopped (e.g. button reverts,
+     a "processing" state appears) or does the UI look unchanged?
+5. Confirm a new transcription job is submitted and reaches a terminal
+   status (`completed`, `failed`, or `partial`) using the same poll
+   pattern as Journey 1.
+   - Watch: does the new transcript appear in the list/UI automatically,
+     or does the user have to manually navigate to find it?
+
+Report: `[PASS|FAIL|SKIPPED(reason)] Journey 2: Live capture`
+
+Log any findings noticed during steps 1-5 using the Findings format.
+
 ## Teardown
 
 Run this after all journeys, even if some failed:
