@@ -300,6 +300,75 @@ Report: `[PASS|FAIL] Scenario 8: Cancel/resume/retry`
 
 Report: `[PASS|FAIL] Scenario 9: Retranscribe`
 
+## Scenario 10: Diarization (standalone trigger + rediarize)
+
+Requires `$TRANSCRIPT_ID` to have been transcribed from a genuinely
+multi-speaker fixture. If Scenario 5 fell back to `test.mp4` (single
+speaker, 3 seconds), mark this `SKIPPED(no multispeaker fixture)` and do
+not attempt it — a single-speaker recording cannot validate speaker
+separation.
+
+1. Trigger the standalone diarize action on `$TRANSCRIPT_ID`.
+   - Check: use the rediarize button at `static/rack.js:1937`
+     (`data-dact="rediarize"`, calls `POST /api/transcripts/{id}/rediarize`
+     at `app.py:1030`).
+2. Poll until the diarization job completes.
+   - Check: segments now show more than one distinct speaker label.
+3. Trigger "rediarize".
+   - Check: it re-runs and completes without error.
+
+Report: `[PASS|FAIL|SKIPPED(reason)] Scenario 10: Diarization`
+
+## Scenario 11: Speaker rename + segment retag
+
+Same fixture gate as Scenario 10.
+
+1. Rename one detected speaker label (e.g. `Speaker 1` -> `Alice`) via the
+   UI.
+   - Check: click on the speaker label rendered at `static/rack.js:1636`
+     (`data-seg-rename` attribute). This opens a prompt and calls `POST
+     /api/transcripts/{id}/speakers/rename` at `app.py:773` via the
+     `renameSpeaker()` function at `rack.js:1721`. The new name appears on
+     all of that speaker's segments in the transcript view, not just one.
+2. Retag a single segment to a different speaker.
+   - Check: use the "Select lines…" button at `rack.js:1962`, select a
+     segment, then click "Re-tag selected" button (also `rack.js:1962`).
+     This opens the retag modal and calls `POST /api/transcripts/{id}/segments/retag`
+     at `app.py:820`. That segment now shows the reassigned speaker label, and
+     total segment count is unchanged (retagging doesn't create/delete
+     segments).
+
+Report: `[PASS|FAIL|SKIPPED(reason)] Scenario 11: Speaker rename/retag`
+
+## Scenario 12: Voice bank (enroll / list / identify / delete)
+
+Same fixture gate as Scenario 10.
+
+1. From a segment belonging to "Alice" (Scenario 11), trigger
+   "enroll-speaker" to create a voice bank profile.
+   - Check: use the "Enroll marked clips" button at `rack.js:1960`
+     (id="enroll-marked-btn"). Mark a segment with the ◈ flag first, then
+     click the button to open the enroll modal. This calls `POST
+     /api/transcripts/{id}/enroll-speaker` at `app.py:858`. A new voice
+     profile named `Alice` (or as entered) appears under `GET /api/voices`
+     at `app.py:1223`.
+2. Upload a second transcript from the same multispeaker fixture (or a
+   different clip containing the same voice).
+3. Trigger "identify" against the voice bank on this new transcript.
+   - Check: navigate to the Voice Roster view and click the "Identify a voice…"
+     button at `rack.js:2295`. This calls `POST /api/voices/identify` at
+     `app.py:1259`. Or, trigger "Match against voice roster" button in the
+     detail view at `rack.js:1938` (data-dact="voicematch"), which calls
+     `POST /api/transcripts/{id}/voice-match` at `app.py:1061`. At least
+     one segment in the new transcript gets matched/labeled against the
+     enrolled `Alice` profile.
+4. Delete the enrolled voice profile.
+   - Check: in the Voice Roster view, trigger the delete button for the
+     `Alice` profile. This calls `DELETE /api/voices/{profile_id}` at
+     `app.py:1286`. It no longer appears under `GET /api/voices`.
+
+Report: `[PASS|FAIL|SKIPPED(reason)] Scenario 12: Voice bank`
+
 ## Teardown
 
 Run this after all scenarios, even if some failed:
