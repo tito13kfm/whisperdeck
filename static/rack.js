@@ -1592,6 +1592,8 @@ async function loadQueue() {
   const jobs = data.jobs || [];
   updateQueueBadge(data.active || 0);
 
+  const openIds = new Set([...root.querySelectorAll('details[open]')].map(d => d.dataset.qid));
+
   const rows = jobs.map(j => {
     const sv = jobStatusView(j);
     const cells = [...Array(11)].map((_, i) => ({ on: sv.color !== null && i < sv.lit, color: sv.color }));
@@ -1603,7 +1605,7 @@ async function loadQueue() {
                   j.error || null,
                   timeAgo(j.created_at)].filter(Boolean).join(' · ');
     return `
-    <details class="unit" data-qid="${escapeHtml(String(j.id))}">
+    <details class="unit" data-qid="${escapeHtml(String(j.id))}" ${openIds.has(String(j.id)) ? 'open' : ''}>
       <summary style="list-style:none;cursor:pointer;padding:12px 22px 12px 34px;display:grid;grid-template-columns:88px 1fr 170px 100px;align-items:center;gap:14px">
         <span class="vfd" style="width:88px"><span>${KIND_LABELS[j.kind] || j.kind}</span></span>
         <div style="min-width:0">
