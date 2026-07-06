@@ -4,6 +4,7 @@
 
 ![WhisperDeck](https://img.shields.io/badge/version-0.6-blue)
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
+![License](https://img.shields.io/badge/license-Hippocratic%203.0-lightgrey)
 
 ---
 
@@ -274,7 +275,7 @@ Key prefixes (validated on input):
 
 ## License
 
-No license file yet — all rights reserved by default until one is added. This is currently a private project.
+[Hippocratic License 3.0](LICENSE.md) (base terms, no additional modules) — permissive like MIT for intellectual property, with an added condition that Licensee not use the software to violate fundamental human rights (no genocide, slavery, torture, discrimination, forced labor, union-busting, etc. — see [firstdonoharm.dev](https://firstdonoharm.dev/) for the full rationale). Not OSI-approved (it restricts fields of use), so some organizations' legal teams won't touch it.
 
 ---
 
