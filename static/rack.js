@@ -2028,21 +2028,31 @@ async function summaryPlainText(transcriptId) {
     ['Action items', s.action_items || []],
     ['Decisions', s.decisions || []],
   ].filter(([, items]) => items.length);
-  return sections.map(([title, items]) => title + '\n' + items.map(it => '- ' + it).join('\n')).join('\n\n');
+  const text = sections.map(([title, items]) => title + '\n' + items.map(it => '- ' + it).join('\n')).join('\n\n');
+  return { text, provider: s.provider, model: s.model };
 }
 
 async function handleExportClick(kind, copy) {
   const t = detailData;
-  let text = '';
-  if (kind === 'transcript') text = transcriptPlainText(t);
-  else if (kind === 'corrected') text = t.corrected_text || '';
-  else if (kind === 'summary') {
-    try { text = await summaryPlainText(t.id); }
+  let text = '', header = '';
+  if (kind === 'transcript') {
+    text = transcriptPlainText(t);
+    header = `[transcribed with ${t.provider}/${t.model}]`;
+  } else if (kind === 'corrected') {
+    text = t.corrected_text || '';
+    header = `[corrected with ${t.correction_model || 'unknown'}]`;
+  } else if (kind === 'summary') {
+    try {
+      const s = await summaryPlainText(t.id);
+      text = s.text;
+      header = `[summarized with ${s.provider || 'unknown'}/${s.model || 'unknown'}]`;
+    }
     catch (e) { toast('Could not load summary to export: ' + e.message, 'error'); return; }
   }
   if (!text.trim()) { toast('Nothing to export yet', 'info'); return; }
-  if (copy) copyToClipboard(text);
-  else downloadTextFile((t.title || t.filename || 'transcript').replace(/[^\w.-]+/g, '_') + '-' + kind + '.txt', text);
+  const fullText = header + '\n\n' + text;
+  if (copy) copyToClipboard(fullText);
+  else downloadTextFile((t.title || t.filename || 'transcript').replace(/[^\w.-]+/g, '_') + '-' + kind + '.txt', fullText);
 }
 
 function correctedHtml(t) {
