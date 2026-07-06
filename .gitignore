@@ -14,3 +14,4 @@ test_audio.mp3
 dist/
 scripts/.build-cache/
 .playwright-mcp/
+tests/fixtures/
