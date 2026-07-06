@@ -2040,7 +2040,7 @@ async function handleExportClick(kind, copy) {
     header = `[transcribed with ${t.provider}/${t.model}]`;
   } else if (kind === 'corrected') {
     text = t.corrected_text || '';
-    header = `[corrected with ${t.correction_model || 'unknown'}]`;
+    header = `[${t.provider}/${t.model} · corrected by ${t.correction_model || 'unknown'}]`;
   } else if (kind === 'summary') {
     try {
       const s = await summaryPlainText(t.id);
