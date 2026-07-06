@@ -226,12 +226,13 @@ Return ONLY valid JSON, no markdown, no code fences."""
             "max_tokens": 8192,
         }
         # Forces the model to emit well-formed JSON instead of prose that
-        # merely resembles JSON — without this, long transcripts sometimes
-        # produced replies that got cut off mid-object and failed to parse.
-        # OpenAI-compatible endpoints that don't support it (e.g. Ollama's
-        # local /v1) just ignore an unrecognized field.
-        if provider_name in ("groq", "openai", "openrouter"):
-            request_body["response_format"] = {"type": "json_object"}
+        # merely resembles JSON. Sent unconditionally, including to local
+        # providers: OpenAI-compatible endpoints that don't support this
+        # field just ignore it, while ones that do (current Ollama/LM
+        # Studio/llama.cpp server) enforce valid JSON output, which is
+        # exactly what local models — with weaker instruction-following —
+        # need most.
+        request_body["response_format"] = {"type": "json_object"}
 
         headers = {"Content-Type": "application/json"}
         if api_key:
@@ -247,7 +248,14 @@ Return ONLY valid JSON, no markdown, no code fences."""
         if resp.status_code != 200:
             raise ProviderError(f"Summarization API error ({resp.status_code}): {resp.text}")
 
-        content = resp.json()["choices"][0]["message"]["content"]
+        choice = resp.json()["choices"][0]
+        content = choice["message"]["content"]
+        if choice.get("finish_reason") == "length":
+            raise ProviderError(
+                "Summary generation was cut off (model hit its token/context "
+                "limit) — try a shorter recording or a model with a larger "
+                "context window."
+            )
         content = content.strip()
         if content.startswith("```"):
             content = content.split("\n", 1)[-1]
@@ -256,13 +264,8 @@ Return ONLY valid JSON, no markdown, no code fences."""
 
         try:
             summary_data = json.loads(content)
-        except json.JSONDecodeError:
-            summary_data = {
-                "short_summary": content[:500],
-                "key_points": [],
-                "action_items": [],
-                "decisions": [],
-            }
+        except json.JSONDecodeError as e:
+            raise ProviderError(f"Model did not return valid JSON ({e}): {content[:200]!r}")
 
         existing = db.query(Summary).filter(Summary.transcript_id == transcript_id).first()
         if existing:
