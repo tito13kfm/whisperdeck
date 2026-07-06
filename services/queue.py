@@ -273,6 +273,7 @@ def retry_failed_chunks(db, transcript_id: int) -> int:
         transcript = db.query(Transcript).filter(Transcript.id == transcript_id).first()
         if transcript:
             transcript.status = "processing"
+            transcript.queue_dismissed = False
         db.commit()
     return len(failed)
 
@@ -336,8 +337,41 @@ def resume_cancelled_chunks(db, transcript_id: int) -> int:
     transcript = db.query(Transcript).filter(Transcript.id == transcript_id).first()
     if transcript and transcript.status == "cancelled":
         transcript.status = "processing"
+        transcript.queue_dismissed = False
     db.commit()
     return len(cancelled)
+
+
+TERMINAL_TRANSCRIPT_STATUSES = ("completed", "failed", "partial", "cancelled")
+
+
+def dismiss_transcript_queue_entry(db, user_id: int, transcript_id: int) -> Transcript:
+    """Hide a terminal transcription entry from the Queue screen. Non-destructive
+    — the transcript and its content are untouched, only queue_dismissed flips."""
+    t = db.query(Transcript).filter(Transcript.id == transcript_id, Transcript.user_id == user_id).first()
+    if not t:
+        raise LookupError("Transcript not found")
+    if t.status not in TERMINAL_TRANSCRIPT_STATUSES:
+        raise ValueError(f"Cannot dismiss a transcript that is still {t.status}")
+    t.queue_dismissed = True
+    db.commit()
+    return t
+
+
+def clear_finished_transcript_queue_entries(db, user_id: int) -> int:
+    transcripts = (
+        db.query(Transcript)
+        .filter(
+            Transcript.user_id == user_id,
+            Transcript.status.in_(TERMINAL_TRANSCRIPT_STATUSES),
+            Transcript.queue_dismissed.is_(False),
+        )
+        .all()
+    )
+    for t in transcripts:
+        t.queue_dismissed = True
+    db.commit()
+    return len(transcripts)
 
 
 def reset_stuck_transcription_jobs(db) -> int:

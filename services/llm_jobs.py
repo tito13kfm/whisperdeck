@@ -14,6 +14,7 @@ from services.audio_prep import extract_clips_concat
 from services.voice_id import voice_id_service
 
 ACTIVE_STATUSES = ("pending", "running")
+TERMINAL_LLM_STATUSES = ("completed", "failed", "cancelled")
 _MAX_CONCURRENT_JOBS = 2
 
 VALID_KINDS = ("correction", "summary", "rediarize", "voice_match")
@@ -85,6 +86,36 @@ def reset_stuck_llm_jobs(db) -> int:
         job.error = "Interrupted by server restart"
     db.commit()
     return len(stuck)
+
+
+def dismiss_llm_job(db, user_id: int, job_id: int) -> LlmJob:
+    """Hide a terminal job from the Queue screen. Non-destructive — the row
+    (and any correction/summary text already merged into the transcript)
+    is untouched, only `dismissed` flips."""
+    job = db.query(LlmJob).filter(LlmJob.id == job_id, LlmJob.user_id == user_id).first()
+    if not job:
+        raise LookupError("Job not found")
+    if job.status not in TERMINAL_LLM_STATUSES:
+        raise ValueError(f"Cannot dismiss a job that is still {job.status}")
+    job.dismissed = True
+    db.commit()
+    return job
+
+
+def clear_finished_llm_jobs(db, user_id: int) -> int:
+    jobs = (
+        db.query(LlmJob)
+        .filter(
+            LlmJob.user_id == user_id,
+            LlmJob.status.in_(TERMINAL_LLM_STATUSES),
+            LlmJob.dismissed.is_(False),
+        )
+        .all()
+    )
+    for job in jobs:
+        job.dismissed = True
+    db.commit()
+    return len(jobs)
 
 
 def enqueue_auto_correction(db, transcript, user_settings: dict) -> LlmJob:

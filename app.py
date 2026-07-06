@@ -29,13 +29,18 @@ from services.transcription import TranscriptionService
 from services.diarization import DiarizationService
 from services.voice_id import voice_id_service
 from services.audio_prep import transcode_for_upload, AudioPrepError, chunk_audio, get_audio_duration, extract_clips_concat
-from services.queue import create_chunk_jobs, retry_failed_chunks, queue_worker_loop, compute_queue_status, cancel_transcript_jobs, resume_cancelled_chunks, reset_stuck_transcription_jobs
+from services.queue import (
+    create_chunk_jobs, retry_failed_chunks, queue_worker_loop, compute_queue_status,
+    cancel_transcript_jobs, resume_cancelled_chunks, reset_stuck_transcription_jobs,
+    dismiss_transcript_queue_entry, clear_finished_transcript_queue_entries,
+)
 from services.hotwords import list_hotwords, add_hotword, delete_hotword
 from services.correction import extract_hotwords_from_doc
 from services.model_catalog import get_correction_models
 from services.llm_jobs import (
     enqueue_llm_job, enqueue_auto_correction, serialize_llm_job, latest_job,
     cancel_llm_job, rerun_llm_job, llm_worker_loop, reset_stuck_llm_jobs,
+    dismiss_llm_job, clear_finished_llm_jobs,
 )
 from backends import list_providers, get_provider, LOCAL_PROVIDERS
 
@@ -1157,14 +1162,14 @@ async def list_jobs(limit: int = Query(50, le=200), db: Session = Depends(get_db
     are active or ran through the chunk queue."""
     llm = (
         db.query(LlmJob)
-        .filter(LlmJob.user_id == current_user.id)
+        .filter(LlmJob.user_id == current_user.id, LlmJob.dismissed.is_(False))
         .order_by(LlmJob.id.desc())
         .limit(limit)
         .all()
     )
     transcripts = (
         db.query(Transcript)
-        .filter(Transcript.user_id == current_user.id)
+        .filter(Transcript.user_id == current_user.id, Transcript.queue_dismissed.is_(False))
         .order_by(Transcript.created_at.desc())
         .limit(limit)
         .all()
@@ -1209,6 +1214,28 @@ async def rerun_job(job_id: int, db: Session = Depends(get_db), current_user: Us
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     return {"ok": True, "job": serialize_llm_job(job)}
+
+
+@app.post("/api/jobs/{job_id}/dismiss")
+async def dismiss_job(job_id: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    """Hide one terminal Queue entry — either kind of id shape (see list_jobs)."""
+    try:
+        if job_id.startswith("transcription-"):
+            t = dismiss_transcript_queue_entry(db, current_user.id, int(job_id.removeprefix("transcription-")))
+            return {"ok": True, "job": _transcription_queue_entry(db, t)}
+        job = dismiss_llm_job(db, current_user.id, int(job_id))
+        return {"ok": True, "job": serialize_llm_job(job)}
+    except LookupError:
+        raise HTTPException(status_code=404, detail="Job not found")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/api/jobs/clear")
+async def clear_finished_jobs(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    """Bulk-hide every terminal Queue entry (both kinds) for this user."""
+    cleared = clear_finished_llm_jobs(db, current_user.id) + clear_finished_transcript_queue_entries(db, current_user.id)
+    return {"ok": True, "cleared": cleared}
 
 
 @app.get("/api/transcripts/{transcript_id}/summary")

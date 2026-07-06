@@ -8,12 +8,12 @@ from unittest.mock import AsyncMock, patch
 from database import LlmJob, Transcript, User, ProviderConfig
 from services.llm_jobs import (
     enqueue_llm_job, run_llm_job, cancel_llm_job, rerun_llm_job, llm_worker_tick,
-    reset_stuck_llm_jobs,
+    reset_stuck_llm_jobs, dismiss_llm_job, clear_finished_llm_jobs,
 )
 
 
-def _make_user_and_transcript(db_session, segments=None):
-    user = User(username="queueop", password_hash="x", password_salt="y")
+def _make_user_and_transcript(db_session, segments=None, username="queueop"):
+    user = User(username=username, password_hash="x", password_salt="y")
     db_session.add(user)
     db_session.commit()
     t = Transcript(
@@ -80,6 +80,70 @@ def test_reset_stuck_llm_jobs_fails_running_and_leaves_others_alone(db_session):
     assert running.error == "Interrupted by server restart"
     assert pending.status == "pending"
     assert completed.status == "completed"
+
+
+def test_dismiss_llm_job_requires_terminal_status(db_session):
+    user, t = _make_user_and_transcript(db_session)
+    job = enqueue_llm_job(db_session, user.id, t.id, "correction", "groq", "m1")
+    job.status = "running"
+    db_session.commit()
+
+    try:
+        dismiss_llm_job(db_session, user.id, job.id)
+        assert False, "expected ValueError for a running job"
+    except ValueError:
+        pass
+
+    job.status = "completed"
+    db_session.commit()
+    dismissed = dismiss_llm_job(db_session, user.id, job.id)
+    assert dismissed.dismissed is True
+
+
+def test_dismiss_llm_job_scoped_to_owner(db_session):
+    user, t = _make_user_and_transcript(db_session)
+    other, _ = _make_user_and_transcript(db_session, username="queueop2")
+    job = enqueue_llm_job(db_session, user.id, t.id, "correction", "groq", "m1")
+    job.status = "completed"
+    db_session.commit()
+
+    try:
+        dismiss_llm_job(db_session, other.id, job.id)
+        assert False, "expected LookupError for another user's job"
+    except LookupError:
+        pass
+
+    try:
+        dismiss_llm_job(db_session, user.id, 999999)
+        assert False, "expected LookupError for a nonexistent job"
+    except LookupError:
+        pass
+
+
+def test_clear_finished_llm_jobs_only_touches_terminal_undismissed_for_owner(db_session):
+    user, t = _make_user_and_transcript(db_session)
+    other, other_t = _make_user_and_transcript(db_session, username="queueop3")
+
+    done = enqueue_llm_job(db_session, user.id, t.id, "correction", "groq", "m1")
+    done.status = "completed"
+    running = enqueue_llm_job(db_session, user.id, t.id, "summary", "groq", "m1")
+    running.status = "running"
+    already_dismissed = enqueue_llm_job(db_session, user.id, t.id, "rediarize", "groq", "m1")
+    already_dismissed.status = "failed"
+    already_dismissed.dismissed = True
+    other_done = enqueue_llm_job(db_session, other.id, other_t.id, "correction", "groq", "m1")
+    other_done.status = "completed"
+    db_session.commit()
+
+    count = clear_finished_llm_jobs(db_session, user.id)
+
+    assert count == 1
+    db_session.refresh(done)
+    db_session.refresh(running)
+    db_session.refresh(other_done)
+    assert done.dismissed is True
+    assert running.dismissed is False
+    assert other_done.dismissed is False  # another user's job untouched
 
 
 def test_run_llm_job_correction_uses_local_llm_url_independent_of_stt(db_session):

@@ -48,6 +48,7 @@ class Transcript(Base):
     corrected_text = Column(Text, nullable=True)
     correction_error = Column(Text, nullable=True)
     correction_model = Column(String(128), nullable=True)  # e.g. "groq/llama-3.3-70b-versatile"
+    queue_dismissed = Column(Boolean, default=False)  # hides a terminal transcription entry from the Queue screen only
     created_at = Column(DateTime, default=utcnow_naive)
     updated_at = Column(DateTime, default=utcnow_naive, onupdate=utcnow_naive)
 
@@ -89,6 +90,7 @@ class LlmJob(Base):
     provider = Column(String(64), default="")
     model = Column(String(128), default="")
     error = Column(Text, nullable=True)
+    dismissed = Column(Boolean, default=False)  # hides a terminal job from the Queue screen only
     created_at = Column(DateTime, default=utcnow_naive)
     updated_at = Column(DateTime, default=utcnow_naive, onupdate=utcnow_naive)
 
@@ -247,7 +249,8 @@ def init_db(db_path: str = "data/whisperdesk.db") -> tuple:
     migrated_tables = migrate_schema(engine)
     Base.metadata.create_all(engine)
     ensure_columns(engine, "users", {"settings": "JSON"})
-    ensure_columns(engine, "transcripts", {"audio_path": "TEXT", "diarize_requested": "BOOLEAN", "num_speakers": "INTEGER", "processed_size_bytes": "INTEGER", "corrected_text": "TEXT", "correction_error": "TEXT", "correction_model": "TEXT"})
+    ensure_columns(engine, "transcripts", {"audio_path": "TEXT", "diarize_requested": "BOOLEAN", "num_speakers": "INTEGER", "processed_size_bytes": "INTEGER", "corrected_text": "TEXT", "correction_error": "TEXT", "correction_model": "TEXT", "queue_dismissed": "BOOLEAN DEFAULT 0"})
+    ensure_columns(engine, "llm_jobs", {"dismissed": "BOOLEAN DEFAULT 0"})
     SessionLocal = sessionmaker(bind=engine)
     return engine, SessionLocal, migrated_tables
 

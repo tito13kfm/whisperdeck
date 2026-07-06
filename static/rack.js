@@ -1578,6 +1578,7 @@ function jobActions(j) {
     if (j.status === 'pending' || j.status === 'running') acts.push(btn('j-cancel', 'Cancel'));
     if (j.status === 'failed' || j.status === 'cancelled') acts.push(btn('j-rerun', 'Rerun'));
   }
+  if (['completed', 'failed', 'partial', 'cancelled'].includes(j.status)) acts.push(btn('j-dismiss', 'Clear'));
   acts.push(btn('open', 'Open transcript'));
   return acts.join('');
 }
@@ -1622,10 +1623,14 @@ async function loadQueue() {
   }).join('');
 
   const active = data.active || 0;
+  const finishedCount = jobs.filter(j => ['completed', 'failed', 'partial', 'cancelled'].includes(j.status)).length;
   root.innerHTML = `
     <div class="page-head">
       <h1 class="t-title">Queue</h1>
-      <div class="page-status" style="color:${active ? AMBER : GREEN}">${ledDot(active ? AMBER : GREEN, true, 9)}${jobs.length} jobs · ${active} active</div>
+      <div style="display:flex;align-items:center;gap:14px">
+        <div class="page-status" style="color:${active ? AMBER : GREEN}">${ledDot(active ? AMBER : GREEN, true, 9)}${jobs.length} jobs · ${active} active</div>
+        ${finishedCount ? `<button class="btn" style="font-size:12px;padding:6px 12px;border-color:var(--inset-edge)" data-jact="clear-finished">Clear finished (${finishedCount})</button>` : ''}
+      </div>
     </div>
     ${jobs.length ? rows : '<div class="empty-unit">Queue idle — jobs appear here when the machine is working</div>'}`;
 
@@ -1639,6 +1644,8 @@ async function loadQueue() {
       if (act === 't-cancel') { await api('/api/transcripts/' + tid + '/cancel', { method: 'POST' }); toast('Cancelled — resumable later', 'info'); }
       if (act === 't-resume') { const r = await api('/api/transcripts/' + tid + '/resume', { method: 'POST' }); toast('Resumed ' + r.resumed + ' sections', 'info'); }
       if (act === 't-retry') { const r = await api('/api/transcripts/' + tid + '/retry-failed-chunks', { method: 'POST' }); toast('Retrying ' + r.retried + ' sections', 'info'); }
+      if (act === 'j-dismiss') { await api('/api/jobs/' + jid + '/dismiss', { method: 'POST' }); toast('Cleared', 'info'); }
+      if (act === 'clear-finished') { const r = await api('/api/jobs/clear', { method: 'POST' }); toast('Cleared ' + r.cleared + ' finished job(s)', 'info'); }
       loadQueue();
     } catch (err) { toast(err.message, 'error'); }
   }));

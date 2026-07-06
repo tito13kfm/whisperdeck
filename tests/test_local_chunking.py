@@ -105,6 +105,99 @@ def test_reset_stuck_transcription_jobs_fails_running_and_leaves_others_alone(db
     assert completed.status == "completed"
 
 
+def test_dismiss_transcript_queue_entry_requires_terminal_status(db_session):
+    from services.queue import dismiss_transcript_queue_entry
+
+    user = User(username="dismisser", password_hash="x", password_salt="y")
+    db_session.add(user)
+    db_session.commit()
+    t = Transcript(user_id=user.id, title="t", filename="f.wav", status="processing")
+    db_session.add(t)
+    db_session.commit()
+
+    try:
+        dismiss_transcript_queue_entry(db_session, user.id, t.id)
+        assert False, "expected ValueError while still processing"
+    except ValueError:
+        pass
+
+    t.status = "completed"
+    db_session.commit()
+    dismissed = dismiss_transcript_queue_entry(db_session, user.id, t.id)
+    assert dismissed.queue_dismissed is True
+
+
+def test_dismiss_transcript_queue_entry_scoped_to_owner(db_session):
+    from services.queue import dismiss_transcript_queue_entry
+
+    user = User(username="dismisser2", password_hash="x", password_salt="y")
+    other = User(username="dismisser3", password_hash="x", password_salt="y")
+    db_session.add_all([user, other])
+    db_session.commit()
+    t = Transcript(user_id=user.id, title="t", filename="f.wav", status="completed")
+    db_session.add(t)
+    db_session.commit()
+
+    try:
+        dismiss_transcript_queue_entry(db_session, other.id, t.id)
+        assert False, "expected LookupError for another user's transcript"
+    except LookupError:
+        pass
+
+    try:
+        dismiss_transcript_queue_entry(db_session, user.id, 999999)
+        assert False, "expected LookupError for a nonexistent transcript"
+    except LookupError:
+        pass
+
+
+def test_clear_finished_transcript_queue_entries_only_touches_terminal_undismissed_for_owner(db_session):
+    from services.queue import clear_finished_transcript_queue_entries
+
+    user = User(username="clearer", password_hash="x", password_salt="y")
+    other = User(username="clearer2", password_hash="x", password_salt="y")
+    db_session.add_all([user, other])
+    db_session.commit()
+    done = Transcript(user_id=user.id, title="done", filename="d.wav", status="completed")
+    processing = Transcript(user_id=user.id, title="proc", filename="p.wav", status="processing")
+    already_dismissed = Transcript(user_id=user.id, title="already", filename="a.wav", status="failed", queue_dismissed=True)
+    other_done = Transcript(user_id=other.id, title="other", filename="o.wav", status="completed")
+    db_session.add_all([done, processing, already_dismissed, other_done])
+    db_session.commit()
+
+    count = clear_finished_transcript_queue_entries(db_session, user.id)
+
+    assert count == 1
+    db_session.refresh(done)
+    db_session.refresh(processing)
+    db_session.refresh(other_done)
+    assert done.queue_dismissed is True
+    assert processing.queue_dismissed is False
+    assert other_done.queue_dismissed is False  # another user's transcript untouched
+
+
+def test_retry_failed_chunks_clears_queue_dismissed(db_session):
+    from services.queue import retry_failed_chunks
+
+    user = User(username="retrier", password_hash="x", password_salt="y")
+    db_session.add(user)
+    db_session.commit()
+    t = Transcript(user_id=user.id, title="t", filename="f.wav", status="failed", queue_dismissed=True)
+    db_session.add(t)
+    db_session.commit()
+    db_session.add(TranscriptionJob(
+        transcript_id=t.id, chunk_index=0, start_time=0.0, end_time=300.0,
+        audio_path="c0.mp3", status="failed", attempts=3,
+    ))
+    db_session.commit()
+
+    retry_failed_chunks(db_session, t.id)
+
+    db_session.refresh(t)
+    assert t.status == "processing"
+    assert t.queue_dismissed is False
+
+
 def test_local_chunks_dispatch_serially(db_session):
     from services.queue import queue_worker_tick
 
