@@ -364,6 +364,25 @@ def test_clear_by_status_route(client):
 def test_clear_by_status_rejects_bad_status(client):
     r = client.post("/api/jobs/clear-by-status", json={"status": "running"})
     assert r.status_code == 400
+
+
+def test_processing_transcript_never_hidden_even_if_dismissed(db_session, client):
+    """Guard against a future re-activation path (or a dismiss racing a
+    resume) leaving queue_dismissed=True on a transcript that's actively
+    processing — active work must never disappear from the queue."""
+    client.put("/api/providers/groq", json={"api_key": "fake-groq-key"})
+    transcript_id = _upload(client).json()["id"]
+    t = db_session.query(Transcript).filter(Transcript.id == transcript_id).first()
+    t.queue_dismissed = True
+    t.status = "processing"
+    db_session.add(TranscriptionJob(
+        transcript_id=transcript_id, chunk_index=0, start_time=0, end_time=10,
+        audio_path="chunk0.mp3", status="pending",
+    ))
+    db_session.commit()
+
+    jobs = client.get("/api/jobs").json()["jobs"]
+    assert transcript_id in [j["transcript_id"] for j in jobs if j["kind"] == "transcription"]
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -414,7 +433,7 @@ async def list_jobs(limit: int = Query(50, le=200), db: Session = Depends(get_db
 
     entries = []
     for t in transcripts:
-        if t.queue_dismissed:
+        if t.status != "processing" and t.queue_dismissed:
             continue
         if t.status == "processing" or t.jobs:
             entries.append(_transcription_queue_entry(db, t))
@@ -428,7 +447,9 @@ async def list_jobs(limit: int = Query(50, le=200), db: Session = Depends(get_db
     return {"jobs": entries[:limit], "active": active}
 ```
 
-(Note: `transcripts` still queries every transcript, unfiltered — it doubles as the source for `titles`, which LLM-job entries need even when that transcript's own queue entry is dismissed. The `queue_dismissed` check is applied only where transcription entries get appended.)
+(Note: `transcripts` still queries every transcript, unfiltered — it doubles as the source for `titles`, which LLM-job entries need even when that transcript's own queue entry is dismissed. The `queue_dismissed` check is applied only where transcription entries get appended, and is gated on `t.status != "processing"` so actively-processing work is never hidden — this makes the feature robust even if some future re-activation path forgets to reset the flag, e.g. `/api/transcripts/{id}/retranscribe`, which is actually safe today since it creates a brand-new `Transcript` row rather than reusing the dismissed one.
+
+Known limitation, acceptable for this issue's scope: LLM jobs filter `dismissed` in SQL before `.limit(limit)`, but transcripts filter `queue_dismissed` in Python after the limit is applied — dismissing transcription entries won't free a limit slot to reveal older ones. Don't "fix" this by filtering the `transcripts` query itself; that would break the `titles` lookup LLM-job entries depend on.)
 
 - [ ] **Step 5: Add the three new endpoints**
 
@@ -485,7 +506,7 @@ async def clear_jobs_by_status(data: dict = Body(...), db: Session = Depends(get
 - [ ] **Step 6: Run tests to verify they pass**
 
 Run: `.venv\Scripts\python.exe -m pytest tests/test_queue_clear.py -v`
-Expected: PASS (11 tests total)
+Expected: PASS (12 tests total)
 
 - [ ] **Step 7: Run the full suite to check for regressions**
 
