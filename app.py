@@ -594,11 +594,11 @@ async def transcribe_audio(
         f.write(content)
 
     if context_doc and context_doc.strip():
-        from services.settings import resolve_provider_key
+        from services.settings import resolve_provider_key, KEYLESS_PROVIDERS
         user_settings = get_user_settings(db, current_user.id)
         extraction_provider = user_settings.get("correction_provider", "groq")
         extraction_key, extraction_cfg = resolve_provider_key(db, current_user.id, extraction_provider)
-        if extraction_key or extraction_provider == "local":
+        if extraction_key or extraction_provider in KEYLESS_PROVIDERS:
             try:
                 await extract_hotwords_from_doc(
                     db, current_user.id, context_doc, api_key=extraction_key,
@@ -991,9 +991,9 @@ async def summarize_transcript(
         raise HTTPException(status_code=404, detail="Transcript not found")
     if t.status != "completed":
         raise HTTPException(status_code=400, detail=f"Transcript {transcript_id} is not completed")
-    from services.settings import resolve_provider_key
+    from services.settings import resolve_provider_key, KEYLESS_PROVIDERS
     api_key, _ = resolve_provider_key(db, current_user.id, provider)
-    if provider != "local" and not api_key:
+    if provider not in KEYLESS_PROVIDERS and not api_key:
         raise HTTPException(status_code=400, detail=f"No {provider} API key saved — add one in the service panel")
 
     job = enqueue_llm_job(db, current_user.id, transcript_id, "summary", provider, model)
@@ -1018,9 +1018,9 @@ async def correct_transcript_route(
     if transcript.status not in ("completed", "partial"):
         raise HTTPException(status_code=400, detail=f"Transcript {transcript_id} is not completed")
 
-    from services.settings import resolve_provider_key
+    from services.settings import resolve_provider_key, KEYLESS_PROVIDERS
     api_key, provider_config = resolve_provider_key(db, current_user.id, provider)
-    if provider != "local" and not api_key:
+    if provider not in KEYLESS_PROVIDERS and not api_key:
         raise HTTPException(status_code=400, detail=f"No {provider} API key saved — add one in the service panel")
 
     job = enqueue_llm_job(db, current_user.id, transcript_id, "correction", provider, model)
@@ -1095,11 +1095,11 @@ async def add_transcript_context(
         raise HTTPException(status_code=404, detail="Transcript not found")
     if not context_doc.strip():
         raise HTTPException(status_code=400, detail="Context document is empty")
-    from services.settings import resolve_provider_key
+    from services.settings import resolve_provider_key, KEYLESS_PROVIDERS
     user_settings = get_user_settings(db, current_user.id)
     extraction_provider = user_settings.get("correction_provider", "groq")
     extraction_key, extraction_cfg = resolve_provider_key(db, current_user.id, extraction_provider)
-    if not extraction_key and extraction_provider != "local":
+    if not extraction_key and extraction_provider not in KEYLESS_PROVIDERS:
         raise HTTPException(
             status_code=400,
             detail=f"Context extraction needs a {extraction_provider.capitalize()} API key (service panel)",

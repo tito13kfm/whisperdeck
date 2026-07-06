@@ -79,13 +79,13 @@ def enqueue_auto_correction(db, transcript, user_settings: dict) -> LlmJob:
     """Auto-correct entry point for the inline and chunked-finalize paths.
     Keyless providers fail the job immediately with the skip reason (also
     recorded on the transcript so the corrected tab explains itself)."""
-    from services.settings import resolve_provider_key
+    from services.settings import resolve_provider_key, KEYLESS_PROVIDERS
 
     provider = user_settings.get("correction_provider", "groq")
     model = user_settings.get("correction_model", "llama-3.3-70b-versatile")
     api_key, _ = resolve_provider_key(db, transcript.user_id, provider)
     error = None
-    if provider != "local" and not api_key:
+    if provider not in KEYLESS_PROVIDERS and not api_key:
         error = f"auto-correct skipped: no {provider} API key saved (see service panel)"
         transcript.correction_error = error
         db.commit()
@@ -130,7 +130,7 @@ async def run_llm_job(SessionLocal, job_id: int, transcription_service, diarizat
     import os
 
     from services.correction import correct_transcript
-    from services.settings import resolve_provider_key
+    from services.settings import resolve_provider_key, KEYLESS_PROVIDERS
 
     db = SessionLocal()
     try:
@@ -145,7 +145,7 @@ async def run_llm_job(SessionLocal, job_id: int, transcription_service, diarizat
         api_key, provider_config = None, None
         if job.kind not in ("rediarize", "voice_match"):  # local compute — no LLM key involved
             api_key, provider_config = resolve_provider_key(db, job.user_id, job.provider)
-            if job.provider != "local" and not api_key:
+            if job.provider not in KEYLESS_PROVIDERS and not api_key:
                 _finish(db, job, "failed", f"no {job.provider} API key saved (see service panel)")
                 return
 

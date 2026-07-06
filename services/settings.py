@@ -26,7 +26,11 @@ DEFAULT_SETTINGS = {
 }
 
 # Providers that work without an API key (local inference / user-hosted URL).
-KEYLESS_PROVIDERS = ("local", "builtin", "moonshine")
+# "local" is the transcription (STT) endpoint; "local_llm" is a separate,
+# independently-configured endpoint for correction/summary/hotword-extraction
+# — the two often run on different local servers (e.g. a Whisper server on
+# 8080 alongside Ollama on 11434), so they can't share one saved URL.
+KEYLESS_PROVIDERS = ("local", "local_llm", "builtin", "moonshine")
 
 
 def resolve_provider_key(db, user_id: int, provider: str) -> tuple[str, dict]:

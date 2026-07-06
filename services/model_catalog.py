@@ -26,8 +26,9 @@ CORRECTION_MODELS: dict[str, list[dict]] = {
         {"id": "meta-llama/llama-3.3-70b-instruct", "label": "Llama 3.3 70B"},
         {"id": "openai/gpt-4o-mini", "label": "GPT-4o mini"},
     ],
-    # local: whatever the endpoint serves — the UI offers free text instead.
+    # local/local_llm: whatever the endpoint serves — the UI offers free text instead.
     "local": [],
+    "local_llm": [],
 }
 
 _OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models"

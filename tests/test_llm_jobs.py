@@ -60,6 +60,28 @@ def test_enqueue_dedupes_active_jobs(db_session):
     assert c.id != a.id
 
 
+def test_run_llm_job_correction_uses_local_llm_url_independent_of_stt(db_session):
+    """local (transcription) and local_llm (correction/summary) are separate
+    ProviderConfig rows — the job runner must resolve the one matching the
+    job's provider, not conflate the two even though both are keyless."""
+    user, t = _make_user_and_transcript(db_session)
+    db_session.add(ProviderConfig(user_id=user.id, name="local", api_url="http://stt-box:8080/v1"))
+    db_session.add(ProviderConfig(user_id=user.id, name="local_llm", api_url="http://llm-box:11434/v1"))
+    db_session.commit()
+    job = enqueue_llm_job(db_session, user.id, t.id, "correction", "local_llm", "llama3")
+    job.status = "running"
+    db_session.commit()
+
+    fake_post = AsyncMock(return_value=_FakeResponse("fixed"))
+    factory = lambda: _NoCloseSession(db_session)
+    with patch("httpx.AsyncClient.post", fake_post):
+        asyncio.run(run_llm_job(factory, job.id, transcription_service=None))
+
+    db_session.refresh(job)
+    assert job.status == "completed"
+    assert fake_post.await_args.args[0].startswith("http://llm-box:11434/v1")
+
+
 def test_run_llm_job_correction_completes_with_progress(db_session):
     segs = [{"start": i, "end": i + 1, "speaker": "S", "text": "word " * 60} for i in range(40)]
     user, t = _make_user_and_transcript(db_session, segments=segs)

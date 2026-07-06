@@ -2274,14 +2274,21 @@ const LLM_PROVIDERS = [
   { id: 'groq', name: 'Groq' },
   { id: 'openai', name: 'OpenAI' },
   { id: 'openrouter', name: 'OpenRouter' },
-  { id: 'local', name: 'Local / Custom' },
+  { id: 'local_llm', name: 'Local / Custom' },
 ];
+
+// Old stored settings may still say 'local' (the pre-split id, shared with
+// the transcription provider) — normalize on read so the <select> doesn't
+// land on a value with no matching option.
+function normalizeLlmProvider(id) {
+  return id === 'local' ? 'local_llm' : id;
+}
 
 // Populate a model <select> from the curated catalog (labels carry live
 // pricing for OpenRouter). local has no catalog — swap to free text.
 async function fillModelPicker(selectId, textId, provider, preferred) {
   const sel = $(selectId), txt = $(textId);
-  const isLocal = provider === 'local';
+  const isLocal = provider === 'local_llm';
   sel.style.display = isLocal ? 'none' : '';
   txt.style.display = isLocal ? '' : 'none';
   if (isLocal) {
@@ -2302,7 +2309,7 @@ async function fillModelPicker(selectId, textId, provider, preferred) {
 }
 
 function llmPickerValue(selectId, textId, provider) {
-  return provider === 'local' ? $(textId).value.trim() : $(selectId).value;
+  return provider === 'local_llm' ? $(textId).value.trim() : $(selectId).value;
 }
 
 async function toggleRerunPicker() {
@@ -2311,7 +2318,7 @@ async function toggleRerunPicker() {
   box.style.display = 'block';
   let settings = {};
   try { settings = await api('/api/settings'); } catch { /* defaults below */ }
-  const prov = settings.correction_provider || 'groq';
+  const prov = normalizeLlmProvider(settings.correction_provider || 'groq');
   box.innerHTML = `
     <div class="unit" style="padding:12px 34px;display:flex;gap:12px;align-items:center;flex-wrap:wrap">
       <span class="t-unit">Correction pass</span>
@@ -2697,7 +2704,8 @@ const JACK_DEFS = [
   { id: 'openai', name: 'OpenAI', desc: 'whisper-1 hosted transcription', placeholder: 'sk-…', action: 'Fetch models', kind: 'key' },
   { id: 'replicate', name: 'Replicate', desc: 'Hosted whisper-large-v3-turbo', placeholder: 'r8_…', action: 'Fetch models', kind: 'key' },
   { id: 'openrouter', name: 'OpenRouter', desc: 'Unified model gateway', placeholder: 'sk-or-…', action: 'Fetch models', kind: 'key' },
-  { id: 'local', name: 'Local / Custom', desc: 'Whisper.cpp, Ollama, or any OpenAI-compatible URL', placeholder: 'http://localhost:8080/v1', action: 'Test', kind: 'url' },
+  { id: 'local', name: 'Local / Custom (transcription)', desc: 'Whisper.cpp or any OpenAI-compatible transcription URL', placeholder: 'http://localhost:8080/v1', action: 'Test', kind: 'url' },
+  { id: 'local_llm', name: 'Local / Custom (correction & summary)', desc: 'Ollama, LM Studio, or any OpenAI-compatible chat URL — independent of the transcription URL above', placeholder: 'http://localhost:11434/v1', action: 'Save', kind: 'url-save' },
   { id: 'hf', name: 'HuggingFace', desc: 'Required for pyannote speaker diarization', placeholder: 'hf_…', action: 'Verify', kind: 'hf' },
 ];
 
@@ -2709,8 +2717,8 @@ function jackRow(j, connected) {
       <div style="font-family:var(--f-cond);font-weight:600;font-size:13.5px;text-transform:uppercase;letter-spacing:0.05em">${escapeHtml(j.name)}</div>
       <div style="font-size:11.5px;color:var(--label-dim)">${escapeHtml(j.desc)}</div>
     </div>
-    <input type="${j.kind === 'url' ? 'text' : 'password'}" id="jack-input-${j.id}" placeholder="${escapeHtml(j.placeholder)}"
-      style="font-family:var(--f-mono);font-size:11.5px;background:var(--input);border:1px solid var(--input-edge);color:var(--label);padding:7px 9px;border-radius:2px;width:${j.kind === 'url' ? 190 : 170}px">
+    <input type="${j.kind.startsWith('url') ? 'text' : 'password'}" id="jack-input-${j.id}" placeholder="${escapeHtml(j.placeholder)}"
+      style="font-family:var(--f-mono);font-size:11.5px;background:var(--input);border:1px solid var(--input-edge);color:var(--label);padding:7px 9px;border-radius:2px;width:${j.kind.startsWith('url') ? 190 : 170}px">
     <button id="jack-act-${j.id}" style="font-family:var(--f-mono);font-size:9.5px;background:none;border:1px solid #3A3D41;color:var(--label-dim);padding:5px 9px;border-radius:2px;cursor:pointer;text-transform:uppercase">${escapeHtml(j.action)}</button>
     <div style="display:flex;flex-direction:column;align-items:center;gap:3px;width:64px">
       <div class="led-dot" id="jack-led-${j.id}" style="${connected ? 'background:' + GREEN + ';box-shadow:0 0 5px ' + GREEN : ''}"></div>
@@ -2728,10 +2736,12 @@ function setJackLed(id, connected) {
 
 async function loadSettingsPage() {
   const root = $('page-settings');
-  let provs, settings, health, status;
+  let provs, settings, health, status, localLlmCfg;
   try {
-    [provs, settings, health, status] = await Promise.all([
+    [provs, settings, health, status, localLlmCfg] = await Promise.all([
       api('/api/providers'), api('/api/settings'), api('/api/health'), api('/api/status'),
+      // Not in the transcription provider registry — fetched separately.
+      api('/api/providers/local_llm'),
     ]);
   } catch (e) { toast(e.message, 'error'); return; }
   const provMap = Object.fromEntries(provs.map(p => [p.id, p]));
@@ -2741,6 +2751,7 @@ async function loadSettingsPage() {
     replicate: !!(provMap.replicate && provMap.replicate.configured),
     openrouter: !!(provMap.openrouter && provMap.openrouter.configured),
     local: !!(provMap.local && provMap.local.configured),
+    local_llm: !!(localLlmCfg && localLlmCfg.api_url),
     hf: !!(settings.hf_token),
   };
 
@@ -2858,8 +2869,8 @@ async function loadSettingsPage() {
   const provOpts = LLM_PROVIDERS.map(p => '<option value="' + p.id + '">' + p.name + '</option>').join('');
   $('llm-corr-provider').innerHTML = provOpts;
   $('llm-sum-provider').innerHTML = provOpts;
-  $('llm-corr-provider').value = settings.correction_provider || 'groq';
-  $('llm-sum-provider').value = settings.summary_provider || 'groq';
+  $('llm-corr-provider').value = normalizeLlmProvider(settings.correction_provider || 'groq');
+  $('llm-sum-provider').value = normalizeLlmProvider(settings.summary_provider || 'groq');
   fillModelPicker('llm-corr-model', 'llm-corr-model-text', $('llm-corr-provider').value, settings.correction_model);
   fillModelPicker('llm-sum-model', 'llm-sum-model-text', $('llm-sum-provider').value, settings.summary_model);
   $('llm-corr-provider').addEventListener('change', () =>
@@ -2893,8 +2904,15 @@ async function loadSettingsPage() {
           return;
         }
         if (val) {
-          const body = j.kind === 'url' ? { api_url: val } : { api_key: val };
+          const body = j.kind.startsWith('url') ? { api_url: val } : { api_key: val };
           await api('/api/providers/' + j.id, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+        }
+        if (j.kind === 'url-save') {
+          // No transcription-backend registry entry for this provider (it's
+          // LLM-only), so there's no /models endpoint to round-trip against.
+          setJackLed(j.id, !!val);
+          toast(val ? j.name + ': URL saved' : j.name + ': cleared');
+          return;
         }
         const r = await api('/api/providers/' + j.id + '/models');
         const n = (r.models || []).length;

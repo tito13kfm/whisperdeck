@@ -205,7 +205,7 @@ Return ONLY valid JSON, no markdown, no code fences."""
         elif provider_name == "openrouter":
             api_base = "https://openrouter.ai/api/v1"
             model = model or "deepseek/deepseek-v4-flash"
-        elif provider_name == "local":
+        elif provider_name in ("local", "local_llm"):
             api_base = (provider_config or {}).get("api_url") or "http://localhost:11434/v1"
             model = model or "llama3"
         elif provider_name == "groq":
@@ -213,7 +213,7 @@ Return ONLY valid JSON, no markdown, no code fences."""
         else:
             raise ProviderError(
                 f"Summarization does not support provider '{provider_name}' — "
-                f"use groq, openai, openrouter, or local."
+                f"use groq, openai, openrouter, local, or local_llm."
             )
 
         request_body = {

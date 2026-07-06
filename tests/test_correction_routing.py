@@ -90,6 +90,31 @@ def test_local_provider_omits_auth_header_when_no_key(db_session):
     assert "Authorization" not in headers
 
 
+def test_local_llm_provider_uses_its_own_saved_api_url(db_session):
+    """local_llm is a separate slot from local (transcription) — different
+    port, e.g. Ollama on 11434 while the STT server sits on 8080."""
+    user, transcript = _make_user_and_transcript(db_session)
+    fake_post = AsyncMock(return_value=_chat_response("fixed"))
+    with patch("httpx.AsyncClient.post", fake_post):
+        asyncio.run(correct_transcript(
+            db_session, transcript, api_key="", provider_name="local_llm", model="llama3",
+            provider_config={"api_url": "http://box:11434/v1"},
+        ))
+    assert fake_post.await_args.args[0].startswith("http://box:11434/v1")
+    headers = fake_post.await_args.kwargs["headers"]
+    assert "Authorization" not in headers
+
+
+def test_local_llm_provider_defaults_to_ollama_port_when_unset(db_session):
+    user, transcript = _make_user_and_transcript(db_session)
+    fake_post = AsyncMock(return_value=_chat_response("fixed"))
+    with patch("httpx.AsyncClient.post", fake_post):
+        asyncio.run(correct_transcript(
+            db_session, transcript, api_key="", provider_name="local_llm", model="llama3",
+        ))
+    assert fake_post.await_args.args[0].startswith("http://localhost:11434/v1")
+
+
 # ── speaker-labeled chunked prompt ────────────────────────────────────────
 
 def test_prompt_carries_speaker_labels_and_preserve_instruction(db_session):

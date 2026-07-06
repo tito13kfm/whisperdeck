@@ -29,7 +29,7 @@ _CONTEXT_TAIL_LINES = 2
 
 
 def _api_base(provider_name: str, provider_config: dict | None = None) -> str:
-    if provider_name == "local":
+    if provider_name in ("local", "local_llm"):
         return (provider_config or {}).get("api_url") or "http://localhost:11434/v1"
     base = _API_BASES.get(provider_name)
     if not base:
@@ -37,7 +37,7 @@ def _api_base(provider_name: str, provider_config: dict | None = None) -> str:
         # the wrong key to the wrong host and reads as "invalid API key".
         raise RuntimeError(
             f"Correction does not support provider '{provider_name}' — "
-            f"use groq, openai, openrouter, or local."
+            f"use groq, openai, openrouter, local, or local_llm."
         )
     return base
 
@@ -189,8 +189,10 @@ async def run_auto_correction(db, transcript, user_settings: dict) -> None:
 
     provider = user_settings.get("correction_provider", "groq")
     model = user_settings.get("correction_model", _DEFAULT_MODEL)
+    from services.settings import KEYLESS_PROVIDERS
+
     api_key, provider_config = resolve_provider_key(db, transcript.user_id, provider)
-    if provider != "local" and not api_key:
+    if provider not in KEYLESS_PROVIDERS and not api_key:
         transcript.correction_error = (
             f"auto-correct skipped: no {provider} API key saved (see service panel)"
         )
