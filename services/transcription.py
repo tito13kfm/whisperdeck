@@ -274,6 +274,7 @@ Return ONLY valid JSON, no markdown, no code fences."""
             existing.action_items = summary_data.get("action_items", [])
             existing.decisions = summary_data.get("decisions", [])
             existing.model = model
+            existing.provider = provider_name
             existing.created_at = utcnow_naive()
             summary = existing
         else:
@@ -284,6 +285,7 @@ Return ONLY valid JSON, no markdown, no code fences."""
                 action_items=summary_data.get("action_items", []),
                 decisions=summary_data.get("decisions", []),
                 model=model,
+                provider=provider_name,
             )
             db.add(summary)
 
