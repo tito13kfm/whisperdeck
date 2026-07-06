@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, patch
 from database import LlmJob, Transcript, User, ProviderConfig
 from services.llm_jobs import (
     enqueue_llm_job, run_llm_job, cancel_llm_job, rerun_llm_job, llm_worker_tick,
+    reset_stuck_llm_jobs,
 )
 
 
@@ -58,6 +59,27 @@ def test_enqueue_dedupes_active_jobs(db_session):
     # a different kind is its own lane
     c = enqueue_llm_job(db_session, user.id, t.id, "summary", "groq", "m1")
     assert c.id != a.id
+
+
+def test_reset_stuck_llm_jobs_fails_running_and_leaves_others_alone(db_session):
+    user, t = _make_user_and_transcript(db_session)
+    running = enqueue_llm_job(db_session, user.id, t.id, "correction", "groq", "m1")
+    running.status = "running"
+    pending = enqueue_llm_job(db_session, user.id, t.id, "summary", "groq", "m1")
+    completed = enqueue_llm_job(db_session, user.id, t.id, "rediarize", "groq", "m1")
+    completed.status = "completed"
+    db_session.commit()
+
+    count = reset_stuck_llm_jobs(db_session)
+
+    assert count == 1
+    db_session.refresh(running)
+    db_session.refresh(pending)
+    db_session.refresh(completed)
+    assert running.status == "failed"
+    assert running.error == "Interrupted by server restart"
+    assert pending.status == "pending"
+    assert completed.status == "completed"
 
 
 def test_run_llm_job_correction_uses_local_llm_url_independent_of_stt(db_session):

@@ -68,6 +68,43 @@ def test_has_budget_bypasses_local_providers(db_session):
     assert has_budget(db_session, user_id=1, provider="builtin", additional_seconds=10_000_000)
 
 
+def test_reset_stuck_transcription_jobs_fails_running_and_leaves_others_alone(db_session):
+    from services.queue import reset_stuck_transcription_jobs
+
+    user = User(username="stuck", password_hash="x", password_salt="y")
+    db_session.add(user)
+    db_session.commit()
+    t = Transcript(user_id=user.id, title="t", filename="f.wav", status="processing", provider="moonshine", model="base")
+    db_session.add(t)
+    db_session.commit()
+    running = TranscriptionJob(
+        transcript_id=t.id, chunk_index=0, start_time=0.0, end_time=300.0,
+        audio_path="c0.mp3", status="running", attempts=1,
+    )
+    pending = TranscriptionJob(
+        transcript_id=t.id, chunk_index=1, start_time=300.0, end_time=600.0,
+        audio_path="c1.mp3", status="pending",
+    )
+    completed = TranscriptionJob(
+        transcript_id=t.id, chunk_index=2, start_time=600.0, end_time=900.0,
+        audio_path="c2.mp3", status="completed",
+    )
+    db_session.add_all([running, pending, completed])
+    db_session.commit()
+
+    count = reset_stuck_transcription_jobs(db_session)
+
+    assert count == 1
+    db_session.refresh(running)
+    db_session.refresh(pending)
+    db_session.refresh(completed)
+    assert running.status == "failed"
+    assert running.error == "Interrupted by server restart"
+    assert running.attempts == 1  # not double-counted — the crashed attempt was already recorded
+    assert pending.status == "pending"
+    assert completed.status == "completed"
+
+
 def test_local_chunks_dispatch_serially(db_session):
     from services.queue import queue_worker_tick
 

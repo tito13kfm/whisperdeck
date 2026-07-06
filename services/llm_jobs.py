@@ -75,6 +75,18 @@ def enqueue_llm_job(db, user_id: int, transcript_id: int, kind: str,
     return job
 
 
+def reset_stuck_llm_jobs(db) -> int:
+    """Startup reconciliation: an LlmJob left 'running' means the process
+    died mid-job. LlmJob has no auto-retry, so this matches its existing
+    failure UX — the user reruns it manually via /api/jobs/{id}/rerun."""
+    stuck = db.query(LlmJob).filter(LlmJob.status == "running").all()
+    for job in stuck:
+        job.status = "failed"
+        job.error = "Interrupted by server restart"
+    db.commit()
+    return len(stuck)
+
+
 def enqueue_auto_correction(db, transcript, user_settings: dict) -> LlmJob:
     """Auto-correct entry point for the inline and chunked-finalize paths.
     Keyless providers fail the job immediately with the skip reason (also
@@ -237,7 +249,15 @@ async def run_llm_job(SessionLocal, job_id: int, transcription_service, diarizat
                         str(os.path.dirname(transcript.audio_path)),
                     )
                     try:
-                        matches = voice_id_service.identify(db, job.user_id, clip_path, threshold=0.65)
+                        # identify() is a plain sync call (embedding extraction is
+                        # CPU-bound with no internal await) — run it off the event
+                        # loop so one voice_match job doesn't stall the whole app
+                        # per segment. Safe to pass `db` across the thread boundary:
+                        # sqlite is opened with check_same_thread=False.
+                        loop = asyncio.get_event_loop()
+                        def _identify():
+                            return voice_id_service.identify(db, job.user_id, clip_path, threshold=0.65)
+                        matches = await loop.run_in_executor(None, _identify)
                     finally:
                         try:
                             os.remove(clip_path)

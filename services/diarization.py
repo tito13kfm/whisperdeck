@@ -1,4 +1,5 @@
 """Diarization service — speaker segmentation and identification."""
+import asyncio
 import os
 import json
 import tempfile
@@ -144,35 +145,43 @@ class DiarizationService:
                 "Install it with: pip install pyannote.audio torch"
             )
 
-        import torch
-        import soundfile as sf
-        from pyannote.audio import Pipeline
+        def _run() -> list[DiarizationSegment]:
+            import torch
+            import soundfile as sf
+            from pyannote.audio import Pipeline
 
-        pipeline = Pipeline.from_pretrained(
-            "pyannote/speaker-diarization-3.1",
-            token=hf_token or os.environ.get("HUGGINGFACE_TOKEN", None),
-        )
+            pipeline = Pipeline.from_pretrained(
+                "pyannote/speaker-diarization-3.1",
+                token=hf_token or os.environ.get("HUGGINGFACE_TOKEN", None),
+            )
 
-        if num_speakers:
-            pipeline.instantiate({"clustering": {"threshold": 0.7}})
+            if num_speakers:
+                pipeline.instantiate({"clustering": {"threshold": 0.7}})
 
-        # Load audio ourselves and hand pyannote a waveform tensor rather
-        # than a file path — pyannote's built-in decoder requires torchcodec,
-        # which needs FFmpeg's shared-library build; Windows installs
-        # commonly have the static "full_build" instead, so the decoder
-        # fails to load its native DLLs.
-        data, sample_rate = sf.read(audio_path, dtype="float32", always_2d=True)
-        waveform = torch.from_numpy(data.T)  # (channel, time)
+            # Load audio ourselves and hand pyannote a waveform tensor rather
+            # than a file path — pyannote's built-in decoder requires torchcodec,
+            # which needs FFmpeg's shared-library build; Windows installs
+            # commonly have the static "full_build" instead, so the decoder
+            # fails to load its native DLLs.
+            data, sample_rate = sf.read(audio_path, dtype="float32", always_2d=True)
+            waveform = torch.from_numpy(data.T)  # (channel, time)
 
-        output = pipeline({"waveform": waveform, "sample_rate": sample_rate}, num_speakers=num_speakers)
+            output = pipeline({"waveform": waveform, "sample_rate": sample_rate}, num_speakers=num_speakers)
 
-        result_segments = []
-        for turn, _, speaker in output.speaker_diarization.itertracks(yield_label=True):
-            result_segments.append(DiarizationSegment(
-                start=turn.start,
-                end=turn.end,
-                speaker=speaker,
-            ))
+            segments = []
+            for turn, _, speaker in output.speaker_diarization.itertracks(yield_label=True):
+                segments.append(DiarizationSegment(
+                    start=turn.start,
+                    end=turn.end,
+                    speaker=speaker,
+                ))
+            return segments
+
+        # Model load + inference are synchronous/blocking (no internal await) —
+        # run off the event loop so one diarize call doesn't stall every other
+        # request and both worker ticks for its duration.
+        loop = asyncio.get_event_loop()
+        result_segments = await loop.run_in_executor(None, _run)
 
         speaker_set = set(s.speaker for s in result_segments)
         return DiarizationResult(

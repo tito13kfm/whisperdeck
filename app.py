@@ -29,13 +29,13 @@ from services.transcription import TranscriptionService
 from services.diarization import DiarizationService
 from services.voice_id import voice_id_service
 from services.audio_prep import transcode_for_upload, AudioPrepError, chunk_audio, get_audio_duration, extract_clips_concat
-from services.queue import create_chunk_jobs, retry_failed_chunks, queue_worker_loop, compute_queue_status, cancel_transcript_jobs, resume_cancelled_chunks
+from services.queue import create_chunk_jobs, retry_failed_chunks, queue_worker_loop, compute_queue_status, cancel_transcript_jobs, resume_cancelled_chunks, reset_stuck_transcription_jobs
 from services.hotwords import list_hotwords, add_hotword, delete_hotword
 from services.correction import extract_hotwords_from_doc
 from services.model_catalog import get_correction_models
 from services.llm_jobs import (
     enqueue_llm_job, enqueue_auto_correction, serialize_llm_job, latest_job,
-    cancel_llm_job, rerun_llm_job, llm_worker_loop,
+    cancel_llm_job, rerun_llm_job, llm_worker_loop, reset_stuck_llm_jobs,
 )
 from backends import list_providers, get_provider, LOCAL_PROVIDERS
 
@@ -82,6 +82,12 @@ diarization_service = DiarizationService()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    _startup_db = SessionLocal()
+    try:
+        reset_stuck_transcription_jobs(_startup_db)
+        reset_stuck_llm_jobs(_startup_db)
+    finally:
+        _startup_db.close()
     worker_task = asyncio.create_task(queue_worker_loop(SessionLocal, diarization_service))
     llm_worker_task = asyncio.create_task(llm_worker_loop(SessionLocal, transcription_service, diarization_service))
     yield

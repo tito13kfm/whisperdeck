@@ -1,10 +1,12 @@
 """voice_match background job: relabels segments against the roster,
 leaves low-confidence segments untouched, tolerates per-segment failures."""
 import asyncio
+import numpy as np
 from unittest.mock import patch
 
 from database import Transcript, User, VoiceProfile
 from services.llm_jobs import enqueue_llm_job, run_llm_job
+from services.voice_id import voice_id_service
 
 
 class _NoCloseSession:
@@ -79,6 +81,34 @@ def test_voice_match_relabels_confident_segments_only(db_session, tmp_path):
     assert t.segments[1]["speaker"] == "SPEAKER_01"  # untouched, no confident match
     assert job.progress_done == 2
     assert job.progress_total == 2
+
+
+def test_voice_match_runs_real_identify_through_executor(db_session, tmp_path, monkeypatch):
+    """Only extraction and embedding extraction are stubbed — voice_id_service.identify()
+    itself runs for real (its own db.query included), through the run_in_executor wrap
+    added in services/llm_jobs.py, against the same file-backed sqlite db_session used
+    everywhere else (check_same_thread=False, matching production)."""
+    user = _user(db_session)
+    _enrolled_profile(db_session, user)
+    segments = [{"start": 0.0, "end": 1.0, "text": "hi", "speaker": "SPEAKER_00"}]
+    t = _transcript_with_segments(db_session, user, tmp_path, segments)
+    job = enqueue_llm_job(db_session, user.id, t.id, "voice_match", "", "")
+    job.status = "running"
+    db_session.commit()
+
+    async def fake_extract(audio_path, clips, output_dir):
+        return str(tmp_path / "clip.wav")
+
+    monkeypatch.setattr(voice_id_service, "_extract_embedding", lambda path: np.array([0.1, 0.2, 0.3]))
+
+    factory = lambda: _NoCloseSession(db_session)
+    with patch("services.llm_jobs.extract_clips_concat", fake_extract):
+        asyncio.run(run_llm_job(factory, job.id, transcription_service=None))
+
+    db_session.refresh(job)
+    db_session.refresh(t)
+    assert job.status == "completed"
+    assert t.segments[0]["speaker"] == "Alice"
 
 
 def test_voice_match_fails_fast_with_no_backend(db_session, tmp_path):

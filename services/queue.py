@@ -340,6 +340,20 @@ def resume_cancelled_chunks(db, transcript_id: int) -> int:
     return len(cancelled)
 
 
+def reset_stuck_transcription_jobs(db) -> int:
+    """Startup reconciliation: a TranscriptionJob left 'running' means the
+    process died mid-job. attempts was already incremented before the
+    crashed await (see _run_chunk_job), so land it on 'failed' and let the
+    normal _retry_eligible backoff resurrect it — never straight back to
+    'pending' (same reasoning as _run_chunk_job's own except branch)."""
+    stuck = db.query(TranscriptionJob).filter(TranscriptionJob.status == "running").all()
+    for job in stuck:
+        job.status = "failed"
+        job.error = "Interrupted by server restart"
+    db.commit()
+    return len(stuck)
+
+
 def _retry_eligible(job) -> bool:
     if job.attempts >= MAX_ATTEMPTS:
         return False
