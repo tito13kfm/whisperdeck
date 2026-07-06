@@ -304,6 +304,17 @@ def test_summarize_route_enqueues_job(client):
     assert detail["summary_job"]["id"] == job["id"]
 
 
+def test_summary_endpoint_exposes_provider(db_session):
+    from database import Summary
+    from app import _serialize_summary
+    user, t = _make_user_and_transcript(db_session)
+    db_session.add(Summary(transcript_id=t.id, short_summary="s", model="m1", provider="groq"))
+    db_session.commit()
+    db_session.refresh(t)
+    result = _serialize_summary(t.summary)
+    assert result["provider"] == "groq"
+
+
 def test_worker_tick_claims_pending_jobs(db_session):
     user, t = _make_user_and_transcript(db_session)
     job = enqueue_llm_job(db_session, user.id, t.id, "correction", "groq", "llama-3.3-70b-versatile")
