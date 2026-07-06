@@ -179,34 +179,6 @@ async def correct_transcript(
     return result
 
 
-async def run_auto_correction(db, transcript, user_settings: dict) -> None:
-    """Auto-correct entry point shared by the inline and chunked-finalize
-    paths. Provider/model come from user settings; the key from the central
-    ProviderConfig pool. Never raises. When the chosen provider needs a key
-    and none is saved, the skip is recorded on the transcript so the
-    corrected tab can explain itself instead of staying silently empty."""
-    from services.settings import resolve_provider_key
-
-    provider = user_settings.get("correction_provider", "groq")
-    model = user_settings.get("correction_model", _DEFAULT_MODEL)
-    from services.settings import KEYLESS_PROVIDERS
-
-    api_key, provider_config = resolve_provider_key(db, transcript.user_id, provider)
-    if provider not in KEYLESS_PROVIDERS and not api_key:
-        transcript.correction_error = (
-            f"auto-correct skipped: no {provider} API key saved (see service panel)"
-        )
-        db.commit()
-        return
-    try:
-        await correct_transcript(
-            db, transcript, api_key=api_key, provider_name=provider, model=model,
-            provider_config=provider_config,
-        )
-    except Exception as e:  # correct_transcript never raises; belt and braces
-        print(f"[correction] non-fatal auto-correct failure for transcript {transcript.id}: {e}")
-
-
 async def extract_hotwords_from_doc(
     db, user_id: int, doc_text: str, api_key: str, provider_name: str = "groq", model: str = _DEFAULT_MODEL,
     provider_config: dict | None = None,

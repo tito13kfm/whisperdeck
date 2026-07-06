@@ -4,10 +4,10 @@ import asyncio
 import json
 from unittest.mock import AsyncMock, patch
 
-from database import Transcript, User, ProviderConfig
-from services.correction import correct_transcript, run_auto_correction, _batch_lines, _transcript_lines
+from database import Transcript, User
+from services.correction import correct_transcript, _batch_lines, _transcript_lines
 from services.model_catalog import get_correction_models, _openrouter_cache
-from services.settings import DEFAULT_SETTINGS, get_user_settings, resolve_provider_key
+from services.settings import get_user_settings, resolve_provider_key
 
 
 def _make_user_and_transcript(db_session, segments=None, full_text="raw text"):
@@ -158,31 +158,6 @@ def test_batch_lines_respects_budget():
 def test_transcript_lines_falls_back_to_full_text(db_session):
     user, transcript = _make_user_and_transcript(db_session, segments=[], full_text="plain words")
     assert _transcript_lines(transcript) == ["plain words"]
-
-
-# ── auto-correct key resolution ───────────────────────────────────────────
-
-def test_auto_correction_skips_with_reason_when_provider_key_missing(db_session):
-    user, transcript = _make_user_and_transcript(db_session)
-    settings = {**DEFAULT_SETTINGS, "correction_provider": "openrouter", "correction_model": "deepseek/deepseek-v4-flash"}
-    fake_post = AsyncMock(return_value=_chat_response("never"))
-    with patch("httpx.AsyncClient.post", fake_post):
-        asyncio.run(run_auto_correction(db_session, transcript, settings))
-    fake_post.assert_not_awaited()
-    assert "auto-correct skipped: no openrouter API key" in transcript.correction_error
-
-
-def test_auto_correction_uses_settings_provider_and_pool_key(db_session):
-    user, transcript = _make_user_and_transcript(db_session)
-    db_session.add(ProviderConfig(user_id=user.id, name="openrouter", api_key="sk-or-pool"))
-    db_session.commit()
-    settings = {**DEFAULT_SETTINGS, "correction_provider": "openrouter", "correction_model": "deepseek/deepseek-v4-flash"}
-    fake_post = AsyncMock(return_value=_chat_response("fixed"))
-    with patch("httpx.AsyncClient.post", fake_post):
-        asyncio.run(run_auto_correction(db_session, transcript, settings))
-    assert transcript.correction_error is None
-    assert fake_post.await_args.args[0].startswith("https://openrouter.ai")
-    assert fake_post.await_args.kwargs["headers"]["Authorization"] == "Bearer sk-or-pool"
 
 
 def test_resolve_provider_key_returns_empty_when_unsaved(db_session):
