@@ -600,6 +600,10 @@ def test_worker_tick_leaves_failed_job_within_backoff_window(db_session):
 
 
 def test_worker_tick_never_resurrects_job_at_max_attempts(db_session):
+    """status=='failed' alone can't distinguish 'the guard skipped this job'
+    from 'the guard failed to skip it but the (unmocked) rerun failed again
+    anyway' — both leave status=='failed'. Pin attempts unchanged too: a
+    real resurrection would reclaim the row and increment attempts."""
     user, t = _make_user_and_transcript(db_session)
     job = enqueue_llm_job(db_session, user.id, t.id, "correction", "groq", "m1")
     job.status = "failed"
@@ -612,9 +616,12 @@ def test_worker_tick_never_resurrects_job_at_max_attempts(db_session):
 
     db_session.refresh(job)
     assert job.status == "failed"
+    assert job.attempts == MAX_ATTEMPTS  # never reclaimed by the sweep
 
 
 def test_worker_tick_never_resurrects_dismissed_job(db_session):
+    """See test_worker_tick_never_resurrects_job_at_max_attempts docstring —
+    same discrimination problem, same fix: pin attempts unchanged."""
     user, t = _make_user_and_transcript(db_session)
     job = enqueue_llm_job(db_session, user.id, t.id, "correction", "groq", "m1")
     job.status = "failed"
@@ -628,12 +635,15 @@ def test_worker_tick_never_resurrects_dismissed_job(db_session):
 
     db_session.refresh(job)
     assert job.status == "failed"
+    assert job.attempts == 1  # never reclaimed by the sweep
 
 
 def test_worker_tick_never_resurrects_a_job_that_never_ran(db_session):
     """attempts stays 0 for jobs enqueue_llm_job pre-fails immediately (e.g.
     'no API key saved') — retrying a precondition failure would just fail
-    identically, so these are excluded from the auto-retry sweep."""
+    identically, so these are excluded from the auto-retry sweep. Pin
+    attempts unchanged (see test_worker_tick_never_resurrects_job_at_max_attempts
+    docstring for why status alone doesn't discriminate here)."""
     user, t = _make_user_and_transcript(db_session)
     job = enqueue_llm_job(
         db_session, user.id, t.id, "correction", "openrouter", "m1",
@@ -648,9 +658,12 @@ def test_worker_tick_never_resurrects_a_job_that_never_ran(db_session):
 
     db_session.refresh(job)
     assert job.status == "failed"
+    assert job.attempts == 0  # never reclaimed by the sweep
 
 
 def test_worker_tick_never_resurrects_non_auto_retry_kinds(db_session):
+    """See test_worker_tick_never_resurrects_job_at_max_attempts docstring —
+    same discrimination problem, same fix: pin attempts unchanged."""
     user, t = _make_user_and_transcript(db_session)
     job = enqueue_llm_job(db_session, user.id, t.id, "rediarize", "", "")
     job.status = "failed"
@@ -663,6 +676,7 @@ def test_worker_tick_never_resurrects_non_auto_retry_kinds(db_session):
 
     db_session.refresh(job)
     assert job.status == "failed"
+    assert job.attempts == 1  # never reclaimed by the sweep
 
 
 def test_worker_tick_skips_resurrection_when_a_fresh_job_already_active(db_session):
