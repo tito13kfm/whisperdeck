@@ -748,7 +748,8 @@ async def retranscribe_transcript(
             status_code=400,
             detail="No stored audio for this transcript — it predates audio retention or the file was removed",
         )
-    return await _run_transcription_pipeline(
+    root_id = t.source_transcript_id or t.id
+    result = await _run_transcription_pipeline(
         db, current_user, Path(t.audio_path),
         filename=t.filename,
         title=t.title,
@@ -759,6 +760,11 @@ async def retranscribe_transcript(
         diarize=diarize if diarize is not None else bool(t.diarize_requested),
         num_speakers=num_speakers if num_speakers is not None else t.num_speakers,
     )
+    new_transcript = db.query(Transcript).filter(Transcript.id == result["id"]).first()
+    if new_transcript:
+        new_transcript.source_transcript_id = root_id
+        db.commit()
+    return result
 
 
 _AUDIO_MIME = {

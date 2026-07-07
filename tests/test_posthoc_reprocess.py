@@ -82,6 +82,32 @@ def test_retranscribe_creates_new_row_and_keeps_original(client, db_session):
     assert old.full_text == "first pass"
 
 
+def test_retranscribe_chain_sets_source_transcript_id_to_root(client, db_session):
+    client.put("/api/settings", json={"auto_correct": False})
+    original = _upload(client, text="first pass").json()
+
+    p1, p2, p3 = _pipeline_patches(text="second pass")
+    with p1, p2, p3:
+        first_rerun = client.post(
+            f"/api/transcripts/{original['id']}/retranscribe",
+            data={"provider": "groq", "model": "whisper-large-v3"},
+        ).json()
+
+    p1, p2, p3 = _pipeline_patches(text="third pass")
+    with p1, p2, p3:
+        second_rerun = client.post(
+            f"/api/transcripts/{first_rerun['id']}/retranscribe",
+            data={"provider": "groq", "model": "whisper-large-v3"},
+        ).json()
+
+    db_session.expire_all()
+    first = db_session.query(Transcript).filter(Transcript.id == first_rerun["id"]).first()
+    second = db_session.query(Transcript).filter(Transcript.id == second_rerun["id"]).first()
+    assert first.source_transcript_id == original["id"]
+    # A rerun of a rerun still points at the original root, not its immediate parent.
+    assert second.source_transcript_id == original["id"]
+
+
 def test_retranscribe_400_without_stored_audio(client, db_session):
     user = _test_user(db_session)
     t = Transcript(user_id=user.id, title="old", filename="old.mp3",
