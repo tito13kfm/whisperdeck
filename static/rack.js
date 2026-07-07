@@ -1986,6 +1986,82 @@ function jobRunningUnit(job, label) {
   </div>`;
 }
 
+/* ══════════════════ run history + diff ══════════════════ */
+
+// Generic LCS-based diff over an array of tokens (words or lines).
+// Returns [[type, token], ...] where type is 'eq' | 'del' | 'ins'.
+function diffTokens(oldTokens, newTokens) {
+  const m = oldTokens.length, n = newTokens.length;
+  const dp = Array.from({ length: m + 1 }, () => new Uint32Array(n + 1));
+  for (let i = m - 1; i >= 0; i--) {
+    for (let j = n - 1; j >= 0; j--) {
+      dp[i][j] = oldTokens[i] === newTokens[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+    }
+  }
+  const ops = [];
+  let i = 0, j = 0;
+  while (i < m && j < n) {
+    if (oldTokens[i] === newTokens[j]) { ops.push(['eq', oldTokens[i]]); i++; j++; }
+    else if (dp[i + 1][j] >= dp[i][j + 1]) { ops.push(['del', oldTokens[i]]); i++; }
+    else { ops.push(['ins', newTokens[j]]); j++; }
+  }
+  while (i < m) { ops.push(['del', oldTokens[i]]); i++; }
+  while (j < n) { ops.push(['ins', newTokens[j]]); j++; }
+  return ops;
+}
+
+// Word-level diff for prose; falls back to line-level on very large inputs —
+// LCS is O(m*n), so two 3000-word transcripts already means a 9M-cell table.
+// The fallback keeps the compare modal from hanging the page on long audio.
+function textDiffHtml(oldText, newText) {
+  let oldTok = (oldText || '').split(/(\s+)/);
+  let newTok = (newText || '').split(/(\s+)/);
+  if (oldTok.length * newTok.length > 4000000) {
+    oldTok = (oldText || '').split('\n');
+    newTok = (newText || '').split('\n');
+  }
+  return diffTokens(oldTok, newTok).map(([type, tok]) => {
+    const esc = escapeHtml(tok);
+    if (type === 'eq') return esc;
+    if (type === 'del') return '<del style="background:rgba(255,80,80,.25);text-decoration:line-through">' + esc + '</del>';
+    return '<ins style="background:rgba(80,255,120,.25);text-decoration:none">' + esc + '</ins>';
+  }).join('');
+}
+
+// Generic two-way compare modal. `fetchItems` resolves the pickable items
+// (each with an `id`, a human `optionLabel`, and a `result` payload that's
+// null/falsy when no snapshot exists for that item). `extractText` pulls
+// the comparable string out of `result`; `renderDiff` renders the pair.
+async function openCompareModal(title, fetchItems, extractText, renderDiff) {
+  let items;
+  try { items = await fetchItems(); }
+  catch (e) { toast(e.message, 'error'); return; }
+  if (items.length < 1) { toast('Nothing to compare yet', 'info'); return; }
+  const optionHtml = items.map(it => `<option value="${it.id}">${escapeHtml(it.optionLabel)}${it.result ? '' : ' (no snapshot)'}</option>`).join('');
+  openModal(`
+    <div style="font-family:var(--f-cond);font-weight:700;font-size:16px;text-transform:uppercase;letter-spacing:0.04em;margin-bottom:14px">${escapeHtml(title)}</div>
+    <div style="display:flex;gap:10px;margin-bottom:14px">
+      <select id="compare-item-a" class="inp" style="flex:1;font-size:12px;padding:8px 10px">${optionHtml}</select>
+      <select id="compare-item-b" class="inp" style="flex:1;font-size:12px;padding:8px 10px">${optionHtml}</select>
+    </div>
+    <div id="compare-diff-out" style="max-height:50vh;overflow:auto;font-size:13px;line-height:1.6;white-space:pre-wrap;padding:10px;border:1px solid var(--inset-edge)"></div>
+    <div style="display:flex;justify-content:flex-end;margin-top:14px">
+      <button class="btn" id="compare-close" style="font-size:12px;border-color:var(--inset-edge)">Close</button>
+    </div>`);
+  const byId = Object.fromEntries(items.map(it => [String(it.id), it]));
+  const update = () => {
+    const a = byId[$('compare-item-a').value], b = byId[$('compare-item-b').value];
+    const out = $('compare-diff-out');
+    if (!a.result || !b.result) { out.textContent = 'One or both runs predate history tracking — no snapshot to diff.'; return; }
+    out.innerHTML = renderDiff(extractText(a.result), extractText(b.result));
+  };
+  $('compare-item-a').addEventListener('change', update);
+  $('compare-item-b').addEventListener('change', update);
+  if (items.length > 1) $('compare-item-b').selectedIndex = 1;
+  update();
+  $('compare-close').addEventListener('click', closeModal);
+}
+
 function transcriptPlainText(t) {
   const lines = (t.segments || [])
     .map(sg => (sg.speaker ? sg.speaker + ': ' : '') + (sg.text || '').trim())
@@ -2153,6 +2229,7 @@ function renderDetail() {
         <button class="btn" style="font-size:12px;padding:7px 14px;border-color:var(--inset-edge)" data-dact="context">Add context</button>
         <button class="btn" style="font-size:12px;padding:7px 14px;border-color:var(--inset-edge)" data-dact="summarize" ${llmJobActive(t.summary_job) ? 'disabled title="Summary job already queued"' : ''}>Summarize</button>
         <button class="btn" style="font-size:12px;padding:7px 14px;border-color:var(--inset-edge)" data-dact="rerun" ${llmJobActive(t.correction_job) ? 'disabled title="Correction job already queued"' : ''}>Re-run correction</button>
+        <button class="btn" style="font-size:12px;padding:7px 14px;border-color:var(--inset-edge)" data-dact="correction-history">Correction history</button>
         <button class="btn btn--red" style="font-size:12px;padding:7px 14px" data-dact="delete">Delete</button>
       </div>
     </div>
@@ -2268,6 +2345,22 @@ async function detailAction(act) {
     }
     if (act === 'rerun') {
       toggleRerunPicker();
+      return;
+    }
+    if (act === 'correction-history') {
+      await openCompareModal(
+        'Compare correction runs',
+        async () => {
+          const runs = (await api('/api/transcripts/' + t.id + '/runs/correction')).runs;
+          return runs.filter(r => r.status === 'completed').map(r => ({
+            id: r.id,
+            optionLabel: (r.provider || '—') + (r.model ? '/' + r.model : '') + ' · ' + timeAgo(r.created_at),
+            result: r.result,
+          }));
+        },
+        result => result.corrected_text || '',
+        textDiffHtml,
+      );
       return;
     }
     if (act === 'retranscribe') {

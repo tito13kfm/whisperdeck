@@ -188,6 +188,23 @@ def test_run_llm_job_correction_completes_with_progress(db_session):
     assert t.corrected_text
 
 
+def test_run_llm_job_correction_saves_result_snapshot(db_session):
+    segs = [{"start": 0, "end": 1, "speaker": "S", "text": "hello"}]
+    user, t = _make_user_and_transcript(db_session, segments=segs)
+    job = enqueue_llm_job(db_session, user.id, t.id, "correction", "groq", "m")
+    job.status = "running"
+    db_session.commit()
+
+    fake_post = AsyncMock(return_value=_FakeResponse("S: fixed hello"))
+    factory = lambda: _NoCloseSession(db_session)
+    with patch("httpx.AsyncClient.post", fake_post):
+        asyncio.run(run_llm_job(factory, job.id, transcription_service=None))
+
+    db_session.refresh(job)
+    db_session.refresh(t)
+    assert job.result_json == {"corrected_text": t.corrected_text}
+
+
 def test_cancel_between_batches_stops_cleanly(db_session):
     segs = [{"start": i, "end": i + 1, "speaker": "S", "text": "word " * 60} for i in range(40)]
     user, t = _make_user_and_transcript(db_session, segments=segs)
@@ -325,3 +342,45 @@ def test_worker_tick_claims_pending_jobs(db_session):
 
     db_session.refresh(job)
     assert job.status == "completed"
+
+
+def test_runs_endpoint_lists_correction_history_newest_first(client):
+    client.put("/api/providers/groq", json={"api_key": "fake-groq-key"})
+    client.put("/api/settings", json={"auto_correct": False})
+    transcript_id = _upload(client).json()["id"]
+
+    first = client.post(f"/api/transcripts/{transcript_id}/correct", data={"provider": "groq", "model": "m1"}).json()["job"]
+    client.post(f"/api/jobs/{first['id']}/cancel")
+    second = client.post(f"/api/jobs/{first['id']}/rerun").json()["job"]
+
+    runs = client.get(f"/api/transcripts/{transcript_id}/runs/correction").json()["runs"]
+    assert [r["id"] for r in runs] == [second["id"], first["id"]]
+    assert runs[0]["provider"] == "groq" and runs[0]["model"] == "m1"
+
+
+def test_runs_endpoint_rejects_unknown_kind(client):
+    transcript_id = _upload(client).json()["id"]
+    r = client.get(f"/api/transcripts/{transcript_id}/runs/bogus")
+    assert r.status_code == 400
+
+
+def test_runs_endpoint_includes_dismissed_jobs(client):
+    client.put("/api/providers/groq", json={"api_key": "fake-groq-key"})
+    client.put("/api/settings", json={"auto_correct": False})
+    transcript_id = _upload(client).json()["id"]
+
+    job = client.post(f"/api/transcripts/{transcript_id}/correct", data={"provider": "groq", "model": "m1"}).json()["job"]
+    client.post(f"/api/jobs/{job['id']}/cancel")
+    client.post(f"/api/jobs/{job['id']}/dismiss")
+
+    runs = client.get(f"/api/transcripts/{transcript_id}/runs/correction").json()["runs"]
+    assert [r["id"] for r in runs] == [job["id"]]
+
+
+def test_runs_endpoint_404s_for_another_users_transcript(client):
+    transcript_id = _upload(client).json()["id"]
+    client.post("/api/logout")
+    client.post("/api/register", json={"username": "other-runs-user", "password": "testpass123"})
+
+    r = client.get(f"/api/transcripts/{transcript_id}/runs/correction")
+    assert r.status_code == 404

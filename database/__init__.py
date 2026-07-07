@@ -91,6 +91,7 @@ class LlmJob(Base):
     model = Column(String(128), default="")
     error = Column(Text, nullable=True)
     dismissed = Column(Boolean, default=False)  # hides a terminal job from the Queue screen only
+    result_json = Column(JSON, nullable=True)  # output snapshot for history/diff — see run_llm_job
     created_at = Column(DateTime, default=utcnow_naive)
     updated_at = Column(DateTime, default=utcnow_naive, onupdate=utcnow_naive)
 
@@ -235,6 +236,37 @@ def ensure_columns(engine, table_name: str, columns: dict[str, str]) -> None:
             conn.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {col_name} {sql_type}"))
 
 
+def backfill_llm_job_result_snapshots(SessionLocal, kinds: tuple = ("correction",)) -> None:
+    """One-time backfill: completed LlmJob rows that predate result_json have
+    no output snapshot. Fill in the latest completed job per (transcript_id,
+    kind) from the transcript's current output, so the run-history picker
+    isn't empty for pre-existing data. Older, already-superseded completed
+    jobs never had their output retained anywhere — they stay snapshot-less
+    by design (not a bug: nothing before this feature kept that history).
+    Safe to call on every startup — only touches rows still missing a
+    snapshot, so it's a no-op once backfilled."""
+    from sqlalchemy import func
+
+    db = SessionLocal()
+    try:
+        latest_ids = (
+            db.query(LlmJob.transcript_id, LlmJob.kind, func.max(LlmJob.id).label("max_id"))
+            .filter(LlmJob.status == "completed", LlmJob.kind.in_(kinds))
+            .group_by(LlmJob.transcript_id, LlmJob.kind)
+            .all()
+        )
+        for transcript_id, kind, max_id in latest_ids:
+            job = db.query(LlmJob).filter(LlmJob.id == max_id).first()
+            transcript = db.query(Transcript).filter(Transcript.id == transcript_id).first()
+            if not job or not transcript or job.result_json is not None:
+                continue
+            if kind == "correction" and transcript.corrected_text:
+                job.result_json = {"corrected_text": transcript.corrected_text}
+        db.commit()
+    finally:
+        db.close()
+
+
 def init_db(db_path: str = "data/whisperdesk.db") -> tuple:
     """Initialize the database. Returns (engine, SessionLocal, migrated_tables).
 
@@ -251,13 +283,14 @@ def init_db(db_path: str = "data/whisperdesk.db") -> tuple:
     Base.metadata.create_all(engine)
     ensure_columns(engine, "users", {"settings": "JSON"})
     ensure_columns(engine, "transcripts", {"audio_path": "TEXT", "diarize_requested": "BOOLEAN", "num_speakers": "INTEGER", "processed_size_bytes": "INTEGER", "corrected_text": "TEXT", "correction_error": "TEXT", "correction_model": "TEXT", "queue_dismissed": "BOOLEAN DEFAULT 0"})
-    ensure_columns(engine, "llm_jobs", {"dismissed": "BOOLEAN DEFAULT 0"})
+    ensure_columns(engine, "llm_jobs", {"dismissed": "BOOLEAN DEFAULT 0", "result_json": "JSON"})
     ensure_columns(engine, "summaries", {"provider": "TEXT"})
     SessionLocal = sessionmaker(bind=engine)
+    backfill_llm_job_result_snapshots(SessionLocal)
     return engine, SessionLocal, migrated_tables
 
 
 __all__ = [
     "Base", "User", "Transcript", "Summary", "VoiceProfile", "VoiceClip", "ProviderConfig", "TranscriptionJob", "LlmJob", "HotwordEntry",
-    "init_db", "migrate_schema", "backfill_user_id", "ensure_columns",
+    "init_db", "migrate_schema", "backfill_user_id", "ensure_columns", "backfill_llm_job_result_snapshots",
 ]
