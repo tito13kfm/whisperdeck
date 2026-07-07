@@ -4,10 +4,6 @@ the run-history picker isn't empty for old data on first upgrade."""
 from database import LlmJob, Transcript, User, backfill_llm_job_result_snapshots
 
 
-def _session_factory(db_session):
-    return lambda: db_session
-
-
 class _NoCloseSession:
     def __init__(self, db):
         self._db = db
