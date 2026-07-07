@@ -11,12 +11,23 @@ import datetime
 
 from database import LlmJob, Transcript, VoiceProfile, utcnow_naive
 from services.audio_prep import extract_clips_concat
+from services.queue import MAX_ATTEMPTS, _retry_eligible
 from services.voice_id import voice_id_service
 
 ACTIVE_STATUSES = ("pending", "running")
 TERMINAL_LLM_STATUSES = ("completed", "failed", "cancelled")
 
 VALID_KINDS = ("correction", "summary", "rediarize", "voice_match")
+# Auto-retry (issue #14) is scoped to network-dependent kinds only —
+# correction/summary call a provider API and can fail transiently.
+# rediarize/voice_match are local CPU-bound compute (diarization clustering,
+# voice-embedding extraction); a failure there is far more likely to be
+# deterministic (bad audio, missing backend, no enrolled voices) than
+# transient, so blindly retrying up to MAX_ATTEMPTS would just re-run
+# expensive local inference against the same failure. See "Open Design
+# Questions" in docs/superpowers/plans/2026-07-07-queue-audit-llmjob-auto-retry.md
+# if reconsidering.
+AUTO_RETRY_KINDS = ("correction", "summary")
 # Two independent concurrency pools, capped separately (issue #14): I/O-bound
 # kinds are provider API calls (bounded by provider rate limits, not local
 # resources), CPU-bound kinds are local compute (diarization clustering /
@@ -341,6 +352,22 @@ async def run_llm_job(SessionLocal, job_id: int, transcription_service, diarizat
 async def llm_worker_tick(SessionLocal, transcription_service, diarization_service=None) -> None:
     db = SessionLocal()
     try:
+        eligible_failed = (
+            db.query(LlmJob)
+            .filter(
+                LlmJob.status == "failed",
+                LlmJob.dismissed.is_(False),
+                LlmJob.attempts >= 1,
+                LlmJob.kind.in_(AUTO_RETRY_KINDS),
+            )
+            .all()
+        )
+        for job in eligible_failed:
+            if _retry_eligible(job):
+                job.status = "pending"
+                job.error = None
+        db.commit()
+
         claimed = []
         for kinds, cap in ((IO_KINDS, _MAX_CONCURRENT_IO_JOBS), (CPU_KINDS, _MAX_CONCURRENT_CPU_JOBS)):
             running = db.query(LlmJob).filter(LlmJob.status == "running", LlmJob.kind.in_(kinds)).count()

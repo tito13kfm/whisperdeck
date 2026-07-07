@@ -1,15 +1,17 @@
 """LLM job queue: enqueue/dedupe, worker execution with progress + cancel,
 rerun, and the unified /api/jobs routes."""
 import asyncio
+import datetime
 import io
 import json
 from unittest.mock import AsyncMock, patch
 
-from database import LlmJob, Transcript, User, ProviderConfig
+from database import LlmJob, Transcript, User, ProviderConfig, utcnow_naive
 from services.llm_jobs import (
     enqueue_llm_job, run_llm_job, cancel_llm_job, rerun_llm_job, llm_worker_tick,
     reset_stuck_llm_jobs, dismiss_llm_job, clear_finished_llm_jobs,
 )
+from services.queue import MAX_ATTEMPTS
 
 
 def _make_user_and_transcript(db_session, segments=None, username="queueop"):
@@ -559,3 +561,105 @@ def test_worker_tick_increments_attempts_on_claim(db_session):
     db_session.refresh(job)
     assert job.attempts == 1
     assert job.status == "completed"
+
+
+def test_worker_tick_resurrects_failed_job_past_backoff_window(db_session):
+    user, t = _make_user_and_transcript(db_session)
+    job = enqueue_llm_job(db_session, user.id, t.id, "correction", "groq", "m1")
+    job.status = "failed"
+    job.attempts = 1
+    job.error = "transient network blip"
+    job.updated_at = utcnow_naive() - datetime.timedelta(seconds=100)  # backoff for attempts=1 is 10s
+    db_session.commit()
+
+    factory = lambda: _NoCloseSession(db_session)
+    with patch("httpx.AsyncClient.post", AsyncMock(return_value=_FakeResponse("S: fixed"))):
+        asyncio.run(llm_worker_tick(factory, transcription_service=None))
+
+    db_session.refresh(job)
+    assert job.status == "completed"
+    assert job.attempts == 2
+    assert job.error is None
+
+
+def test_worker_tick_leaves_failed_job_within_backoff_window(db_session):
+    user, t = _make_user_and_transcript(db_session)
+    job = enqueue_llm_job(db_session, user.id, t.id, "correction", "groq", "m1")
+    job.status = "failed"
+    job.attempts = 1
+    job.error = "transient network blip"
+    job.updated_at = utcnow_naive()  # just failed — backoff for attempts=1 is 10s, not elapsed
+    db_session.commit()
+
+    factory = lambda: _NoCloseSession(db_session)
+    asyncio.run(llm_worker_tick(factory, transcription_service=None))
+
+    db_session.refresh(job)
+    assert job.status == "failed"
+    assert job.attempts == 1
+
+
+def test_worker_tick_never_resurrects_job_at_max_attempts(db_session):
+    user, t = _make_user_and_transcript(db_session)
+    job = enqueue_llm_job(db_session, user.id, t.id, "correction", "groq", "m1")
+    job.status = "failed"
+    job.attempts = MAX_ATTEMPTS
+    job.updated_at = utcnow_naive() - datetime.timedelta(seconds=1000)
+    db_session.commit()
+
+    factory = lambda: _NoCloseSession(db_session)
+    asyncio.run(llm_worker_tick(factory, transcription_service=None))
+
+    db_session.refresh(job)
+    assert job.status == "failed"
+
+
+def test_worker_tick_never_resurrects_dismissed_job(db_session):
+    user, t = _make_user_and_transcript(db_session)
+    job = enqueue_llm_job(db_session, user.id, t.id, "correction", "groq", "m1")
+    job.status = "failed"
+    job.attempts = 1
+    job.dismissed = True
+    job.updated_at = utcnow_naive() - datetime.timedelta(seconds=1000)
+    db_session.commit()
+
+    factory = lambda: _NoCloseSession(db_session)
+    asyncio.run(llm_worker_tick(factory, transcription_service=None))
+
+    db_session.refresh(job)
+    assert job.status == "failed"
+
+
+def test_worker_tick_never_resurrects_a_job_that_never_ran(db_session):
+    """attempts stays 0 for jobs enqueue_llm_job pre-fails immediately (e.g.
+    'no API key saved') — retrying a precondition failure would just fail
+    identically, so these are excluded from the auto-retry sweep."""
+    user, t = _make_user_and_transcript(db_session)
+    job = enqueue_llm_job(
+        db_session, user.id, t.id, "correction", "openrouter", "m1",
+        error="auto-correct skipped: no openrouter API key saved (see service panel)",
+    )
+    assert job.status == "failed" and job.attempts == 0
+    job.updated_at = utcnow_naive() - datetime.timedelta(seconds=1000)
+    db_session.commit()
+
+    factory = lambda: _NoCloseSession(db_session)
+    asyncio.run(llm_worker_tick(factory, transcription_service=None))
+
+    db_session.refresh(job)
+    assert job.status == "failed"
+
+
+def test_worker_tick_never_resurrects_non_auto_retry_kinds(db_session):
+    user, t = _make_user_and_transcript(db_session)
+    job = enqueue_llm_job(db_session, user.id, t.id, "rediarize", "", "")
+    job.status = "failed"
+    job.attempts = 1
+    job.updated_at = utcnow_naive() - datetime.timedelta(seconds=1000)
+    db_session.commit()
+
+    factory = lambda: _NoCloseSession(db_session)
+    asyncio.run(llm_worker_tick(factory, transcription_service=None, diarization_service=None))
+
+    db_session.refresh(job)
+    assert job.status == "failed"
