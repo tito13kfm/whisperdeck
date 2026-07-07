@@ -108,6 +108,29 @@ def test_retranscribe_chain_sets_source_transcript_id_to_root(client, db_session
     assert second.source_transcript_id == original["id"]
 
 
+def test_retranscribe_links_root_even_if_pipeline_fails_after_commit(client, db_session):
+    """source_transcript_id is set on the same commit that creates the row
+    (inside _run_transcription_pipeline), not patched on afterward — so a
+    failure later in the same request (e.g. auto-correct enqueue) still
+    leaves the new row correctly linked to its root, even though the
+    request itself surfaces as a 500."""
+    client.put("/api/settings", json={"auto_correct": True})
+    original = _upload(client, text="first pass").json()
+
+    p1, p2, p3 = _pipeline_patches(text="second pass")
+    with p1, p2, p3, patch("app.enqueue_auto_correction", side_effect=RuntimeError("boom")):
+        r = client.post(
+            f"/api/transcripts/{original['id']}/retranscribe",
+            data={"provider": "groq", "model": "whisper-large-v3"},
+        )
+    assert r.status_code == 500
+
+    db_session.expire_all()
+    linked = [t for t in db_session.query(Transcript).all() if t.id != original["id"] and t.full_text == "second pass"]
+    assert len(linked) == 1
+    assert linked[0].source_transcript_id == original["id"]
+
+
 def test_retranscribe_400_without_stored_audio(client, db_session):
     user = _test_user(db_session)
     t = Transcript(user_id=user.id, title="old", filename="old.mp3",

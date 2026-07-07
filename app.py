@@ -435,11 +435,17 @@ async def _run_transcription_pipeline(
     temperature: float,
     diarize: bool,
     num_speakers: Optional[int],
+    source_transcript_id: Optional[int] = None,
 ) -> dict:
     """Everything after the source audio is on disk: transcode decision,
     chunk-vs-inline branch, inline diarization, auto-correct enqueue.
     Shared by /api/transcribe (fresh upload) and
-    /api/transcripts/{id}/retranscribe (stored audio_path)."""
+    /api/transcripts/{id}/retranscribe (stored audio_path).
+
+    source_transcript_id is set on the transcript row before its first
+    commit in both branches — not patched on afterward — so a version-chain
+    link is never left missing by an exception raised later in the same
+    request (chunk-job creation, diarization, auto-correct enqueue)."""
     user_settings = get_user_settings(db, current_user.id)
 
     # Normalize for cloud upload: strips video track, downsamples to 16kHz
@@ -534,6 +540,7 @@ async def _run_transcription_pipeline(
         # Known now from the ffprobe above — lets the UI say "48-min
         # recording" before the first chunk lands.
         transcript.duration_seconds = duration_seconds
+        transcript.source_transcript_id = source_transcript_id
         db.commit()
         create_chunk_jobs(db, transcript.id, chunks)
         return _serialize_transcript(db, transcript)
@@ -551,6 +558,7 @@ async def _run_transcription_pipeline(
             temperature=temperature,
         )
         transcript.processed_size_bytes = file_size
+        transcript.source_transcript_id = source_transcript_id
         db.commit()
 
         # Run diarization if requested
@@ -749,7 +757,7 @@ async def retranscribe_transcript(
             detail="No stored audio for this transcript — it predates audio retention or the file was removed",
         )
     root_id = t.source_transcript_id or t.id
-    result = await _run_transcription_pipeline(
+    return await _run_transcription_pipeline(
         db, current_user, Path(t.audio_path),
         filename=t.filename,
         title=t.title,
@@ -759,12 +767,8 @@ async def retranscribe_transcript(
         temperature=0.0,
         diarize=diarize if diarize is not None else bool(t.diarize_requested),
         num_speakers=num_speakers if num_speakers is not None else t.num_speakers,
+        source_transcript_id=root_id,
     )
-    new_transcript = db.query(Transcript).filter(Transcript.id == result["id"]).first()
-    if new_transcript:
-        new_transcript.source_transcript_id = root_id
-        db.commit()
-    return result
 
 
 _AUDIO_MIME = {
