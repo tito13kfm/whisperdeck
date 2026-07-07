@@ -358,6 +358,7 @@ async def llm_worker_tick(SessionLocal, transcription_service, diarization_servi
             return
         for job in claimed:
             job.status = "running"
+            job.attempts = (job.attempts or 0) + 1
             job.updated_at = utcnow_naive()
         db.commit()  # claim lands before any await — same invariant as the chunk queue
         job_ids = [job.id for job in claimed]

@@ -545,3 +545,17 @@ def test_llm_job_attempts_defaults_to_zero(db_session):
     user, t = _make_user_and_transcript(db_session)
     job = enqueue_llm_job(db_session, user.id, t.id, "correction", "groq", "m1")
     assert job.attempts == 0
+
+
+def test_worker_tick_increments_attempts_on_claim(db_session):
+    user, t = _make_user_and_transcript(db_session)
+    job = enqueue_llm_job(db_session, user.id, t.id, "correction", "groq", "m1")
+    assert job.attempts == 0
+
+    factory = lambda: _NoCloseSession(db_session)
+    with patch("httpx.AsyncClient.post", AsyncMock(return_value=_FakeResponse("S: fixed"))):
+        asyncio.run(llm_worker_tick(factory, transcription_service=None))
+
+    db_session.refresh(job)
+    assert job.attempts == 1
+    assert job.status == "completed"
