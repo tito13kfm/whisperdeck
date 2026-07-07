@@ -208,6 +208,8 @@ async def run_llm_job(SessionLocal, job_id: int, transcription_service, diarizat
                 progress_cb=progress, cancel_cb=cancelled,
             )
             if result == "ok":
+                job.result_json = {"corrected_text": transcript.corrected_text}
+                db.commit()
                 _finish(db, job, "completed")
             elif result == "failed":
                 _finish(db, job, "failed", transcript.correction_error)
