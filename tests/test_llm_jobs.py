@@ -687,3 +687,20 @@ def test_worker_tick_skips_resurrection_when_a_fresh_job_already_active(db_sessi
     db_session.refresh(fresh)
     assert stale.status == "failed"      # left alone — fresh sibling already covers this lane
     assert fresh.status == "completed"   # the manually-created job dispatched normally
+
+
+def test_reset_stuck_llm_jobs_preserves_attempts_count(db_session):
+    """attempts was already incremented at claim time (llm_worker_tick) before
+    the crashed await — reset_stuck_llm_jobs must not increment it again, so
+    a crash-interrupted job doesn't burn an extra retry it never used."""
+    user, t = _make_user_and_transcript(db_session)
+    job = enqueue_llm_job(db_session, user.id, t.id, "correction", "groq", "m1")
+    job.status = "running"
+    job.attempts = 1
+    db_session.commit()
+
+    reset_stuck_llm_jobs(db_session)
+
+    db_session.refresh(job)
+    assert job.status == "failed"
+    assert job.attempts == 1

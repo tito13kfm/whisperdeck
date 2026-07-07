@@ -98,8 +98,11 @@ def enqueue_llm_job(db, user_id: int, transcript_id: int, kind: str,
 
 def reset_stuck_llm_jobs(db) -> int:
     """Startup reconciliation: an LlmJob left 'running' means the process
-    died mid-job. LlmJob has no auto-retry, so this matches its existing
-    failure UX — the user reruns it manually via /api/jobs/{id}/rerun."""
+    died mid-job. attempts was already incremented before the crashed
+    await (see the claim loop in llm_worker_tick), so land it on 'failed'
+    and let the normal sweep + _retry_eligible backoff resurrect it (for
+    AUTO_RETRY_KINDS) — never straight back to 'pending'. Mirrors
+    reset_stuck_transcription_jobs' identical reasoning for TranscriptionJob."""
     stuck = db.query(LlmJob).filter(LlmJob.status == "running").all()
     for job in stuck:
         job.status = "failed"
