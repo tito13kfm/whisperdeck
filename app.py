@@ -1015,8 +1015,8 @@ async def summarize_transcript(
 @app.post("/api/transcripts/{transcript_id}/correct")
 async def correct_transcript_route(
     transcript_id: int,
-    provider: str = Form("groq"),
-    model: str = Form("llama-3.3-70b-versatile"),
+    provider: str = Form(default="groq"),
+    model: str = Form(default="llama-3.3-70b-versatile"),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -1087,6 +1087,40 @@ async def voice_match_transcript(
         raise HTTPException(status_code=400, detail="No stored audio for this transcript")
     job = enqueue_llm_job(db, current_user.id, transcript_id, "voice_match", "", "")
     return {"job": serialize_llm_job(job)}
+
+
+@app.get("/api/transcripts/{transcript_id}/runs/{kind}")
+async def transcript_runs(
+    transcript_id: int,
+    kind: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """History of every LLM job of `kind` run against this transcript,
+    including dismissed ones (dismiss only hides a job from the Queue
+    screen — the row and its result_json snapshot persist). Powers the
+    run-comparison picker on the detail page."""
+    if kind not in ("correction", "summary", "rediarize"):
+        raise HTTPException(status_code=400, detail=f"Unknown run kind '{kind}'")
+    t = db.query(Transcript).filter(
+        Transcript.id == transcript_id, Transcript.user_id == current_user.id
+    ).first()
+    if not t:
+        raise HTTPException(status_code=404, detail="Transcript not found")
+    jobs = (
+        db.query(LlmJob)
+        .filter(LlmJob.transcript_id == transcript_id, LlmJob.kind == kind)
+        .order_by(LlmJob.id.desc())
+        .all()
+    )
+    return {"runs": [
+        {
+            "id": j.id, "provider": j.provider, "model": j.model, "status": j.status,
+            "created_at": j.created_at.isoformat() if j.created_at else None,
+            "result": j.result_json,
+        }
+        for j in jobs
+    ]}
 
 
 @app.post("/api/transcripts/{transcript_id}/context")
