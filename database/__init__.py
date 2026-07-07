@@ -251,14 +251,14 @@ def backfill_llm_job_result_snapshots(SessionLocal, kinds: tuple = ("correction"
     try:
         latest_ids = (
             db.query(LlmJob.transcript_id, LlmJob.kind, func.max(LlmJob.id).label("max_id"))
-            .filter(LlmJob.status == "completed", LlmJob.result_json.is_(None), LlmJob.kind.in_(kinds))
+            .filter(LlmJob.status == "completed", LlmJob.kind.in_(kinds))
             .group_by(LlmJob.transcript_id, LlmJob.kind)
             .all()
         )
         for transcript_id, kind, max_id in latest_ids:
             job = db.query(LlmJob).filter(LlmJob.id == max_id).first()
             transcript = db.query(Transcript).filter(Transcript.id == transcript_id).first()
-            if not job or not transcript:
+            if not job or not transcript or job.result_json is not None:
                 continue
             if kind == "correction" and transcript.corrected_text:
                 job.result_json = {"corrected_text": transcript.corrected_text}
