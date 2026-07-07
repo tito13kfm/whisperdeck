@@ -1,7 +1,7 @@
 """Backfill: pre-existing completed LlmJob rows (from before result_json
 existed) get a snapshot filled in from the transcript's current output, so
 the run-history picker isn't empty for old data on first upgrade."""
-from database import LlmJob, Transcript, User, backfill_llm_job_result_snapshots
+from database import LlmJob, Summary, Transcript, User, backfill_llm_job_result_snapshots
 
 
 class _NoCloseSession:
@@ -88,3 +88,39 @@ def test_backfill_second_restart_does_not_snapshot_superseded_job(db_session):
     db_session.refresh(newer)
     assert older.result_json is None
     assert newer.result_json == {"corrected_text": "the final corrected text"}
+
+
+def test_backfill_fills_latest_completed_summary_job(db_session):
+    user = User(username="backfillop_summary", password_hash="x", password_salt="y")
+    db_session.add(user)
+    db_session.commit()
+    t = Transcript(user_id=user.id, title="t", filename="f.mp3", status="completed")
+    db_session.add(t)
+    db_session.commit()
+    db_session.add(Summary(transcript_id=t.id, short_summary="s", key_points=["a"], action_items=[], decisions=[], model="m1", provider="groq"))
+    job = LlmJob(user_id=user.id, transcript_id=t.id, kind="summary", status="completed", provider="groq", model="m1")
+    db_session.add(job)
+    db_session.commit()
+
+    backfill_llm_job_result_snapshots(lambda: _NoCloseSession(db_session), kinds=("correction", "summary", "rediarize"))
+
+    db_session.refresh(job)
+    assert job.result_json == {"short_summary": "s", "key_points": ["a"], "action_items": [], "decisions": []}
+
+
+def test_backfill_fills_latest_completed_rediarize_job_from_current_segments(db_session):
+    user = User(username="backfillop_rediarize", password_hash="x", password_salt="y")
+    db_session.add(user)
+    db_session.commit()
+    segs = [{"start": 0, "end": 1, "speaker": "A", "text": "hi"}]
+    t = Transcript(user_id=user.id, title="t", filename="f.mp3", status="completed", segments=segs)
+    db_session.add(t)
+    db_session.commit()
+    job = LlmJob(user_id=user.id, transcript_id=t.id, kind="rediarize", status="completed", provider="", model="")
+    db_session.add(job)
+    db_session.commit()
+
+    backfill_llm_job_result_snapshots(lambda: _NoCloseSession(db_session), kinds=("correction", "summary", "rediarize"))
+
+    db_session.refresh(job)
+    assert job.result_json == {"segments": segs}
