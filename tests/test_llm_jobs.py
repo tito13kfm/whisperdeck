@@ -663,3 +663,27 @@ def test_worker_tick_never_resurrects_non_auto_retry_kinds(db_session):
 
     db_session.refresh(job)
     assert job.status == "failed"
+
+
+def test_worker_tick_skips_resurrection_when_a_fresh_job_already_active(db_session):
+    """A manual rerun creates a NEW row rather than reusing the failed one
+    (see rerun_llm_job) — if the auto-retry sweep resurrected the old failed
+    row too, both would dispatch and write the same transcript concurrently."""
+    user, t = _make_user_and_transcript(db_session)
+    stale = enqueue_llm_job(db_session, user.id, t.id, "correction", "groq", "m1")
+    stale.status = "failed"
+    stale.attempts = 1
+    stale.updated_at = utcnow_naive() - datetime.timedelta(seconds=1000)
+    db_session.commit()
+
+    fresh = rerun_llm_job(db_session, user.id, stale.id)
+    assert fresh.status == "pending"
+
+    factory = lambda: _NoCloseSession(db_session)
+    with patch("httpx.AsyncClient.post", AsyncMock(return_value=_FakeResponse("S: fixed"))):
+        asyncio.run(llm_worker_tick(factory, transcription_service=None))
+
+    db_session.refresh(stale)
+    db_session.refresh(fresh)
+    assert stale.status == "failed"      # left alone — fresh sibling already covers this lane
+    assert fresh.status == "completed"   # the manually-created job dispatched normally

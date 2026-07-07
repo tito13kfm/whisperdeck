@@ -363,9 +363,17 @@ async def llm_worker_tick(SessionLocal, transcription_service, diarization_servi
             .all()
         )
         for job in eligible_failed:
-            if _retry_eligible(job):
-                job.status = "pending"
-                job.error = None
+            if not _retry_eligible(job):
+                continue
+            if get_active_job(db, job.transcript_id, job.kind) is not None:
+                # A manual rerun already created a fresh pending/running job
+                # for this transcript+kind — resurrecting this stale failed
+                # row too would dispatch two jobs writing the same
+                # transcript concurrently. Leave it failed; it's still
+                # manually rerunnable if the fresh sibling later fails too.
+                continue
+            job.status = "pending"
+            job.error = None
         db.commit()
 
         claimed = []
