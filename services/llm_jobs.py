@@ -15,9 +15,18 @@ from services.voice_id import voice_id_service
 
 ACTIVE_STATUSES = ("pending", "running")
 TERMINAL_LLM_STATUSES = ("completed", "failed", "cancelled")
-_MAX_CONCURRENT_JOBS = 2
 
 VALID_KINDS = ("correction", "summary", "rediarize", "voice_match")
+# Two independent concurrency pools, capped separately (issue #14): I/O-bound
+# kinds are provider API calls (bounded by provider rate limits, not local
+# resources), CPU-bound kinds are local compute (diarization clustering /
+# embedding extraction) and stay small so they don't fight each other for
+# the same CPU. IO_KINDS/CPU_KINDS must partition VALID_KINDS exactly — see
+# test_io_cpu_pools_partition_valid_kinds.
+IO_KINDS = ("correction", "summary")
+CPU_KINDS = ("rediarize", "voice_match")
+_MAX_CONCURRENT_IO_JOBS = 2
+_MAX_CONCURRENT_CPU_JOBS = 1
 
 
 def serialize_llm_job(job: LlmJob) -> dict:
@@ -332,17 +341,19 @@ async def run_llm_job(SessionLocal, job_id: int, transcription_service, diarizat
 async def llm_worker_tick(SessionLocal, transcription_service, diarization_service=None) -> None:
     db = SessionLocal()
     try:
-        running = db.query(LlmJob).filter(LlmJob.status == "running").count()
-        slots = max(0, _MAX_CONCURRENT_JOBS - running)
-        if slots == 0:
-            return
-        claimed = (
-            db.query(LlmJob)
-            .filter(LlmJob.status == "pending")
-            .order_by(LlmJob.id.asc())
-            .limit(slots)
-            .all()
-        )
+        claimed = []
+        for kinds, cap in ((IO_KINDS, _MAX_CONCURRENT_IO_JOBS), (CPU_KINDS, _MAX_CONCURRENT_CPU_JOBS)):
+            running = db.query(LlmJob).filter(LlmJob.status == "running", LlmJob.kind.in_(kinds)).count()
+            slots = max(0, cap - running)
+            if slots == 0:
+                continue
+            claimed.extend(
+                db.query(LlmJob)
+                .filter(LlmJob.status == "pending", LlmJob.kind.in_(kinds))
+                .order_by(LlmJob.id.asc())
+                .limit(slots)
+                .all()
+            )
         if not claimed:
             return
         for job in claimed:

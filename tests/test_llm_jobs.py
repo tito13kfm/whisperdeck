@@ -428,3 +428,114 @@ def test_runs_endpoint_404s_for_another_users_transcript(client):
 
     r = client.get(f"/api/transcripts/{transcript_id}/runs/correction")
     assert r.status_code == 404
+
+
+def test_io_cpu_pools_partition_valid_kinds():
+    """Sanity check: every valid job kind must belong to exactly one pool,
+    so a future kind addition can't silently fall through uncapped."""
+    from services.llm_jobs import IO_KINDS, CPU_KINDS, VALID_KINDS
+    assert set(IO_KINDS) | set(CPU_KINDS) == set(VALID_KINDS)
+    assert set(IO_KINDS) & set(CPU_KINDS) == set()
+
+
+def test_worker_tick_io_cap_limits_dispatch(db_session, tmp_path):
+    """IO pool cap defaults to 2 — one already-running IO job plus one
+    freshly claimed IO job fill it; a third pending IO job must wait."""
+    from services.transcription import TranscriptionService
+
+    user1, t1 = _make_user_and_transcript(db_session, username="ioq1")
+    running = enqueue_llm_job(db_session, user1.id, t1.id, "correction", "groq", "m")
+    running.status = "running"
+    db_session.commit()
+
+    user2, t2 = _make_user_and_transcript(db_session, username="ioq2")
+    claimable = enqueue_llm_job(db_session, user2.id, t2.id, "summary", "groq", "m1")
+
+    user3, t3 = _make_user_and_transcript(db_session, username="ioq3")
+    overflow = enqueue_llm_job(db_session, user3.id, t3.id, "correction", "groq", "m1")
+
+    factory = lambda: _NoCloseSession(db_session)
+    svc = TranscriptionService(str(tmp_path))
+    fake_post = AsyncMock(return_value=_FakeResponse(
+        '{"short_summary": "s", "key_points": [], "action_items": [], "decisions": []}'
+    ))
+    with patch("httpx.AsyncClient.post", fake_post):
+        asyncio.run(llm_worker_tick(factory, transcription_service=svc))
+
+    db_session.refresh(running)
+    db_session.refresh(claimable)
+    db_session.refresh(overflow)
+    assert running.status == "running"      # untouched — already counted against the cap
+    assert claimable.status == "completed"  # 2nd IO slot — claimed and ran
+    assert overflow.status == "pending"     # 3rd IO job — cap (2) already full, must wait
+
+
+def test_worker_tick_cpu_cap_limits_dispatch(db_session):
+    """CPU pool cap defaults to 1 — a second pending CPU-kind job must wait
+    even though the IO pool is completely empty."""
+    user1, t1 = _make_user_and_transcript(db_session, username="cpuq1")
+    claimable = enqueue_llm_job(db_session, user1.id, t1.id, "rediarize", "", "")
+
+    user2, t2 = _make_user_and_transcript(db_session, username="cpuq2")
+    overflow = enqueue_llm_job(db_session, user2.id, t2.id, "rediarize", "", "")
+
+    factory = lambda: _NoCloseSession(db_session)
+    asyncio.run(llm_worker_tick(factory, transcription_service=None, diarization_service=None))
+
+    db_session.refresh(claimable)
+    db_session.refresh(overflow)
+    # claimed (dispatched) even though diarization_service is unavailable —
+    # it fails fast rather than being left pending, which is what proves it
+    # was picked up by the claim query.
+    assert claimable.status == "failed"
+    assert claimable.error == "Diarization service unavailable"
+    assert overflow.status == "pending"  # CPU cap (1) already full, must wait
+
+
+def test_worker_tick_full_io_pool_does_not_block_cpu_dispatch(db_session):
+    """The actual point of the split: two running IO-kind jobs — deliberately
+    equal to the OLD shared global cap of 2 — must not stall a pending
+    CPU-kind job. Under the pre-split shared cap, running=2 >= cap=2 would
+    have produced slots=0 for every kind, including this rediarize job."""
+    user1, t1 = _make_user_and_transcript(db_session, username="mixq1")
+    io_a = enqueue_llm_job(db_session, user1.id, t1.id, "correction", "groq", "m")
+    io_a.status = "running"
+
+    user2, t2 = _make_user_and_transcript(db_session, username="mixq2")
+    io_b = enqueue_llm_job(db_session, user2.id, t2.id, "correction", "groq", "m")
+    io_b.status = "running"
+    db_session.commit()
+
+    user3, t3 = _make_user_and_transcript(db_session, username="mixq3")
+    cpu_job = enqueue_llm_job(db_session, user3.id, t3.id, "rediarize", "", "")
+
+    factory = lambda: _NoCloseSession(db_session)
+    asyncio.run(llm_worker_tick(factory, transcription_service=None, diarization_service=None))
+
+    db_session.refresh(cpu_job)
+    assert cpu_job.status == "failed"  # dispatched then failed fast — not left pending behind the full IO pool
+
+
+def test_worker_tick_full_cpu_pool_does_not_block_io_dispatch(db_session):
+    """Reverse direction: two running CPU-kind jobs — deliberately equal to
+    the OLD shared global cap of 2, not just the new CPU cap of 1 — must not
+    stall a pending IO-kind job."""
+    user1, t1 = _make_user_and_transcript(db_session, username="mixq4")
+    cpu_a = enqueue_llm_job(db_session, user1.id, t1.id, "rediarize", "", "")
+    cpu_a.status = "running"
+
+    user2, t2 = _make_user_and_transcript(db_session, username="mixq5")
+    cpu_b = enqueue_llm_job(db_session, user2.id, t2.id, "voice_match", "", "")
+    cpu_b.status = "running"
+    db_session.commit()
+
+    user3, t3 = _make_user_and_transcript(db_session, username="mixq6")
+    io_job = enqueue_llm_job(db_session, user3.id, t3.id, "correction", "groq", "m")
+
+    factory = lambda: _NoCloseSession(db_session)
+    fake_post = AsyncMock(return_value=_FakeResponse("S: fixed"))
+    with patch("httpx.AsyncClient.post", fake_post):
+        asyncio.run(llm_worker_tick(factory, transcription_service=None))
+
+    db_session.refresh(io_job)
+    assert io_job.status == "completed"  # dispatched despite the full CPU pool
