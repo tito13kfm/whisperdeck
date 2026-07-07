@@ -153,6 +153,28 @@ def test_versions_endpoint_returns_root_and_all_reruns(client, db_session):
     assert [v["id"] for v in versions_from_rerun] == [original["id"], rerun["id"]]
 
 
+def test_versions_endpoint_exposes_status_for_in_progress_reruns(client, db_session):
+    """The frontend's compare-versions modal must be able to tell a
+    still-processing/failed rerun apart from a completed one (otherwise it
+    would diff against empty full_text and show a misleading full
+    delete/insert). Status has to be in the response for that guard to work."""
+    client.put("/api/settings", json={"auto_correct": False})
+    original = _upload(client, text="first pass").json()
+
+    pending = Transcript(
+        user_id=db_session.query(Transcript).filter(Transcript.id == original["id"]).first().user_id,
+        title="rerun", filename="rerun.mp3", status="processing", full_text="",
+        source_transcript_id=original["id"],
+    )
+    db_session.add(pending)
+    db_session.commit()
+
+    versions = client.get(f"/api/transcripts/{original['id']}/versions").json()["versions"]
+    by_id = {v["id"]: v for v in versions}
+    assert by_id[original["id"]]["status"] == "completed"
+    assert by_id[pending.id]["status"] == "processing"
+
+
 def test_versions_endpoint_returns_only_self_for_standalone_transcript(client, db_session):
     client.put("/api/settings", json={"auto_correct": False})
     original = _upload(client, text="only pass").json()

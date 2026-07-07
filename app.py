@@ -1159,7 +1159,7 @@ async def transcript_versions(
     )
     return {"versions": [
         {
-            "id": v.id, "provider": v.provider, "model": v.model,
+            "id": v.id, "provider": v.provider, "model": v.model, "status": v.status,
             "created_at": v.created_at.isoformat() if v.created_at else None,
             "full_text": v.full_text,
         }

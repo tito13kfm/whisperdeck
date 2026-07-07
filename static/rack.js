@@ -2371,8 +2371,9 @@ async function detailAction(act) {
           const versions = (await api('/api/transcripts/' + t.id + '/versions')).versions;
           return versions.map(v => ({
             id: v.id,
-            optionLabel: (v.provider || '—') + (v.model ? '/' + v.model : '') + ' · ' + timeAgo(v.created_at),
-            result: { full_text: v.full_text },
+            optionLabel: (v.provider || '—') + (v.model ? '/' + v.model : '') + ' · ' + timeAgo(v.created_at)
+              + (v.status === 'completed' ? '' : ' (' + v.status + ')'),
+            result: v.status === 'completed' ? { full_text: v.full_text } : null,
           }));
         },
         result => result.full_text || '',
