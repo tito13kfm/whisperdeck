@@ -11,12 +11,23 @@ import datetime
 
 from database import LlmJob, Transcript, VoiceProfile, utcnow_naive
 from services.audio_prep import extract_clips_concat
+from services.queue import MAX_ATTEMPTS, _retry_eligible
 from services.voice_id import voice_id_service
 
 ACTIVE_STATUSES = ("pending", "running")
 TERMINAL_LLM_STATUSES = ("completed", "failed", "cancelled")
 
 VALID_KINDS = ("correction", "summary", "rediarize", "voice_match")
+# Auto-retry (issue #14) is scoped to network-dependent kinds only —
+# correction/summary call a provider API and can fail transiently.
+# rediarize/voice_match are local CPU-bound compute (diarization clustering,
+# voice-embedding extraction); a failure there is far more likely to be
+# deterministic (bad audio, missing backend, no enrolled voices) than
+# transient, so blindly retrying up to MAX_ATTEMPTS would just re-run
+# expensive local inference against the same failure. See "Open Design
+# Questions" in docs/superpowers/plans/2026-07-07-queue-audit-llmjob-auto-retry.md
+# if reconsidering.
+AUTO_RETRY_KINDS = ("correction", "summary")
 # Two independent concurrency pools, capped separately (issue #14): I/O-bound
 # kinds are provider API calls (bounded by provider rate limits, not local
 # resources), CPU-bound kinds are local compute (diarization clustering /
@@ -87,8 +98,11 @@ def enqueue_llm_job(db, user_id: int, transcript_id: int, kind: str,
 
 def reset_stuck_llm_jobs(db) -> int:
     """Startup reconciliation: an LlmJob left 'running' means the process
-    died mid-job. LlmJob has no auto-retry, so this matches its existing
-    failure UX — the user reruns it manually via /api/jobs/{id}/rerun."""
+    died mid-job. attempts was already incremented before the crashed
+    await (see the claim loop in llm_worker_tick), so land it on 'failed'
+    and let the normal sweep + _retry_eligible backoff resurrect it (for
+    AUTO_RETRY_KINDS) — never straight back to 'pending'. Mirrors
+    reset_stuck_transcription_jobs' identical reasoning for TranscriptionJob."""
     stuck = db.query(LlmJob).filter(LlmJob.status == "running").all()
     for job in stuck:
         job.status = "failed"
@@ -341,6 +355,30 @@ async def run_llm_job(SessionLocal, job_id: int, transcription_service, diarizat
 async def llm_worker_tick(SessionLocal, transcription_service, diarization_service=None) -> None:
     db = SessionLocal()
     try:
+        eligible_failed = (
+            db.query(LlmJob)
+            .filter(
+                LlmJob.status == "failed",
+                LlmJob.dismissed.is_(False),
+                LlmJob.attempts >= 1,
+                LlmJob.kind.in_(AUTO_RETRY_KINDS),
+            )
+            .all()
+        )
+        for job in eligible_failed:
+            if not _retry_eligible(job):
+                continue
+            if get_active_job(db, job.transcript_id, job.kind) is not None:
+                # A manual rerun already created a fresh pending/running job
+                # for this transcript+kind — resurrecting this stale failed
+                # row too would dispatch two jobs writing the same
+                # transcript concurrently. Leave it failed; it's still
+                # manually rerunnable if the fresh sibling later fails too.
+                continue
+            job.status = "pending"
+            job.error = None
+        db.commit()
+
         claimed = []
         for kinds, cap in ((IO_KINDS, _MAX_CONCURRENT_IO_JOBS), (CPU_KINDS, _MAX_CONCURRENT_CPU_JOBS)):
             running = db.query(LlmJob).filter(LlmJob.status == "running", LlmJob.kind.in_(kinds)).count()
@@ -358,6 +396,7 @@ async def llm_worker_tick(SessionLocal, transcription_service, diarization_servi
             return
         for job in claimed:
             job.status = "running"
+            job.attempts = (job.attempts or 0) + 1
             job.updated_at = utcnow_naive()
         db.commit()  # claim lands before any await — same invariant as the chunk queue
         job_ids = [job.id for job in claimed]

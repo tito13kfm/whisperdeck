@@ -1,15 +1,17 @@
 """LLM job queue: enqueue/dedupe, worker execution with progress + cancel,
 rerun, and the unified /api/jobs routes."""
 import asyncio
+import datetime
 import io
 import json
 from unittest.mock import AsyncMock, patch
 
-from database import LlmJob, Transcript, User, ProviderConfig
+from database import LlmJob, Transcript, User, ProviderConfig, utcnow_naive
 from services.llm_jobs import (
     enqueue_llm_job, run_llm_job, cancel_llm_job, rerun_llm_job, llm_worker_tick,
     reset_stuck_llm_jobs, dismiss_llm_job, clear_finished_llm_jobs,
 )
+from services.queue import MAX_ATTEMPTS
 
 
 def _make_user_and_transcript(db_session, segments=None, username="queueop"):
@@ -539,3 +541,215 @@ def test_worker_tick_full_cpu_pool_does_not_block_io_dispatch(db_session):
 
     db_session.refresh(io_job)
     assert io_job.status == "completed"  # dispatched despite the full CPU pool
+
+
+def test_llm_job_attempts_defaults_to_zero(db_session):
+    user, t = _make_user_and_transcript(db_session)
+    job = enqueue_llm_job(db_session, user.id, t.id, "correction", "groq", "m1")
+    assert job.attempts == 0
+
+
+def test_worker_tick_increments_attempts_on_claim(db_session):
+    user, t = _make_user_and_transcript(db_session)
+    job = enqueue_llm_job(db_session, user.id, t.id, "correction", "groq", "m1")
+    assert job.attempts == 0
+
+    factory = lambda: _NoCloseSession(db_session)
+    with patch("httpx.AsyncClient.post", AsyncMock(return_value=_FakeResponse("S: fixed"))):
+        asyncio.run(llm_worker_tick(factory, transcription_service=None))
+
+    db_session.refresh(job)
+    assert job.attempts == 1
+    assert job.status == "completed"
+
+
+def test_worker_tick_resurrects_failed_job_past_backoff_window(db_session):
+    user, t = _make_user_and_transcript(db_session)
+    job = enqueue_llm_job(db_session, user.id, t.id, "correction", "groq", "m1")
+    job.status = "failed"
+    job.attempts = 1
+    job.error = "transient network blip"
+    job.updated_at = utcnow_naive() - datetime.timedelta(seconds=100)  # backoff for attempts=1 is 10s
+    db_session.commit()
+
+    factory = lambda: _NoCloseSession(db_session)
+    with patch("httpx.AsyncClient.post", AsyncMock(return_value=_FakeResponse("S: fixed"))):
+        asyncio.run(llm_worker_tick(factory, transcription_service=None))
+
+    db_session.refresh(job)
+    assert job.status == "completed"
+    assert job.attempts == 2
+    assert job.error is None
+
+
+def test_worker_tick_leaves_failed_job_within_backoff_window(db_session):
+    user, t = _make_user_and_transcript(db_session)
+    job = enqueue_llm_job(db_session, user.id, t.id, "correction", "groq", "m1")
+    job.status = "failed"
+    job.attempts = 1
+    job.error = "transient network blip"
+    job.updated_at = utcnow_naive()  # just failed — backoff for attempts=1 is 10s, not elapsed
+    db_session.commit()
+
+    factory = lambda: _NoCloseSession(db_session)
+    asyncio.run(llm_worker_tick(factory, transcription_service=None))
+
+    db_session.refresh(job)
+    assert job.status == "failed"
+    assert job.attempts == 1
+
+
+def test_worker_tick_never_resurrects_job_at_max_attempts(db_session):
+    """status=='failed' alone can't distinguish 'the guard skipped this job'
+    from 'the guard failed to skip it but the (unmocked) rerun failed again
+    anyway' — both leave status=='failed'. Pin attempts unchanged too: a
+    real resurrection would reclaim the row and increment attempts."""
+    user, t = _make_user_and_transcript(db_session)
+    job = enqueue_llm_job(db_session, user.id, t.id, "correction", "groq", "m1")
+    job.status = "failed"
+    job.attempts = MAX_ATTEMPTS
+    job.updated_at = utcnow_naive() - datetime.timedelta(seconds=1000)
+    db_session.commit()
+
+    factory = lambda: _NoCloseSession(db_session)
+    asyncio.run(llm_worker_tick(factory, transcription_service=None))
+
+    db_session.refresh(job)
+    assert job.status == "failed"
+    assert job.attempts == MAX_ATTEMPTS  # never reclaimed by the sweep
+
+
+def test_worker_tick_never_resurrects_dismissed_job(db_session):
+    """See test_worker_tick_never_resurrects_job_at_max_attempts docstring —
+    same discrimination problem, same fix: pin attempts unchanged."""
+    user, t = _make_user_and_transcript(db_session)
+    job = enqueue_llm_job(db_session, user.id, t.id, "correction", "groq", "m1")
+    job.status = "failed"
+    job.attempts = 1
+    job.dismissed = True
+    job.updated_at = utcnow_naive() - datetime.timedelta(seconds=1000)
+    db_session.commit()
+
+    factory = lambda: _NoCloseSession(db_session)
+    asyncio.run(llm_worker_tick(factory, transcription_service=None))
+
+    db_session.refresh(job)
+    assert job.status == "failed"
+    assert job.attempts == 1  # never reclaimed by the sweep
+
+
+def test_worker_tick_never_resurrects_a_job_that_never_ran(db_session):
+    """attempts stays 0 for jobs enqueue_llm_job pre-fails immediately (e.g.
+    'no API key saved') — retrying a precondition failure would just fail
+    identically, so these are excluded from the auto-retry sweep. Pin
+    attempts unchanged (see test_worker_tick_never_resurrects_job_at_max_attempts
+    docstring for why status alone doesn't discriminate here)."""
+    user, t = _make_user_and_transcript(db_session)
+    job = enqueue_llm_job(
+        db_session, user.id, t.id, "correction", "openrouter", "m1",
+        error="auto-correct skipped: no openrouter API key saved (see service panel)",
+    )
+    assert job.status == "failed" and job.attempts == 0
+    job.updated_at = utcnow_naive() - datetime.timedelta(seconds=1000)
+    db_session.commit()
+
+    factory = lambda: _NoCloseSession(db_session)
+    asyncio.run(llm_worker_tick(factory, transcription_service=None))
+
+    db_session.refresh(job)
+    assert job.status == "failed"
+    assert job.attempts == 0  # never reclaimed by the sweep
+
+
+def test_worker_tick_never_resurrects_non_auto_retry_kinds(db_session):
+    """See test_worker_tick_never_resurrects_job_at_max_attempts docstring —
+    same discrimination problem, same fix: pin attempts unchanged."""
+    user, t = _make_user_and_transcript(db_session)
+    job = enqueue_llm_job(db_session, user.id, t.id, "rediarize", "", "")
+    job.status = "failed"
+    job.attempts = 1
+    job.updated_at = utcnow_naive() - datetime.timedelta(seconds=1000)
+    db_session.commit()
+
+    factory = lambda: _NoCloseSession(db_session)
+    asyncio.run(llm_worker_tick(factory, transcription_service=None, diarization_service=None))
+
+    db_session.refresh(job)
+    assert job.status == "failed"
+    assert job.attempts == 1  # never reclaimed by the sweep
+
+
+def test_worker_tick_skips_resurrection_when_a_fresh_job_already_active(db_session):
+    """A manual rerun creates a NEW row rather than reusing the failed one
+    (see rerun_llm_job) — if the auto-retry sweep resurrected the old failed
+    row too, both would dispatch and write the same transcript concurrently."""
+    user, t = _make_user_and_transcript(db_session)
+    stale = enqueue_llm_job(db_session, user.id, t.id, "correction", "groq", "m1")
+    stale.status = "failed"
+    stale.attempts = 1
+    stale.updated_at = utcnow_naive() - datetime.timedelta(seconds=1000)
+    db_session.commit()
+
+    fresh = rerun_llm_job(db_session, user.id, stale.id)
+    assert fresh.status == "pending"
+
+    factory = lambda: _NoCloseSession(db_session)
+    with patch("httpx.AsyncClient.post", AsyncMock(return_value=_FakeResponse("S: fixed"))):
+        asyncio.run(llm_worker_tick(factory, transcription_service=None))
+
+    db_session.refresh(stale)
+    db_session.refresh(fresh)
+    assert stale.status == "failed"      # left alone — fresh sibling already covers this lane
+    assert fresh.status == "completed"   # the manually-created job dispatched normally
+
+
+def test_reset_stuck_llm_jobs_preserves_attempts_count(db_session):
+    """attempts was already incremented at claim time (llm_worker_tick) before
+    the crashed await — reset_stuck_llm_jobs must not increment it again, so
+    a crash-interrupted job doesn't burn an extra retry it never used."""
+    user, t = _make_user_and_transcript(db_session)
+    job = enqueue_llm_job(db_session, user.id, t.id, "correction", "groq", "m1")
+    job.status = "running"
+    job.attempts = 1
+    db_session.commit()
+
+    reset_stuck_llm_jobs(db_session)
+
+    db_session.refresh(job)
+    assert job.status == "failed"
+    assert job.attempts == 1
+
+
+def test_rerun_still_works_after_auto_retry_exhausts_max_attempts(db_session):
+    """A job that auto-retried up to MAX_ATTEMPTS and landed permanently
+    'failed' must remain manually rerunnable — auto-retry must never lock
+    out the existing /api/jobs/{id}/rerun path."""
+    user, t = _make_user_and_transcript(db_session)
+    job = enqueue_llm_job(db_session, user.id, t.id, "correction", "groq", "m1")
+    job.status = "failed"
+    job.attempts = MAX_ATTEMPTS
+    job.error = "boom"
+    db_session.commit()
+
+    fresh = rerun_llm_job(db_session, user.id, job.id)
+
+    assert fresh.id != job.id
+    assert fresh.status == "pending"
+    assert fresh.attempts == 0
+
+
+def test_rerun_route_works_on_permanently_failed_job(client, db_session):
+    client.put("/api/providers/groq", json={"api_key": "fake-groq-key"})
+    transcript_id = _upload(client).json()["id"]
+
+    jobs = client.get("/api/jobs").json()["jobs"]
+    job_id = next(j["id"] for j in jobs if j["kind"] == "correction")
+
+    job = db_session.query(LlmJob).filter(LlmJob.id == job_id).first()
+    job.status = "failed"
+    job.attempts = MAX_ATTEMPTS  # simulates auto-retry having exhausted its budget
+    db_session.commit()
+
+    rerun = client.post(f"/api/jobs/{job_id}/rerun").json()
+    assert rerun["job"]["status"] == "pending"
+    assert rerun["job"]["id"] != job_id
