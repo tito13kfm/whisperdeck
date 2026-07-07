@@ -218,12 +218,19 @@ async def run_llm_job(SessionLocal, job_id: int, transcription_service, diarizat
             job.progress_total = 1
             db.commit()
             try:
-                await transcription_service.summarize(
+                summary = await transcription_service.summarize(
                     db, job.user_id, job.transcript_id, api_key=api_key,
                     provider_name=job.provider, provider_config=provider_config,
                     model=job.model,
                 )
+                job.result_json = {
+                    "short_summary": summary.short_summary,
+                    "key_points": summary.key_points or [],
+                    "action_items": summary.action_items or [],
+                    "decisions": summary.decisions or [],
+                }
                 job.progress_done = 1
+                db.commit()
                 _finish(db, job, "completed")
             except Exception as e:
                 _finish(db, job, "failed", str(e))
@@ -249,6 +256,7 @@ async def run_llm_job(SessionLocal, job_id: int, transcription_service, diarizat
                 transcript.speaker_count = speaker_count
                 transcript.updated_at = utcnow_naive()
                 job.progress_done = 1
+                job.result_json = {"segments": merged}
                 db.commit()
                 _finish(db, job, "completed")
             except Exception as e:

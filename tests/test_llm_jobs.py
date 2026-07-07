@@ -205,6 +205,50 @@ def test_run_llm_job_correction_saves_result_snapshot(db_session):
     assert job.result_json == {"corrected_text": t.corrected_text}
 
 
+def test_run_llm_job_summary_saves_result_snapshot(db_session, tmp_path):
+    from services.transcription import TranscriptionService
+    user, t = _make_user_and_transcript(db_session)
+    job = enqueue_llm_job(db_session, user.id, t.id, "summary", "groq", "m1")
+    job.status = "running"
+    db_session.commit()
+
+    fake_post = AsyncMock(return_value=_FakeResponse(
+        '{"short_summary": "s", "key_points": ["a"], "action_items": [], "decisions": []}'
+    ))
+    factory = lambda: _NoCloseSession(db_session)
+    svc = TranscriptionService(str(tmp_path))
+    with patch("httpx.AsyncClient.post", fake_post):
+        asyncio.run(run_llm_job(factory, job.id, transcription_service=svc))
+
+    db_session.refresh(job)
+    assert job.result_json == {"short_summary": "s", "key_points": ["a"], "action_items": [], "decisions": []}
+
+
+def test_run_llm_job_rediarize_saves_result_snapshot(db_session, tmp_path):
+    segs = [{"start": 0, "end": 1, "speaker": "Speaker A", "text": "hi"}]
+    user, t = _make_user_and_transcript(db_session, segments=segs)
+    audio_path = tmp_path / "a.mp3"
+    audio_path.write_bytes(b"x")
+    t.audio_path = str(audio_path)
+    db_session.commit()
+
+    job = enqueue_llm_job(db_session, user.id, t.id, "rediarize", "", "")
+    job.status = "running"
+    db_session.commit()
+
+    new_segments = [{"start": 0, "end": 1, "speaker": "Speaker B", "text": "hi"}]
+
+    class _FakeDiarizationService:
+        async def diarize_and_merge(self, *args, **kwargs):
+            return new_segments, 1
+
+    factory = lambda: _NoCloseSession(db_session)
+    asyncio.run(run_llm_job(factory, job.id, transcription_service=None, diarization_service=_FakeDiarizationService()))
+
+    db_session.refresh(job)
+    assert job.result_json == {"segments": new_segments}
+
+
 def test_cancel_between_batches_stops_cleanly(db_session):
     segs = [{"start": i, "end": i + 1, "speaker": "S", "text": "word " * 60} for i in range(40)]
     user, t = _make_user_and_transcript(db_session, segments=segs)
