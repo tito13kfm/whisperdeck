@@ -539,3 +539,9 @@ def test_worker_tick_full_cpu_pool_does_not_block_io_dispatch(db_session):
 
     db_session.refresh(io_job)
     assert io_job.status == "completed"  # dispatched despite the full CPU pool
+
+
+def test_llm_job_attempts_defaults_to_zero(db_session):
+    user, t = _make_user_and_transcript(db_session)
+    job = enqueue_llm_job(db_session, user.id, t.id, "correction", "groq", "m1")
+    assert job.attempts == 0

@@ -86,6 +86,7 @@ class LlmJob(Base):
     transcript_id = Column(Integer, ForeignKey("transcripts.id", ondelete="CASCADE"), nullable=False)
     kind = Column(String(32), nullable=False)  # correction | summary
     status = Column(String(32), default="pending")  # pending, running, completed, failed, cancelled
+    attempts = Column(Integer, default=0)  # incremented at claim time in llm_worker_tick — powers auto-retry backoff
     progress_done = Column(Integer, default=0)
     progress_total = Column(Integer, default=0)
     provider = Column(String(64), default="")
@@ -295,7 +296,7 @@ def init_db(db_path: str = "data/whisperdesk.db") -> tuple:
     Base.metadata.create_all(engine)
     ensure_columns(engine, "users", {"settings": "JSON"})
     ensure_columns(engine, "transcripts", {"audio_path": "TEXT", "diarize_requested": "BOOLEAN", "num_speakers": "INTEGER", "processed_size_bytes": "INTEGER", "corrected_text": "TEXT", "correction_error": "TEXT", "correction_model": "TEXT", "queue_dismissed": "BOOLEAN DEFAULT 0", "source_transcript_id": "INTEGER"})
-    ensure_columns(engine, "llm_jobs", {"dismissed": "BOOLEAN DEFAULT 0", "result_json": "JSON"})
+    ensure_columns(engine, "llm_jobs", {"dismissed": "BOOLEAN DEFAULT 0", "result_json": "JSON", "attempts": "INTEGER DEFAULT 0"})
     ensure_columns(engine, "summaries", {"provider": "TEXT"})
     SessionLocal = sessionmaker(bind=engine)
     backfill_llm_job_result_snapshots(SessionLocal)
