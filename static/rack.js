@@ -2028,6 +2028,58 @@ function textDiffHtml(oldText, newText) {
   }).join('');
 }
 
+// Diffs two lists of bullet strings after sorting each — avoids pure-reorder
+// churn counting as a change. A bullet that's both reordered AND reworded
+// still shows as remove+add; accepted approximation, see the design spec.
+function bulletListDiffHtml(oldItems, newItems) {
+  const oldSorted = [...(oldItems || [])].sort();
+  const newSorted = [...(newItems || [])].sort();
+  return diffTokens(oldSorted, newSorted).map(([type, item]) => {
+    const esc = escapeHtml(item);
+    if (type === 'eq') return '<div style="padding:2px 0">' + esc + '</div>';
+    if (type === 'del') return '<div style="padding:2px 0;background:rgba(255,80,80,.15);text-decoration:line-through">' + esc + '</div>';
+    return '<div style="padding:2px 0;background:rgba(80,255,120,.15)">' + esc + '</div>';
+  }).join('');
+}
+
+function summaryDiffHtml(oldSummary, newSummary) {
+  const sections = [
+    ['Summary', textDiffHtml(oldSummary.short_summary || '', newSummary.short_summary || '')],
+    ['Key points', bulletListDiffHtml(oldSummary.key_points, newSummary.key_points)],
+    ['Action items', bulletListDiffHtml(oldSummary.action_items, newSummary.action_items)],
+    ['Decisions', bulletListDiffHtml(oldSummary.decisions, newSummary.decisions)],
+  ];
+  return sections.map(([title, html]) =>
+    '<div style="font-family:var(--f-cond);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:0.05em;margin:10px 0 4px;color:' + AMBER + '">' + escapeHtml(title) + '</div>' + html
+  ).join('');
+}
+
+// Not a text diff — segments compare structurally by index. If the two
+// runs have different segment counts (re-diarization can merge/split
+// speaker turns), only the shared prefix is compared and the length
+// difference is called out rather than misaligning the rest.
+function rediarizeDiffHtml(oldSegments, newSegments) {
+  const n = Math.min(oldSegments.length, newSegments.length);
+  let relabeled = 0, unchanged = 0;
+  const changes = [];
+  for (let i = 0; i < n; i++) {
+    const o = oldSegments[i], nw = newSegments[i];
+    if (o.speaker !== nw.speaker) {
+      relabeled++;
+      changes.push({ start: nw.start, end: nw.end, from: o.speaker, to: nw.speaker });
+    } else {
+      unchanged++;
+    }
+  }
+  const lenDiff = newSegments.length - oldSegments.length;
+  const header = '<div style="margin-bottom:8px">' + relabeled + ' segment(s) relabeled, ' + unchanged + ' unchanged' +
+    (lenDiff ? ', segment count changed by ' + lenDiff : '') + '</div>';
+  const rows = changes.map(c =>
+    '<div style="padding:3px 0;font-family:var(--f-mono);font-size:12px">' + formatDur(c.start) + '–' + formatDur(c.end) + ': ' + escapeHtml(c.from) + ' → ' + escapeHtml(c.to) + '</div>'
+  ).join('');
+  return header + rows;
+}
+
 // Generic two-way compare modal. `fetchItems` resolves the pickable items
 // (each with an `id`, a human `optionLabel`, and a `result` payload that's
 // null/falsy when no snapshot exists for that item). `extractText` pulls
@@ -2226,9 +2278,11 @@ function renderDetail() {
         <button class="btn" style="font-size:12px;padding:7px 14px;border-color:var(--inset-edge)" data-dact="retranscribe" ${t.has_audio ? '' : 'disabled title="No stored audio for this transcript"'}>Re-transcribe</button>
         <button class="btn" style="font-size:12px;padding:7px 14px;border-color:var(--inset-edge)" data-dact="compare-versions">Compare versions</button>
         <button class="btn" style="font-size:12px;padding:7px 14px;border-color:var(--inset-edge)" data-dact="rediarize" ${t.has_audio ? '' : 'disabled title="No stored audio for this transcript"'}>Re-diarize</button>
+        <button class="btn" style="font-size:12px;padding:7px 14px;border-color:var(--inset-edge)" data-dact="rediarize-history">Rediarize history</button>
         <button class="btn" style="font-size:12px;padding:7px 14px;border-color:var(--inset-edge)" data-dact="voicematch" ${!t.has_audio ? 'disabled title="No stored audio for this transcript"' : (llmJobActive(t.voice_match_job) ? 'disabled title="Voice match job already queued"' : '')}>Match against voice roster</button>
         <button class="btn" style="font-size:12px;padding:7px 14px;border-color:var(--inset-edge)" data-dact="context">Add context</button>
         <button class="btn" style="font-size:12px;padding:7px 14px;border-color:var(--inset-edge)" data-dact="summarize" ${llmJobActive(t.summary_job) ? 'disabled title="Summary job already queued"' : ''}>Summarize</button>
+        <button class="btn" style="font-size:12px;padding:7px 14px;border-color:var(--inset-edge)" data-dact="summary-history">Summary history</button>
         <button class="btn" style="font-size:12px;padding:7px 14px;border-color:var(--inset-edge)" data-dact="rerun" ${llmJobActive(t.correction_job) ? 'disabled title="Correction job already queued"' : ''}>Re-run correction</button>
         <button class="btn" style="font-size:12px;padding:7px 14px;border-color:var(--inset-edge)" data-dact="correction-history">Correction history</button>
         <button class="btn btn--red" style="font-size:12px;padding:7px 14px" data-dact="delete">Delete</button>
@@ -2361,6 +2415,38 @@ async function detailAction(act) {
         },
         result => result.corrected_text || '',
         textDiffHtml,
+      );
+      return;
+    }
+    if (act === 'summary-history') {
+      await openCompareModal(
+        'Compare summary runs',
+        async () => {
+          const runs = (await api('/api/transcripts/' + t.id + '/runs/summary')).runs;
+          return runs.filter(r => r.status === 'completed').map(r => ({
+            id: r.id,
+            optionLabel: (r.provider || '—') + (r.model ? '/' + r.model : '') + ' · ' + timeAgo(r.created_at),
+            result: r.result,
+          }));
+        },
+        result => result,
+        summaryDiffHtml,
+      );
+      return;
+    }
+    if (act === 'rediarize-history') {
+      await openCompareModal(
+        'Compare rediarize runs',
+        async () => {
+          const runs = (await api('/api/transcripts/' + t.id + '/runs/rediarize')).runs;
+          return runs.filter(r => r.status === 'completed').map(r => ({
+            id: r.id,
+            optionLabel: timeAgo(r.created_at),
+            result: r.result,
+          }));
+        },
+        result => result.segments || [],
+        rediarizeDiffHtml,
       );
       return;
     }

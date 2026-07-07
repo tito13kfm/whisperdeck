@@ -237,7 +237,7 @@ def ensure_columns(engine, table_name: str, columns: dict[str, str]) -> None:
             conn.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {col_name} {sql_type}"))
 
 
-def backfill_llm_job_result_snapshots(SessionLocal, kinds: tuple = ("correction",)) -> None:
+def backfill_llm_job_result_snapshots(SessionLocal, kinds: tuple = ("correction", "summary", "rediarize")) -> None:
     """One-time backfill: completed LlmJob rows that predate result_json have
     no output snapshot. Fill in the latest completed job per (transcript_id,
     kind) from the transcript's current output, so the run-history picker
@@ -263,6 +263,17 @@ def backfill_llm_job_result_snapshots(SessionLocal, kinds: tuple = ("correction"
                 continue
             if kind == "correction" and transcript.corrected_text:
                 job.result_json = {"corrected_text": transcript.corrected_text}
+            elif kind == "summary":
+                summary = db.query(Summary).filter(Summary.transcript_id == transcript_id).first()
+                if summary:
+                    job.result_json = {
+                        "short_summary": summary.short_summary,
+                        "key_points": summary.key_points or [],
+                        "action_items": summary.action_items or [],
+                        "decisions": summary.decisions or [],
+                    }
+            elif kind == "rediarize" and transcript.segments:
+                job.result_json = {"segments": transcript.segments}
         db.commit()
     finally:
         db.close()
