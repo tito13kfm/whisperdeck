@@ -397,20 +397,38 @@ def _retry_eligible(job) -> bool:
 
 
 # SAFETY INVARIANT: this coroutine runs concurrently with sibling
-# _run_chunk_job calls via asyncio.gather, all sharing ONE db session
-# (see queue_worker_tick). This is only safe because every mutation here
-# is committed BEFORE the one await point (the provider call) — so at
-# every point asyncio could switch between concurrent jobs, the session
-# has no other job's uncommitted dirty state. If you add a second
-# mutation after the await, or move the commit, you MUST commit before
-# any await or use a separate session per job instead.
-async def _run_chunk_job(db, job, provider_config: dict, provider_name: str, language: str) -> None:
+# _run_chunk_job calls for the SAME transcript (the inner asyncio.gather
+# in _process_transcript_jobs) AND with _run_chunk_job/_finalize_if_done
+# calls for OTHER transcripts in the same tick (the outer asyncio.gather
+# in queue_worker_tick) — all sharing ONE db session opened once per tick.
+# This is only safe because every mutation here is committed BEFORE the
+# one await point (the provider call) — so at every point asyncio could
+# switch to ANY sibling coroutine, same transcript or a different one,
+# the session has no uncommitted dirty state left behind. If you add a
+# second mutation after the await, or move the commit, you MUST commit
+# before any await or use a separate session per job instead.
+async def _run_chunk_job(db, job, provider_config: dict, provider_name: str, language: str,
+                          local_provider_lock: asyncio.Semaphore) -> None:
     job.status = "running"
     job.attempts += 1
     db.commit()
     try:
         provider = get_provider(provider_name, provider_config)
-        result = await provider.transcribe(job.audio_path, language=language, temperature=0.0)
+        from backends import LOCAL_PROVIDERS
+        if provider_name in LOCAL_PROVIDERS:
+            # Local providers (Moonshine/builtin) share one process-wide model
+            # cache (see backends/moonshine.py / backends/builtin.py) whose
+            # thread-safety under concurrent calls is unverified. Dispatch is
+            # now concurrent across transcripts (queue_worker_tick), so this
+            # lock — not accidental per-transcript serialization — is what
+            # enforces "at most one local transcribe() in flight" globally.
+            # Acquired here, AFTER job.status was already committed to
+            # "running" above, so a job parked on this lock is never
+            # mistaken for "pending" and re-dispatched by a later tick.
+            async with local_provider_lock:
+                result = await provider.transcribe(job.audio_path, language=language, temperature=0.0)
+        else:
+            result = await provider.transcribe(job.audio_path, language=language, temperature=0.0)
         job.result_json = {
             "segments": [
                 {"start": s.start, "end": s.end, "text": s.text, "speaker": s.speaker, "confidence": s.confidence}
@@ -438,6 +456,14 @@ async def _run_chunk_job(db, job, provider_config: dict, provider_name: str, lan
 
 
 async def _finalize_if_done(db, transcript_id: int, diarization_service) -> None:
+    # This coroutine may now run concurrently with _process_transcript_jobs /
+    # _finalize_if_done calls for OTHER transcripts in the same tick (see
+    # queue_worker_tick), sharing the same db session — safe under the same
+    # "commit or roll back before any await" discipline documented on
+    # _run_chunk_job. The diarization branch below already follows this
+    # (explicit db.rollback() before its awaits, re-fetch after) for a
+    # different reason — a concurrent /cancel request on a separate
+    # session — and that same discipline is what keeps it safe here too.
     jobs = db.query(TranscriptionJob).filter(TranscriptionJob.transcript_id == transcript_id).all()
     if not jobs or any(j.status in ("pending", "running") for j in jobs):
         return  # still work outstanding
@@ -541,14 +567,95 @@ async def _finalize_if_done(db, transcript_id: int, diarization_service) -> None
             enqueue_auto_correction(db, transcript, user_settings)
 
 
+async def _process_transcript_jobs(db, transcript_id: int, jobs: list, diarization_service,
+                                    local_provider_lock: asyncio.Semaphore) -> None:
+    """Dispatch this transcript's pending jobs (up to its concurrency cap
+    and rate-limit budget) and finalize-check it, all sharing the ONE db
+    session opened by the calling queue_worker_tick. Extracted from
+    queue_worker_tick's old per-transcript loop body so it can be awaited
+    concurrently, via asyncio.gather, with this same function running for
+    OTHER transcripts — see the SAFETY INVARIANT comment on _run_chunk_job
+    for why sharing one session across concurrent transcripts is safe."""
+    from services.settings import get_user_settings  # local import avoids a module-load cycle with app.py
+
+    transcript = db.query(Transcript).filter(Transcript.id == transcript_id).first()
+    if not transcript:
+        return
+    settings = get_user_settings(db, transcript.user_id)
+    from backends import LOCAL_PROVIDERS
+    if transcript.provider in LOCAL_PROVIDERS:
+        # Serial: local backends share one process-wide model instance
+        # (see backends/moonshine.py cache comment) whose thread-safety
+        # under concurrent calls is unverified, and parallel local
+        # inference would multiply RAM for no wall-clock win on CPU.
+        concurrency_cap = 1
+    else:
+        concurrency_cap = settings["max_concurrent_chunks"]
+
+    already_running = (
+        db.query(TranscriptionJob)
+        .filter(TranscriptionJob.transcript_id == transcript_id, TranscriptionJob.status == "running")
+        .count()
+    )
+    slots = max(0, concurrency_cap - already_running)
+    if slots == 0:
+        return
+
+    prov_cfg = (
+        db.query(ProviderConfig)
+        .filter(ProviderConfig.user_id == transcript.user_id, ProviderConfig.name == transcript.provider)
+        .first()
+    )
+    provider_config = {
+        "api_key": prov_cfg.api_key if prov_cfg else "",
+        "api_url": prov_cfg.api_url if prov_cfg else "",
+        "default_model": (prov_cfg.default_model if prov_cfg else "") or transcript.model,
+    }
+
+    jobs.sort(key=lambda j: j.chunk_index)
+    dispatched = []
+    for job in jobs[:slots]:
+        job_duration = job.end_time - job.start_time
+        if not has_budget(db, transcript.user_id, transcript.provider, job_duration):
+            break  # over budget — leave remaining jobs pending for a later tick
+        dispatched.append(job)
+
+    if dispatched:
+        # All dispatched jobs share the single `db` session opened at the top of
+        # this tick — safe only because _run_chunk_job commits before its await
+        # point (see the safety invariant comment on _run_chunk_job itself).
+        await asyncio.gather(*[
+            _run_chunk_job(db, job, provider_config, transcript.provider, transcript.language, local_provider_lock)
+            for job in dispatched
+        ])
+
+    await _finalize_if_done(db, transcript_id, diarization_service)
+
+
 async def queue_worker_tick(SessionLocal, diarization_service) -> None:
     """One pass: retry-eligible failed jobs become pending, then dispatch
     pending jobs (grouped by user+provider) up to that user's concurrency
-    setting, skipping any dispatch that would exceed rate-limit budget."""
+    setting, skipping any dispatch that would exceed rate-limit budget.
+
+    Every transcript with pending jobs this tick is processed CONCURRENTLY
+    (asyncio.gather over _process_transcript_jobs), not one-at-a-time —
+    a hosted-provider transcript no longer waits for an unrelated
+    transcript's dispatch+finalize to finish before its own chunks even
+    start.
+
+    return_exceptions=True is required on both gathers above: without it,
+    one transcript raising would propagate immediately and, once
+    asyncio.run() tears down any still-pending sibling tasks, could cut
+    off a sibling's _run_chunk_job mid-await — leaving that job's status
+    stuck at "running" forever, since CancelledError isn't caught by
+    _run_chunk_job's own `except (ProviderError, Exception)`. Exceptions
+    are logged per-transcript instead, and every other transcript still
+    runs to completion this tick; the failed transcript is simply retried
+    (re-queried from "pending"/"processing") on the next tick, same as it
+    would be if queue_worker_loop's outer try/except had caught it today.
+    """
     db = SessionLocal()
     try:
-        from services.settings import get_user_settings  # local import avoids a module-load cycle with app.py
-
         pending_or_retry = (
             db.query(TranscriptionJob)
             .filter(TranscriptionJob.status.in_(["pending", "failed"]))
@@ -577,67 +684,43 @@ async def queue_worker_tick(SessionLocal, diarization_service) -> None:
         }
         finalize_candidate_ids = set(by_transcript.keys()) | processing_ids
 
-        for transcript_id, jobs in by_transcript.items():
-            transcript = db.query(Transcript).filter(Transcript.id == transcript_id).first()
-            if not transcript:
-                continue
-            settings = get_user_settings(db, transcript.user_id)
-            from backends import LOCAL_PROVIDERS
-            if transcript.provider in LOCAL_PROVIDERS:
-                # Serial: local backends share one process-wide model instance
-                # (see backends/moonshine.py cache comment) whose thread-safety
-                # under concurrent calls is unverified, and parallel local
-                # inference would multiply RAM for no wall-clock win on CPU.
-                concurrency_cap = 1
-            else:
-                concurrency_cap = settings["max_concurrent_chunks"]
+        # Created fresh per tick, not at module scope: asyncio.Semaphore binds
+        # to the event loop of its first use, and each queue_worker_loop tick
+        # gets its own loop iteration in tests (asyncio.run per test) — a
+        # module-level instance would raise "bound to a different event loop"
+        # on the second test that touches it. queue_worker_loop always awaits
+        # one tick to full completion before starting the next, so a per-tick
+        # semaphore still enforces "at most one local transcribe() in flight,
+        # across every transcript processed in this tick" — the only window
+        # where cross-transcript local-provider concurrency can occur.
+        local_provider_lock = asyncio.Semaphore(1)
 
-            already_running = (
-                db.query(TranscriptionJob)
-                .filter(TranscriptionJob.transcript_id == transcript_id, TranscriptionJob.status == "running")
-                .count()
-            )
-            slots = max(0, concurrency_cap - already_running)
-            if slots == 0:
-                continue
+        transcript_ids = list(by_transcript.keys())
+        results = await asyncio.gather(
+            *[
+                _process_transcript_jobs(db, transcript_id, jobs, diarization_service, local_provider_lock)
+                for transcript_id, jobs in by_transcript.items()
+            ],
+            return_exceptions=True,
+        )
+        for transcript_id, result in zip(transcript_ids, results):
+            if isinstance(result, Exception):
+                print(f"[queue] transcript {transcript_id} dispatch/finalize failed: {result}")
 
-            prov_cfg = (
-                db.query(ProviderConfig)
-                .filter(ProviderConfig.user_id == transcript.user_id, ProviderConfig.name == transcript.provider)
-                .first()
-            )
-            provider_config = {
-                "api_key": prov_cfg.api_key if prov_cfg else "",
-                "api_url": prov_cfg.api_url if prov_cfg else "",
-                "default_model": (prov_cfg.default_model if prov_cfg else "") or transcript.model,
-            }
-
-            jobs.sort(key=lambda j: j.chunk_index)
-            dispatched = []
-            for job in jobs[:slots]:
-                job_duration = job.end_time - job.start_time
-                if not has_budget(db, transcript.user_id, transcript.provider, job_duration):
-                    break  # over budget — leave remaining jobs pending for a later tick
-                dispatched.append(job)
-
-            if dispatched:
-                # All dispatched jobs share the single `db` session opened at the top of
-                # this tick — safe only because _run_chunk_job commits before its await
-                # point (see the safety invariant comment on _run_chunk_job itself).
-                await asyncio.gather(*[
-                    _run_chunk_job(db, job, provider_config, transcript.provider, transcript.language)
-                    for job in dispatched
-                ])
-
-            await _finalize_if_done(db, transcript_id, diarization_service)
-
-        for transcript_id in finalize_candidate_ids - set(by_transcript.keys()):
-            # Transcripts with no pending jobs this tick (e.g. everything
-            # still running from a prior tick, or already fully terminal
-            # apart from a status flip cancel_transcript_jobs deferred to
-            # here) still need a finalize check — see the comment above
-            # processing_ids for why this is necessary.
-            await _finalize_if_done(db, transcript_id, diarization_service)
+        # Transcripts with no pending jobs this tick (e.g. everything
+        # still running from a prior tick, or already fully terminal
+        # apart from a status flip cancel_transcript_jobs deferred to
+        # here) still need a finalize check — see the comment above
+        # processing_ids for why this is necessary. Also gathered
+        # concurrently, for the same reason as the dispatch loop above.
+        remaining_ids = list(finalize_candidate_ids - set(by_transcript.keys()))
+        finalize_results = await asyncio.gather(
+            *[_finalize_if_done(db, transcript_id, diarization_service) for transcript_id in remaining_ids],
+            return_exceptions=True,
+        )
+        for transcript_id, result in zip(remaining_ids, finalize_results):
+            if isinstance(result, Exception):
+                print(f"[queue] transcript {transcript_id} finalize failed: {result}")
     finally:
         db.close()
 

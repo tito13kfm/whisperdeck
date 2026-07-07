@@ -84,8 +84,9 @@ class BuiltinProvider(BaseProvider):
 
         # Process-wide cache — get_provider() makes a fresh provider per chunk
         # job, and a WhisperModel load is expensive. Keyed by everything that
-        # changes the loaded artifact. Serial local dispatch (services/queue.py)
-        # keeps the shared instance uncontended.
+        # changes the loaded artifact. services/queue.py's per-tick
+        # local_provider_lock (an asyncio.Semaphore(1)) keeps the shared
+        # instance uncontended across every transcript, not just this one.
         cache_key = (self.model_name, device, compute)
         cached = _MODEL_CACHE.get(cache_key)
         if cached is None:
