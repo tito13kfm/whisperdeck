@@ -154,6 +154,7 @@ def _serialize_transcript(db: Session, t: Transcript) -> dict:
         }
     return {
         "id": t.id,
+        "source_transcript_id": t.source_transcript_id,
         "title": t.title,
         "filename": t.filename,
         "duration_seconds": t.duration_seconds,
@@ -435,11 +436,17 @@ async def _run_transcription_pipeline(
     temperature: float,
     diarize: bool,
     num_speakers: Optional[int],
+    source_transcript_id: Optional[int] = None,
 ) -> dict:
     """Everything after the source audio is on disk: transcode decision,
     chunk-vs-inline branch, inline diarization, auto-correct enqueue.
     Shared by /api/transcribe (fresh upload) and
-    /api/transcripts/{id}/retranscribe (stored audio_path)."""
+    /api/transcripts/{id}/retranscribe (stored audio_path).
+
+    source_transcript_id is set on the transcript row before its first
+    commit in both branches — not patched on afterward — so a version-chain
+    link is never left missing by an exception raised later in the same
+    request (chunk-job creation, diarization, auto-correct enqueue)."""
     user_settings = get_user_settings(db, current_user.id)
 
     # Normalize for cloud upload: strips video track, downsamples to 16kHz
@@ -534,6 +541,7 @@ async def _run_transcription_pipeline(
         # Known now from the ffprobe above — lets the UI say "48-min
         # recording" before the first chunk lands.
         transcript.duration_seconds = duration_seconds
+        transcript.source_transcript_id = source_transcript_id
         db.commit()
         create_chunk_jobs(db, transcript.id, chunks)
         return _serialize_transcript(db, transcript)
@@ -551,6 +559,7 @@ async def _run_transcription_pipeline(
             temperature=temperature,
         )
         transcript.processed_size_bytes = file_size
+        transcript.source_transcript_id = source_transcript_id
         db.commit()
 
         # Run diarization if requested
@@ -748,6 +757,7 @@ async def retranscribe_transcript(
             status_code=400,
             detail="No stored audio for this transcript — it predates audio retention or the file was removed",
         )
+    root_id = t.source_transcript_id or t.id
     return await _run_transcription_pipeline(
         db, current_user, Path(t.audio_path),
         filename=t.filename,
@@ -758,6 +768,7 @@ async def retranscribe_transcript(
         temperature=0.0,
         diarize=diarize if diarize is not None else bool(t.diarize_requested),
         num_speakers=num_speakers if num_speakers is not None else t.num_speakers,
+        source_transcript_id=root_id,
     )
 
 
@@ -1120,6 +1131,39 @@ async def transcript_runs(
             "result": j.result_json,
         }
         for j in jobs
+    ]}
+
+
+@app.get("/api/transcripts/{transcript_id}/versions")
+async def transcript_versions(
+    transcript_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Every transcript sharing the same root as this one (itself included)
+    — the set of retranscribe reruns of one original recording."""
+    t = db.query(Transcript).filter(
+        Transcript.id == transcript_id, Transcript.user_id == current_user.id
+    ).first()
+    if not t:
+        raise HTTPException(status_code=404, detail="Transcript not found")
+    root_id = t.source_transcript_id or t.id
+    versions = (
+        db.query(Transcript)
+        .filter(
+            Transcript.user_id == current_user.id,
+            (Transcript.id == root_id) | (Transcript.source_transcript_id == root_id),
+        )
+        .order_by(Transcript.id.asc())
+        .all()
+    )
+    return {"versions": [
+        {
+            "id": v.id, "provider": v.provider, "model": v.model, "status": v.status,
+            "created_at": v.created_at.isoformat() if v.created_at else None,
+            "full_text": v.full_text,
+        }
+        for v in versions
     ]}
 
 

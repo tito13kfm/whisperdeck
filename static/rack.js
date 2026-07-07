@@ -2224,6 +2224,7 @@ function renderDetail() {
       <div style="display:flex;gap:8px;flex-shrink:0">
         ${extraActs.join('')}
         <button class="btn" style="font-size:12px;padding:7px 14px;border-color:var(--inset-edge)" data-dact="retranscribe" ${t.has_audio ? '' : 'disabled title="No stored audio for this transcript"'}>Re-transcribe</button>
+        <button class="btn" style="font-size:12px;padding:7px 14px;border-color:var(--inset-edge)" data-dact="compare-versions">Compare versions</button>
         <button class="btn" style="font-size:12px;padding:7px 14px;border-color:var(--inset-edge)" data-dact="rediarize" ${t.has_audio ? '' : 'disabled title="No stored audio for this transcript"'}>Re-diarize</button>
         <button class="btn" style="font-size:12px;padding:7px 14px;border-color:var(--inset-edge)" data-dact="voicematch" ${!t.has_audio ? 'disabled title="No stored audio for this transcript"' : (llmJobActive(t.voice_match_job) ? 'disabled title="Voice match job already queued"' : '')}>Match against voice roster</button>
         <button class="btn" style="font-size:12px;padding:7px 14px;border-color:var(--inset-edge)" data-dact="context">Add context</button>
@@ -2359,6 +2360,23 @@ async function detailAction(act) {
           }));
         },
         result => result.corrected_text || '',
+        textDiffHtml,
+      );
+      return;
+    }
+    if (act === 'compare-versions') {
+      await openCompareModal(
+        'Compare transcript versions',
+        async () => {
+          const versions = (await api('/api/transcripts/' + t.id + '/versions')).versions;
+          return versions.map(v => ({
+            id: v.id,
+            optionLabel: (v.provider || '—') + (v.model ? '/' + v.model : '') + ' · ' + timeAgo(v.created_at)
+              + (v.status === 'completed' ? '' : ' (' + v.status + ')'),
+            result: v.status === 'completed' ? { full_text: v.full_text } : null,
+          }));
+        },
+        result => result.full_text || '',
         textDiffHtml,
       );
       return;
