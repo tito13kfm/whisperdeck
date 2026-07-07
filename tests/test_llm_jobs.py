@@ -704,3 +704,38 @@ def test_reset_stuck_llm_jobs_preserves_attempts_count(db_session):
     db_session.refresh(job)
     assert job.status == "failed"
     assert job.attempts == 1
+
+
+def test_rerun_still_works_after_auto_retry_exhausts_max_attempts(db_session):
+    """A job that auto-retried up to MAX_ATTEMPTS and landed permanently
+    'failed' must remain manually rerunnable — auto-retry must never lock
+    out the existing /api/jobs/{id}/rerun path."""
+    user, t = _make_user_and_transcript(db_session)
+    job = enqueue_llm_job(db_session, user.id, t.id, "correction", "groq", "m1")
+    job.status = "failed"
+    job.attempts = MAX_ATTEMPTS
+    job.error = "boom"
+    db_session.commit()
+
+    fresh = rerun_llm_job(db_session, user.id, job.id)
+
+    assert fresh.id != job.id
+    assert fresh.status == "pending"
+    assert fresh.attempts == 0
+
+
+def test_rerun_route_works_on_permanently_failed_job(client, db_session):
+    client.put("/api/providers/groq", json={"api_key": "fake-groq-key"})
+    transcript_id = _upload(client).json()["id"]
+
+    jobs = client.get("/api/jobs").json()["jobs"]
+    job_id = next(j["id"] for j in jobs if j["kind"] == "correction")
+
+    job = db_session.query(LlmJob).filter(LlmJob.id == job_id).first()
+    job.status = "failed"
+    job.attempts = MAX_ATTEMPTS  # simulates auto-retry having exhausted its budget
+    db_session.commit()
+
+    rerun = client.post(f"/api/jobs/{job_id}/rerun").json()
+    assert rerun["job"]["status"] == "pending"
+    assert rerun["job"]["id"] != job_id
