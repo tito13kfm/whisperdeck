@@ -1015,8 +1015,8 @@ async def summarize_transcript(
 @app.post("/api/transcripts/{transcript_id}/correct")
 async def correct_transcript_route(
     transcript_id: int,
-    provider: str = Form(default="groq"),
-    model: str = Form(default="llama-3.3-70b-versatile"),
+    provider: str = Form("groq"),
+    model: str = Form("llama-3.3-70b-versatile"),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):

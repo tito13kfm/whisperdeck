@@ -272,9 +272,9 @@ def test_cancel_requires_active_job(db_session):
 
 # ── routes ────────────────────────────────────────────────────────────────
 
-def _upload(client, provider="groq"):
+def _upload(client):
     async def _stub_transcribe(db, user_id, **kwargs):
-        t = Transcript(user_id=user_id, title="t", filename="f.mp3", status="completed", full_text="hello world")
+        t = Transcript(user_id=user_id, title="t", filename="f.mp3", status="completed", full_text="hello")
         db.add(t)
         db.commit()
         return t
@@ -282,8 +282,8 @@ def _upload(client, provider="groq"):
          patch("app.transcription_service.transcribe", AsyncMock(side_effect=_stub_transcribe)):
         return client.post(
             "/api/transcribe",
-            files={"file": ("meeting.mp3", io.BytesIO(b"fake audio bytes"), "audio/mpeg")},
-            data={"provider": provider},
+            files={"file": ("m.mp3", io.BytesIO(b"x"), "audio/mpeg")},
+            data={"provider": "groq"},
         )
 
 
@@ -362,3 +362,25 @@ def test_runs_endpoint_rejects_unknown_kind(client):
     transcript_id = _upload(client).json()["id"]
     r = client.get(f"/api/transcripts/{transcript_id}/runs/bogus")
     assert r.status_code == 400
+
+
+def test_runs_endpoint_includes_dismissed_jobs(client):
+    client.put("/api/providers/groq", json={"api_key": "fake-groq-key"})
+    client.put("/api/settings", json={"auto_correct": False})
+    transcript_id = _upload(client).json()["id"]
+
+    job = client.post(f"/api/transcripts/{transcript_id}/correct", data={"provider": "groq", "model": "m1"}).json()["job"]
+    client.post(f"/api/jobs/{job['id']}/cancel")
+    client.post(f"/api/jobs/{job['id']}/dismiss")
+
+    runs = client.get(f"/api/transcripts/{transcript_id}/runs/correction").json()["runs"]
+    assert [r["id"] for r in runs] == [job["id"]]
+
+
+def test_runs_endpoint_404s_for_another_users_transcript(client):
+    transcript_id = _upload(client).json()["id"]
+    client.post("/api/logout")
+    client.post("/api/register", json={"username": "other-runs-user", "password": "testpass123"})
+
+    r = client.get(f"/api/transcripts/{transcript_id}/runs/correction")
+    assert r.status_code == 404
