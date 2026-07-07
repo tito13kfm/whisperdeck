@@ -15,8 +15,10 @@ from .base import BaseProvider, TranscriptionResult, ProviderError
 # Process-wide transcriber cache. get_provider() constructs a fresh provider
 # instance per call (one per chunk job in the queue), and a Moonshine model
 # load is multi-second + multi-GB — without this, every chunk of a chunked
-# local run would reload the model. Safe because local chunk dispatch is
-# serialized (see services/queue.py concurrency rule for local providers).
+# local run would reload the model. Safe because services/queue.py's
+# per-tick local_provider_lock (an asyncio.Semaphore(1)) guarantees at most
+# one transcribe() call is ever in flight across ALL local-provider chunk
+# jobs, across every transcript, at a time.
 _TRANSCRIBER_CACHE: dict = {}
 
 

@@ -132,3 +132,38 @@ def test_one_transcript_finalize_exception_does_not_cancel_sibling_dispatch(db_s
 
     healthy_job = db_session.query(TranscriptionJob).filter(TranscriptionJob.transcript_id == healthy.id).first()
     assert healthy_job.status == "completed"  # not stuck at "running" from a cancelled sibling task
+
+
+def test_local_provider_cap_of_one_holds_globally_across_transcripts(db_session):
+    """Two different transcripts both on a local provider (moonshine) must
+    never have their chunk actually transcribing at the same instant, even
+    though queue_worker_tick now dispatches both transcripts concurrently
+    (Task 1). This is the safety property that today's sequential loop
+    gave for free by accident — this test pins it explicitly."""
+    from services.queue import queue_worker_tick
+
+    t1 = _make_transcript_with_job(db_session, "local1", "moonshine")
+    t2 = _make_transcript_with_job(db_session, "local2", "moonshine")
+
+    state = {"current": 0, "peak": 0}
+
+    class _FakeProvider:
+        async def transcribe(self, *a, **k):
+            state["current"] += 1
+            state["peak"] = max(state["peak"], state["current"])
+            await asyncio.sleep(0.05)  # hold the "slot" long enough for a real race to show up
+            state["current"] -= 1
+            return SimpleNamespace(segments=[], full_text="", language="en", model="base")
+
+    with patch("services.queue.get_provider", return_value=_FakeProvider()), \
+         patch("services.queue._finalize_if_done", AsyncMock()):
+        asyncio.run(asyncio.wait_for(
+            queue_worker_tick(lambda: _NoClose(db_session), diarization_service=None),
+            timeout=5.0,
+        ))
+
+    assert state["peak"] == 1, f"expected at most 1 concurrent local transcribe() call, saw {state['peak']}"
+    job1 = db_session.query(TranscriptionJob).filter(TranscriptionJob.transcript_id == t1.id).first()
+    job2 = db_session.query(TranscriptionJob).filter(TranscriptionJob.transcript_id == t2.id).first()
+    assert job1.status == "completed"
+    assert job2.status == "completed"

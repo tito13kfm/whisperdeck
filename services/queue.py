@@ -407,13 +407,28 @@ def _retry_eligible(job) -> bool:
 # the session has no uncommitted dirty state left behind. If you add a
 # second mutation after the await, or move the commit, you MUST commit
 # before any await or use a separate session per job instead.
-async def _run_chunk_job(db, job, provider_config: dict, provider_name: str, language: str) -> None:
+async def _run_chunk_job(db, job, provider_config: dict, provider_name: str, language: str,
+                          local_provider_lock: asyncio.Semaphore) -> None:
     job.status = "running"
     job.attempts += 1
     db.commit()
     try:
         provider = get_provider(provider_name, provider_config)
-        result = await provider.transcribe(job.audio_path, language=language, temperature=0.0)
+        from backends import LOCAL_PROVIDERS
+        if provider_name in LOCAL_PROVIDERS:
+            # Local providers (Moonshine/builtin) share one process-wide model
+            # cache (see backends/moonshine.py / backends/builtin.py) whose
+            # thread-safety under concurrent calls is unverified. Dispatch is
+            # now concurrent across transcripts (queue_worker_tick), so this
+            # lock — not accidental per-transcript serialization — is what
+            # enforces "at most one local transcribe() in flight" globally.
+            # Acquired here, AFTER job.status was already committed to
+            # "running" above, so a job parked on this lock is never
+            # mistaken for "pending" and re-dispatched by a later tick.
+            async with local_provider_lock:
+                result = await provider.transcribe(job.audio_path, language=language, temperature=0.0)
+        else:
+            result = await provider.transcribe(job.audio_path, language=language, temperature=0.0)
         job.result_json = {
             "segments": [
                 {"start": s.start, "end": s.end, "text": s.text, "speaker": s.speaker, "confidence": s.confidence}
@@ -552,7 +567,8 @@ async def _finalize_if_done(db, transcript_id: int, diarization_service) -> None
             enqueue_auto_correction(db, transcript, user_settings)
 
 
-async def _process_transcript_jobs(db, transcript_id: int, jobs: list, diarization_service) -> None:
+async def _process_transcript_jobs(db, transcript_id: int, jobs: list, diarization_service,
+                                    local_provider_lock: asyncio.Semaphore) -> None:
     """Dispatch this transcript's pending jobs (up to its concurrency cap
     and rate-limit budget) and finalize-check it, all sharing the ONE db
     session opened by the calling queue_worker_tick. Extracted from
@@ -609,7 +625,7 @@ async def _process_transcript_jobs(db, transcript_id: int, jobs: list, diarizati
         # this tick — safe only because _run_chunk_job commits before its await
         # point (see the safety invariant comment on _run_chunk_job itself).
         await asyncio.gather(*[
-            _run_chunk_job(db, job, provider_config, transcript.provider, transcript.language)
+            _run_chunk_job(db, job, provider_config, transcript.provider, transcript.language, local_provider_lock)
             for job in dispatched
         ])
 
@@ -668,10 +684,21 @@ async def queue_worker_tick(SessionLocal, diarization_service) -> None:
         }
         finalize_candidate_ids = set(by_transcript.keys()) | processing_ids
 
+        # Created fresh per tick, not at module scope: asyncio.Semaphore binds
+        # to the event loop of its first use, and each queue_worker_loop tick
+        # gets its own loop iteration in tests (asyncio.run per test) — a
+        # module-level instance would raise "bound to a different event loop"
+        # on the second test that touches it. queue_worker_loop always awaits
+        # one tick to full completion before starting the next, so a per-tick
+        # semaphore still enforces "at most one local transcribe() in flight,
+        # across every transcript processed in this tick" — the only window
+        # where cross-transcript local-provider concurrency can occur.
+        local_provider_lock = asyncio.Semaphore(1)
+
         transcript_ids = list(by_transcript.keys())
         results = await asyncio.gather(
             *[
-                _process_transcript_jobs(db, transcript_id, jobs, diarization_service)
+                _process_transcript_jobs(db, transcript_id, jobs, diarization_service, local_provider_lock)
                 for transcript_id, jobs in by_transcript.items()
             ],
             return_exceptions=True,
