@@ -131,6 +131,25 @@ def test_retranscribe_links_root_even_if_pipeline_fails_after_commit(client, db_
     assert linked[0].source_transcript_id == original["id"]
 
 
+def test_versions_endpoint_returns_root_and_all_reruns(client, db_session):
+    client.put("/api/settings", json={"auto_correct": False})
+    original = _upload(client, text="first pass").json()
+
+    p1, p2, p3 = _pipeline_patches(text="second pass")
+    with p1, p2, p3:
+        rerun = client.post(
+            f"/api/transcripts/{original['id']}/retranscribe",
+            data={"provider": "groq", "model": "whisper-large-v3"},
+        ).json()
+
+    versions = client.get(f"/api/transcripts/{original['id']}/versions").json()["versions"]
+    assert {v["id"] for v in versions} == {original["id"], rerun["id"]}
+
+    # Querying from the rerun side must resolve to the same group.
+    versions_from_rerun = client.get(f"/api/transcripts/{rerun['id']}/versions").json()["versions"]
+    assert {v["id"] for v in versions_from_rerun} == {original["id"], rerun["id"]}
+
+
 def test_retranscribe_400_without_stored_audio(client, db_session):
     user = _test_user(db_session)
     t = Transcript(user_id=user.id, title="old", filename="old.mp3",

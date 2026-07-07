@@ -154,6 +154,7 @@ def _serialize_transcript(db: Session, t: Transcript) -> dict:
         }
     return {
         "id": t.id,
+        "source_transcript_id": t.source_transcript_id,
         "title": t.title,
         "filename": t.filename,
         "duration_seconds": t.duration_seconds,
@@ -1130,6 +1131,39 @@ async def transcript_runs(
             "result": j.result_json,
         }
         for j in jobs
+    ]}
+
+
+@app.get("/api/transcripts/{transcript_id}/versions")
+async def transcript_versions(
+    transcript_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Every transcript sharing the same root as this one (itself included)
+    — the set of retranscribe reruns of one original recording."""
+    t = db.query(Transcript).filter(
+        Transcript.id == transcript_id, Transcript.user_id == current_user.id
+    ).first()
+    if not t:
+        raise HTTPException(status_code=404, detail="Transcript not found")
+    root_id = t.source_transcript_id or t.id
+    versions = (
+        db.query(Transcript)
+        .filter(
+            Transcript.user_id == current_user.id,
+            (Transcript.id == root_id) | (Transcript.source_transcript_id == root_id),
+        )
+        .order_by(Transcript.id.asc())
+        .all()
+    )
+    return {"versions": [
+        {
+            "id": v.id, "provider": v.provider, "model": v.model,
+            "created_at": v.created_at.isoformat() if v.created_at else None,
+            "full_text": v.full_text,
+        }
+        for v in versions
     ]}
 
 
