@@ -143,11 +143,27 @@ def test_versions_endpoint_returns_root_and_all_reruns(client, db_session):
         ).json()
 
     versions = client.get(f"/api/transcripts/{original['id']}/versions").json()["versions"]
-    assert {v["id"] for v in versions} == {original["id"], rerun["id"]}
+    # Oldest first -- the opposite convention from Phase 2's /runs/{kind},
+    # which is newest-first. A set comparison wouldn't catch a regression
+    # to .desc() here, so assert order explicitly.
+    assert [v["id"] for v in versions] == [original["id"], rerun["id"]]
 
-    # Querying from the rerun side must resolve to the same group.
+    # Querying from the rerun side must resolve to the same group, same order.
     versions_from_rerun = client.get(f"/api/transcripts/{rerun['id']}/versions").json()["versions"]
-    assert {v["id"] for v in versions_from_rerun} == {original["id"], rerun["id"]}
+    assert [v["id"] for v in versions_from_rerun] == [original["id"], rerun["id"]]
+
+
+def test_versions_endpoint_returns_only_self_for_standalone_transcript(client, db_session):
+    client.put("/api/settings", json={"auto_correct": False})
+    original = _upload(client, text="only pass").json()
+
+    versions = client.get(f"/api/transcripts/{original['id']}/versions").json()["versions"]
+    assert [v["id"] for v in versions] == [original["id"]]
+
+
+def test_versions_endpoint_404s_for_missing_transcript(client, db_session):
+    r = client.get("/api/transcripts/999999/versions")
+    assert r.status_code == 404
 
 
 def test_retranscribe_400_without_stored_audio(client, db_session):
