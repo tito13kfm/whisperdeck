@@ -115,6 +115,7 @@ class Summary(Base):
     action_items = Column(JSON, default=list)
     decisions = Column(JSON, default=list)
     model = Column(String(64), default="")
+    provider = Column(String(64), default="")
     created_at = Column(DateTime, default=utcnow_naive)
 
     transcript = relationship("Transcript", back_populates="summary")
@@ -251,6 +252,7 @@ def init_db(db_path: str = "data/whisperdesk.db") -> tuple:
     ensure_columns(engine, "users", {"settings": "JSON"})
     ensure_columns(engine, "transcripts", {"audio_path": "TEXT", "diarize_requested": "BOOLEAN", "num_speakers": "INTEGER", "processed_size_bytes": "INTEGER", "corrected_text": "TEXT", "correction_error": "TEXT", "correction_model": "TEXT", "queue_dismissed": "BOOLEAN DEFAULT 0"})
     ensure_columns(engine, "llm_jobs", {"dismissed": "BOOLEAN DEFAULT 0"})
+    ensure_columns(engine, "summaries", {"provider": "TEXT"})
     SessionLocal = sessionmaker(bind=engine)
     return engine, SessionLocal, migrated_tables
 

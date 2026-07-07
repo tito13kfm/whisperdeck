@@ -110,3 +110,17 @@ def test_summarize_raises_clear_error_on_invalid_json(db_session, tmp_path):
                 db_session, user.id, transcript.id, api_key="", provider_name="local",
                 provider_config={"api_url": "http://box:8080/v1"}, model="llama3",
             ))
+
+
+def test_summarize_stores_provider_on_summary_row(db_session, tmp_path):
+    user, transcript = _make_user_and_transcript(db_session)
+    svc = TranscriptionService(str(tmp_path))
+    fake_post = AsyncMock(return_value=_chat_response(
+        '{"short_summary": "s", "key_points": [], "action_items": [], "decisions": []}'
+    ))
+    with patch("httpx.AsyncClient.post", fake_post):
+        summary = asyncio.run(svc.summarize(
+            db_session, user.id, transcript.id, api_key="", provider_name="local",
+            provider_config={"api_url": "http://box:8080/v1"}, model="llama3",
+        ))
+    assert summary.provider == "local"

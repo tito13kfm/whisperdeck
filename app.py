@@ -196,6 +196,7 @@ def _serialize_summary(s: Summary) -> dict:
         "action_items": s.action_items or [],
         "decisions": s.decisions or [],
         "model": s.model,
+        "provider": s.provider,
         "created_at": s.created_at.isoformat() if s.created_at else None,
     }
 
