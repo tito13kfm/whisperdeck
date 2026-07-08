@@ -67,13 +67,13 @@ WhisperDeck is multi-user. First run creates no default account — register one
 
 | Provider | Type | API Key | Models | Notes |
 |----------|------|---------|--------|-------|
-| **Moonshine** | Local | ❌ | `tiny`, `tiny-streaming`, `base`, `small-streaming`, `medium-streaming` | Default. English-only, fast, no GPU, beats Whisper Large on WER |
+| **Moonshine** | Local | ❌ | `tiny`, `tiny-streaming`, `base`, `small-streaming`, `medium-streaming` | Default. English-only, fast, no GPU |
 | **Built-in (faster-whisper)** | Local | ❌ | `tiny`, `base`, `small`, `medium`, `large-v3` | Multilingual. Needs `pip install faster-whisper` |
 | **Groq** | Cloud | ✅ | `whisper-large-v3-flash`, `whisper-large-v3` | Free tier, hosted GPUs, best for noisy/accented audio |
 | **OpenAI** | Cloud | ✅ | `whisper-1` | $0.006/min, high accuracy |
 | **Replicate** | Cloud | ✅ | `whisper-large-v3-turbo` | Pay-per-run |
 | **OpenRouter** | Cloud | ✅ | `openai/whisper-1`, others | Unified API for multiple providers |
-| **Local / Custom** | Local | Optional | Any | Whisper.cpp, Ollama, LocalAI, or any OpenAI-compatible endpoint |
+| **Local / Custom** | Local | Optional | Any | Any OpenAI-compatible endpoint (e.g., LocalAI, Ollama for LLM tasks) |
 
 > **Default behavior:** On first launch, the Transcribe page auto-selects the first healthy provider (usually Moonshine). Switch providers in Settings → Providers.
 

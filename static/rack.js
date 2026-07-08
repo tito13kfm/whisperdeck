@@ -120,6 +120,23 @@ function motionAllowed() {
 /* ══════════════════ tiny helpers ══════════════════ */
 const $ = (id) => document.getElementById(id);
 
+let csrfToken = null;
+
+async function refreshCsrfToken() {
+  try {
+    const r = await api('/api/csrf-token');
+    csrfToken = r && r.token ? r.token : null;
+  } catch (e) {
+    csrfToken = null;
+    console.warn('CSRF token refresh failed:', e.message);
+  }
+  return csrfToken;
+}
+
+function csrfHeader() {
+  return csrfToken ? { 'X-CSRF-Token': csrfToken } : {};
+}
+
 function escapeHtml(s) {
   return String(s ?? '').replace(/[&<>"']/g, (c) =>
     ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -162,7 +179,11 @@ function toast(msg, type = 'ok') {
 }
 
 async function api(path, opts = {}) {
-  const res = await fetch(path, { credentials: 'same-origin', ...opts });
+  const method = (opts.method || 'GET').toUpperCase();
+  const isMutation = ['POST', 'PUT', 'PATCH', 'DELETE'].includes(method);
+  const headers = { ...(opts.headers || {}) };
+  if (isMutation && csrfToken) headers['X-CSRF-Token'] = csrfToken;
+  const res = await fetch(path, { credentials: 'same-origin', ...opts, headers });
   if (res.status === 401) { showLogin(); throw new Error('Not signed in'); }
   let data = null;
   try { data = await res.json(); } catch { /* non-JSON */ }
@@ -362,6 +383,7 @@ function showApp() {
 
 async function checkAuth() {
   try {
+    await refreshCsrfToken();
     const me = await api('/api/me');
     S.user = me && (me.username || me.user || null);
     if (S.user) $('rail-operator').textContent = 'Operator: ' + S.user;
@@ -391,6 +413,7 @@ async function submitAuth(ev) {
     });
     $('auth-led').style.background = GREEN;
     $('auth-led').style.boxShadow = '0 0 5px ' + GREEN;
+    await refreshCsrfToken();
     await checkAuth();
   } catch (e) {
     toast(e.message, 'error');

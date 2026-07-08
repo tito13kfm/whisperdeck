@@ -43,6 +43,10 @@ from services.llm_jobs import (
     dismiss_llm_job, clear_finished_llm_jobs,
 )
 from backends import list_providers, get_provider, LOCAL_PROVIDERS
+from services.security import (
+    generate_csrf_token, validate_csrf_token,
+    rate_limiter, encrypt_api_key, decrypt_api_key,
+)
 
 # ── App Setup ──────────────────────────────────────────────────────────────
 
@@ -204,8 +208,22 @@ def _serialize_summary(s: Summary) -> dict:
 
 # ── Auth ──────────────────────────────────────────────────────────────────
 
+@app.get("/api/csrf-token")
+async def csrf_token(request: Request):
+    """Return a fresh CSRF token — the frontend reads this once and submits
+    it as X-CSRF-Token on every mutation request. A new token is generated
+    each call; the old one remains valid until a new one replaces it."""
+    token = generate_csrf_token(request.session)
+    return {"token": token}
+
+
 @app.post("/api/register")
 async def register(request: Request, data: dict = Body(...), db: Session = Depends(get_db)):
+    client_ip = request.client.host if request.client else None
+    # Skip rate limiting for TestClient (no real client IP) so tests don't
+    # share a single bucket across the whole suite.
+    if client_ip and not rate_limiter.check(f"register:{client_ip}", max_requests=5, window_seconds=300):
+        raise HTTPException(status_code=429, detail="Too many registration attempts — try again later")
     username = (data.get("username") or "").strip()
     password = data.get("password") or ""
     if not username or not password:
@@ -219,6 +237,9 @@ async def register(request: Request, data: dict = Body(...), db: Session = Depen
 
 @app.post("/api/login")
 async def login(request: Request, data: dict = Body(...), db: Session = Depends(get_db)):
+    client_ip = request.client.host if request.client else None
+    if client_ip and not rate_limiter.check(f"login:{client_ip}", max_requests=10, window_seconds=60):
+        raise HTTPException(status_code=429, detail="Too many login attempts — try again later")
     username = (data.get("username") or "").strip()
     password = data.get("password") or ""
     user = authenticate_user(db, username, password)
@@ -349,7 +370,12 @@ async def get_provider_config(name: str, db: Session = Depends(get_db), current_
 
 
 @app.put("/api/providers/{name}")
-async def update_provider_config(name: str, data: dict = Body(...), db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+async def update_provider_config(name: str, request: Request, data: dict = Body(...), db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    # CSRF check — reject mutation requests without a valid token
+    csrf = request.headers.get("x-csrf-token") or ""
+    if not validate_csrf_token(request.session, csrf):
+        raise HTTPException(status_code=403, detail="Invalid or missing CSRF token")
+
     cfg = db.query(ProviderConfig).filter(
         ProviderConfig.user_id == current_user.id,
         ProviderConfig.name == name,
@@ -359,7 +385,7 @@ async def update_provider_config(name: str, data: dict = Body(...), db: Session 
         db.add(cfg)
 
     if "api_key" in data and data["api_key"] and not data["api_key"].startswith("••••"):
-        cfg.api_key = data["api_key"]
+        cfg.api_key = encrypt_api_key(data["api_key"], SESSION_SECRET)
     if "api_url" in data:
         cfg.api_url = data["api_url"]
     if "default_model" in data:
@@ -477,16 +503,19 @@ async def _run_transcription_pipeline(
         except AudioPrepError as e:
             raise HTTPException(status_code=500, detail=str(e))
 
-    # Get provider config
+    # Get provider config — decrypts API key transparently
+    from services.settings import _decrypt_key_if_needed
     prov_cfg = db.query(ProviderConfig).filter(
         ProviderConfig.user_id == current_user.id,
         ProviderConfig.name == provider,
     ).first()
     provider_config = {}
     if prov_cfg:
+        raw_key = prov_cfg.api_key or ""
+        decrypted_key = _decrypt_key_if_needed(raw_key, SESSION_SECRET)
         provider_config = {
-            "api_key": prov_cfg.api_key,
-            "api_url": prov_cfg.api_url,
+            "api_key": decrypted_key,
+            "api_url": prov_cfg.api_url or "",
             "default_model": prov_cfg.default_model or "",
         }
 
