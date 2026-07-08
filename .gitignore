@@ -15,3 +15,8 @@ dist/
 scripts/.build-cache/
 .playwright-mcp/
 tests/fixtures/
+
+# Local secrets / machine-specific (keep out of git)
+scripts/cookies.txt
+scripts/providers_backup.json
+
