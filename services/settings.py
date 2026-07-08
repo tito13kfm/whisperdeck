@@ -19,10 +19,13 @@ DEFAULT_SETTINGS = {
     # Defaults for LLM-backed passes. Sensible even with no keys saved —
     # runs that need a missing key skip with a recorded reason instead of
     # failing. Keys themselves always come from the ProviderConfig pool.
-    "correction_provider": "groq",
-    "correction_model": "llama-3.3-70b-versatile",
-    "summary_provider": "groq",
-    "summary_model": "llama-3.3-70b-versatile",
+    # gpt-oss-20b-mxfp4-GGUF is the fastest local LLM (GPU via ROCM,
+    # 12.1 GB, 131K ctx). Falls back to Qwen3.5-4B-MTP-GGUF (3.66 GB,
+    # 262K ctx) if VRAM is tight.
+    "correction_provider": "local_llm",
+    "correction_model": "gpt-oss-20b-mxfp4-GGUF",
+    "summary_provider": "local_llm",
+    "summary_model": "gpt-oss-20b-mxfp4-GGUF",
 }
 
 # Providers that work without an API key (local inference / user-hosted URL).
