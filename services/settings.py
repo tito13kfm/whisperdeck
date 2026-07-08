@@ -36,6 +36,24 @@ DEFAULT_SETTINGS = {
 KEYLESS_PROVIDERS = ("local", "local_llm", "builtin", "moonshine")
 
 
+def _decrypt_key_if_needed(encrypted: str, session_secret: str = "") -> str:
+    """Decrypt an API key if it looks encrypted (base64-encoded salt+token).
+    Falls back to returning the value as-is for plaintext keys that predate
+    encryption support."""
+    if not encrypted or not session_secret:
+        return encrypted
+    # Encrypted keys are always longer than 64 chars and start with a
+    # base64 character. Plaintext keys are short (gsk_..., sk-..., r8_...).
+    if len(encrypted) < 64:
+        return encrypted
+    try:
+        from services.security import decrypt_api_key
+        return decrypt_api_key(encrypted, session_secret)
+    except Exception:
+        # Not encrypted or wrong secret — return as-is
+        return encrypted
+
+
 def resolve_provider_key(db, user_id: int, provider: str) -> tuple[str, dict]:
     """The one place API keys are drawn from: the user's ProviderConfig pool.
     Returns (api_key, provider_config); both empty when nothing is saved."""
@@ -47,8 +65,17 @@ def resolve_provider_key(db, user_id: int, provider: str) -> tuple[str, dict]:
     )
     if not cfg:
         return "", {}
-    return cfg.api_key or "", {
-        "api_key": cfg.api_key or "",
+    # Import SESSION_SECRET at call time to avoid circular imports
+    import os
+    from pathlib import Path
+    _base = Path(__file__).parent.parent.resolve()
+    _data = Path(os.environ.get("WHISPERDECK_DATA_DIR", str(_base / "data")))
+    _secret_path = _data / ".session_secret"
+    _secret = _secret_path.read_text().strip() if _secret_path.exists() else ""
+    raw_key = cfg.api_key or ""
+    decrypted = _decrypt_key_if_needed(raw_key, _secret)
+    return decrypted, {
+        "api_key": decrypted,
         "api_url": cfg.api_url or "",
         "default_model": cfg.default_model or "",
     }
