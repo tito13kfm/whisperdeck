@@ -6,6 +6,7 @@
 const S = {
   page: 'dashboard',
   user: null,
+  isAdmin: false,
   authMode: 'login',          // login | register
   detailId: null,
   detailTab: 'transcript',
@@ -386,7 +387,8 @@ async function checkAuth() {
     await refreshCsrfToken();
     const me = await api('/api/me');
     S.user = me && (me.username || me.user || null);
-    if (S.user) $('rail-operator').textContent = 'Operator: ' + S.user;
+    S.isAdmin = !!(me && me.is_admin);
+    if (S.user) $('rail-operator').textContent = 'Operator: ' + S.user + (S.isAdmin ? ' (admin)' : '');
     showApp();
   } catch {
     showLogin();
@@ -398,6 +400,112 @@ function toggleAuthMode() {
   $('auth-title').textContent = S.authMode === 'login' ? 'Operator sign-in' : 'Register operator';
   $('auth-submit').textContent = S.authMode === 'login' ? 'Power on' : 'Register';
   $('auth-toggle').textContent = S.authMode === 'login' ? 'No account? Register' : 'Have an account? Sign in';
+  // Show recovery links only in login mode
+  $('auth-recovery-links').style.display = S.authMode === 'login' ? 'flex' : 'none';
+  $('auth-reset-link').style.display = S.authMode === 'login' ? 'flex' : 'none';
+}
+
+
+/* ── account recovery flows ── */
+
+async function showForgotUsername() {
+  try {
+    const data = await api('/api/forgot-username', { method: 'POST' });
+    const usernames = data.usernames || [];
+    if (!usernames.length) {
+      openModal(`
+        <div style="font-family:var(--f-cond);font-weight:700;font-size:16px;text-transform:uppercase;letter-spacing:0.04em;margin-bottom:12px">Registered operators</div>
+        <div style="font-size:13px;color:var(--label-dim);margin-bottom:16px">No operators are registered yet.</div>
+        <div style="display:flex;justify-content:flex-end">
+          <button class="btn" id="fu-close" style="font-size:12px;border-color:var(--inset-edge)">Close</button>
+        </div>`);
+      $('fu-close').addEventListener('click', closeModal);
+      return;
+    }
+    openModal(`
+      <div style="font-family:var(--f-cond);font-weight:700;font-size:16px;text-transform:uppercase;letter-spacing:0.04em;margin-bottom:12px">Registered operators</div>
+      <div style="font-size:12.5px;color:var(--label-dim);margin-bottom:14px">${usernames.length} operator${usernames.length !== 1 ? 's' : ''} on this system:</div>
+      <div style="display:flex;flex-direction:column;gap:8px;margin-bottom:18px">
+        ${usernames.map(u => '<div style="font-family:var(--f-mono);font-size:14px;background:var(--input);border:1px solid var(--input-edge);padding:10px 14px;border-radius:2px">' + escapeHtml(u) + '</div>').join('')}
+      </div>
+      <div style="display:flex;justify-content:flex-end">
+        <button class="btn" id="fu-close" style="font-size:12px;border-color:var(--inset-edge)">Close</button>
+      </div>`);
+    $('fu-close').addEventListener('click', closeModal);
+  } catch (e) { toast(e.message, 'error'); }
+}
+
+async function showForgotPasscode() {
+  if (!S.user || !S.isAdmin) {
+    openModal(`
+      <div style="font-family:var(--f-cond);font-weight:700;font-size:16px;text-transform:uppercase;letter-spacing:0.04em;margin-bottom:12px">Reset passcode</div>
+      <div style="font-size:13px;color:var(--label-dim);line-height:1.5;margin-bottom:16px">Only a server administrator can generate a reset code. Sign in as an admin or contact your system administrator.</div>
+      <div style="display:flex;justify-content:flex-end">
+        <button class="btn" id="fp-close" style="font-size:12px;border-color:var(--inset-edge)">Close</button>
+      </div>`);
+    $('fp-close').addEventListener('click', closeModal);
+    return;
+  }
+  // Admin is logged in — prompt for target username
+  openModal(`
+    <div style="font-family:var(--f-cond);font-weight:700;font-size:16px;text-transform:uppercase;letter-spacing:0.04em;margin-bottom:12px">Generate reset code</div>
+    <div style="font-size:13px;color:var(--label-dim);margin-bottom:14px">Enter the username that needs a new passcode.</div>
+    <input class="inp" id="fp-username" type="text" placeholder="username" style="font-size:13px;padding:8px 10px;width:100%;margin-bottom:16px">
+    <div id="fp-token-result" style="display:none;margin-bottom:14px;padding:12px;border:1px solid var(--nixie);border-radius:2px;background:var(--nixie-bg)">
+      <div style="font-family:var(--f-mono);font-size:10px;text-transform:uppercase;color:var(--label-dim);margin-bottom:6px">Reset code (valid 1 hour)</div>
+      <div id="fp-token-text" style="font-family:var(--f-mono);font-size:12px;color:var(--nixie);word-break:break-all;text-shadow:0 0 4px rgba(255,138,61,0.4)"></div>
+      <div style="font-size:10px;color:var(--label-dim);margin-top:8px">Give this code to the operator — they enter it on the login screen.</div>
+    </div>
+    <div style="display:flex;justify-content:flex-end;gap:8px">
+      <button class="btn" id="fp-close" style="font-size:12px;border-color:var(--inset-edge)">Close</button>
+      <button id="fp-generate" style="font-family:var(--f-mono);font-size:11px;font-weight:700;background:${AMBER};color:var(--amber-ink);border:none;padding:8px 14px;border-radius:2px;cursor:pointer">Generate</button>
+    </div>`);
+  $('fp-close').addEventListener('click', closeModal);
+  const doGenerate = async () => {
+    const username = $('fp-username').value.trim();
+    if (!username) { toast('Enter a username', 'error'); return; }
+    try {
+      const r = await api('/api/forgot-password', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username }) });
+      $('fp-token-result').style.display = 'block';
+      $('fp-token-text').textContent = r.reset_token;
+    } catch (e) { toast(e.message, 'error'); }
+  };
+  $('fp-generate').addEventListener('click', doGenerate);
+  $('fp-username').addEventListener('keydown', (e) => { if (e.key === 'Enter') doGenerate(); });
+}
+
+async function showResetCode() {
+  openModal(`
+    <div style="font-family:var(--f-cond);font-weight:700;font-size:16px;text-transform:uppercase;letter-spacing:0.04em;margin-bottom:12px">Reset your passcode</div>
+    <div style="font-size:13px;color:var(--label-dim);margin-bottom:14px">Enter the reset code and your new passcode.</div>
+    <div class="field" style="gap:6px;margin-bottom:12px">
+      <label class="t-label" style="font-size:12px">Reset code</label>
+      <input class="inp" id="rc-token" type="text" placeholder="Paste the code here" style="font-size:13px;padding:8px 10px;width:100%;font-family:var(--f-mono)">
+    </div>
+    <div class="field" style="gap:6px;margin-bottom:18px">
+      <label class="t-label" style="font-size:12px">New passcode</label>
+      <input class="inp" id="rc-password" type="password" placeholder="Choose a new passcode" style="font-size:13px;padding:8px 10px;width:100%">
+    </div>
+    <div style="display:flex;justify-content:flex-end;gap:8px">
+      <button class="btn" id="rc-close" style="font-size:12px;border-color:var(--inset-edge)">Cancel</button>
+      <button id="rc-submit" style="font-family:var(--f-mono);font-size:11px;font-weight:700;background:${AMBER};color:var(--amber-ink);border:none;padding:8px 14px;border-radius:2px;cursor:pointer">Reset passcode</button>
+    </div>`);
+  $('rc-close').addEventListener('click', closeModal);
+  const doReset = async () => {
+    const token = $('rc-token').value.trim();
+    const password = $('rc-password').value;
+    if (!token || !password) { toast('Both fields are required', 'error'); return; }
+    try {
+      const r = await api('/api/reset-password', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token, new_password: password }) });
+      toast('Passcode reset — signed in as ' + r.username);
+      closeModal();
+      await refreshCsrfToken();
+      await checkAuth();
+    } catch (e) { toast(e.message, 'error'); }
+  };
+  $('rc-submit').addEventListener('click', doReset);
+  $('rc-password').addEventListener('keydown', (e) => { if (e.key === 'Enter') doReset(); });
+  $('rc-token').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('rc-password').focus(); });
 }
 
 async function submitAuth(ev) {
@@ -3272,5 +3380,9 @@ document.addEventListener('DOMContentLoaded', () => {
     if (e.target.files[0]) loadTape(e.target.files[0]);
     e.target.value = '';
   });
+  // Account recovery links (login page)
+  $('auth-forgot-username').addEventListener('click', showForgotUsername);
+  $('auth-forgot-passcode').addEventListener('click', showForgotPasscode);
+  $('auth-reset-code').addEventListener('click', showResetCode);
   checkAuth();
 });

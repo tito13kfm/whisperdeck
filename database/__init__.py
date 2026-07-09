@@ -22,6 +22,9 @@ class User(Base):
     password_hash = Column(String(128), nullable=False)
     password_salt = Column(String(64), nullable=False)
     settings = Column(JSON, default=dict)
+    is_admin = Column(Boolean, default=False)
+    reset_token = Column(String(128), nullable=True)
+    reset_token_expires_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=utcnow_naive)
 
 
@@ -298,8 +301,25 @@ def init_db(db_path: str = "data/whisperdesk.db") -> tuple:
     ensure_columns(engine, "transcripts", {"audio_path": "TEXT", "diarize_requested": "BOOLEAN", "num_speakers": "INTEGER", "processed_size_bytes": "INTEGER", "corrected_text": "TEXT", "correction_error": "TEXT", "correction_model": "TEXT", "queue_dismissed": "BOOLEAN DEFAULT 0", "source_transcript_id": "INTEGER"})
     ensure_columns(engine, "llm_jobs", {"dismissed": "BOOLEAN DEFAULT 0", "result_json": "JSON", "attempts": "INTEGER DEFAULT 0"})
     ensure_columns(engine, "summaries", {"provider": "TEXT"})
+    ensure_columns(engine, "users", {"is_admin": "BOOLEAN DEFAULT 0", "reset_token": "TEXT", "reset_token_expires_at": "TEXT"})
     SessionLocal = sessionmaker(bind=engine)
     backfill_llm_job_result_snapshots(SessionLocal)
+
+    # First-user-is-admin migration: if any user exists and no admin exists,
+    # promote the earliest-created user to admin.
+    _db = SessionLocal()
+    try:
+        from sqlalchemy import text as _text
+        admin_count = _db.query(User).filter(User.is_admin == True).count()  # noqa: E712
+        total_users = _db.query(User).count()
+        if total_users > 0 and admin_count == 0:
+            first_user = _db.query(User).order_by(User.id.asc()).first()
+            if first_user:
+                first_user.is_admin = True
+                _db.commit()
+    finally:
+        _db.close()
+
     return engine, SessionLocal, migrated_tables
 
 
