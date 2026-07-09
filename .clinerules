@@ -2,10 +2,11 @@
 
 ## Serena MCP Server Activation
 
-Before starting any task that involves code exploration, editing, or analysis, the following steps MUST be taken:
+Before starting any task that involves code exploration, editing, or analysis, the following steps MUST be taken in order:
 
-1. **Activate Serena instructions** by calling the `initial_instructions` tool on the `github.com/oraios/serena` MCP server.
-2. **Read and process the Serena instructions** to ensure all semantic coding tools are properly loaded and available.
+1. **Activate the project** by calling `activate_project` with the project name (e.g. `"whisperdesk"`) on the `github.com/oraios/serena` MCP server. This must be done first — `search_for_pattern` and other tools will fail with "No active project" otherwise.
+2. **Activate Serena instructions** by calling the `initial_instructions` tool on the `github.com/oraios/serena` MCP server.
+3. **Read and process the Serena instructions** to ensure all semantic coding tools are properly loaded and available.
 
 This ensures that Serena's symbolic tools (`find_symbol`, `get_symbols_overview`, `find_referencing_symbols`, etc.) and editing tools (`replace_symbol_body`, `replace_content`, etc.) are available for efficient, token-aware code operations.
 
