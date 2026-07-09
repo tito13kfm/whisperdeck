@@ -3056,6 +3056,7 @@ function jackRow(j, connected) {
     <input type="${j.kind.startsWith('url') ? 'text' : 'password'}" id="jack-input-${j.id}" placeholder="${escapeHtml(j.placeholder)}"
       style="font-family:var(--f-mono);font-size:11.5px;background:var(--input);border:1px solid var(--input-edge);color:var(--label);padding:7px 9px;border-radius:2px;width:${j.kind.startsWith('url') ? 190 : 170}px">
     <button id="jack-act-${j.id}" style="font-family:var(--f-mono);font-size:9.5px;background:none;border:1px solid #3A3D41;color:var(--label-dim);padding:5px 9px;border-radius:2px;cursor:pointer;text-transform:uppercase">${escapeHtml(j.action)}</button>
+    ${connected && j.kind === 'key' ? `<button id="jack-clear-${j.id}" style="font-family:var(--f-mono);font-size:9.5px;background:none;border:1px solid var(--red);color:var(--red);padding:5px 9px;border-radius:2px;cursor:pointer;text-transform:uppercase">Clear</button>` : ''}
     <div style="display:flex;flex-direction:column;align-items:center;gap:3px;width:64px">
       <div class="led-dot" id="jack-led-${j.id}" style="${connected ? 'background:' + GREEN + ';box-shadow:0 0 5px ' + GREEN : ''}"></div>
       <div style="font-family:var(--f-mono);font-size:8.5px;text-transform:uppercase;color:var(--label-dim)" id="jack-state-${j.id}">${connected ? 'linked' : 'open'}</div>
@@ -3167,17 +3168,10 @@ async function loadSettingsPage() {
         </div>
       </div>
       <div>
-        <div class="t-cap" style="font-size:10.5px;letter-spacing:0.14em;margin:0 0 8px 36px">Maintenance — guarded</div>
-        <div class="unit unit--svc" style="border-radius:3px;padding:14px 30px;height:100%">
-          <div style="background:repeating-linear-gradient(45deg,${AMBER} 0 10px,#141518 10px 20px);padding:3px;border-radius:2px">
-            <div style="background:var(--svc);border-radius:1px;padding:12px 16px;display:flex;align-items:center;justify-content:space-between;gap:12px">
-              <div style="font-family:var(--f-mono);font-size:10px;color:var(--label-dim);text-transform:uppercase;letter-spacing:0.06em">Ends this operator session</div>
-              <div style="display:flex;gap:8px;align-items:center">
-                ${S.isAdmin ? `<button id="svc-reset-code" style="font-family:var(--f-cond);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:0.03em;background:var(--input);border:1px solid var(--amber);color:var(--amber);padding:7px 16px;border-radius:2px;cursor:pointer">Generate reset code</button>` : ''}
-                <button id="svc-logout" style="font-family:var(--f-cond);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:0.03em;background:var(--input);border:1px solid var(--red);color:var(--red);padding:7px 16px;border-radius:2px;cursor:pointer">Log out</button>
-              </div>
-            </div>
-          </div>
+        <div class="t-cap" style="font-size:10.5px;letter-spacing:0.14em;margin:0 0 8px 36px">Maintenance</div>
+        <div class="unit unit--svc" style="border-radius:3px;padding:12px 30px;height:100%;display:flex;align-items:center;justify-content:flex-end;gap:8px">
+          ${S.isAdmin ? `<button id="svc-reset-code" style="font-family:var(--f-cond);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:0.03em;background:var(--input);border:1px solid var(--amber);color:var(--amber);padding:7px 16px;border-radius:2px;cursor:pointer">Generate reset code</button>` : ''}
+          <button id="svc-logout" style="font-family:var(--f-cond);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:0.03em;background:var(--input);border:1px solid var(--red);color:var(--red);padding:7px 16px;border-radius:2px;cursor:pointer">Log out</button>
         </div>
       </div>
     </div>
@@ -3263,6 +3257,22 @@ async function loadSettingsPage() {
         toast(j.name + ': ' + e.message, 'error');
       }
     });
+    // Clear button for key-type jacks — confirmation then empty-string PUT
+    const clearBtn = $('jack-clear-' + j.id);
+    if (clearBtn) {
+      clearBtn.addEventListener('click', async () => {
+        if (!(await styledConfirm('Clear the saved ' + j.name + ' API key? This cannot be undone.'))) return;
+        try {
+          await api('/api/providers/' + j.id, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ api_key: '' }) });
+          setJackLed(j.id, false);
+          $('jack-input-' + j.id).value = '';
+          toast(j.name + ' key cleared');
+          S.providers = [];
+          // Reload the settings page to remove the Clear button
+          loadSettingsPage();
+        } catch (e) { toast(e.message, 'error'); }
+      });
+    }
   });
 
   // glossary

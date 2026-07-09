@@ -534,8 +534,11 @@ async def update_provider_config(name: str, request: Request, data: dict = Body(
         cfg = ProviderConfig(name=name, user_id=current_user.id)
         db.add(cfg)
 
-    if "api_key" in data and data["api_key"] and not data["api_key"].startswith("••••"):
-        cfg.api_key = encrypt_api_key(data["api_key"], SESSION_SECRET)
+    if "api_key" in data:
+        if data["api_key"] and not data["api_key"].startswith("••••"):
+            cfg.api_key = encrypt_api_key(data["api_key"], SESSION_SECRET)
+        elif not data["api_key"]:
+            cfg.api_key = ""
     if "api_url" in data:
         cfg.api_url = data["api_url"]
     if "default_model" in data:
