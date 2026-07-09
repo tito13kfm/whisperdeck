@@ -1704,4 +1704,4 @@ if __name__ == "__main__":
     print("         WhisperDeck v0.7")
     print("  Transcribe - Diarize - Summarize - Identify")
     print("=" * 46)
-    uvicorn.run("app:app", host="0.0.0.0", port=int(os.environ.get("PORT", 9781)), reload=False)
+    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 9781)), reload=False)
