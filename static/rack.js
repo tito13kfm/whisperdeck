@@ -434,21 +434,11 @@ async function showForgotUsername() {
   } catch (e) { toast(e.message, 'error'); }
 }
 
-async function showForgotPasscode() {
-  if (!S.user || !S.isAdmin) {
-    openModal(`
-      <div style="font-family:var(--f-cond);font-weight:700;font-size:16px;text-transform:uppercase;letter-spacing:0.04em;margin-bottom:12px">Reset passcode</div>
-      <div style="font-size:13px;color:var(--label-dim);line-height:1.5;margin-bottom:16px">Only a server administrator can generate a reset code. Sign in as an admin or contact your system administrator.</div>
-      <div style="display:flex;justify-content:flex-end">
-        <button class="btn" id="fp-close" style="font-size:12px;border-color:var(--inset-edge)">Close</button>
-      </div>`);
-    $('fp-close').addEventListener('click', closeModal);
-    return;
-  }
-  // Admin is logged in — prompt for target username
+/* ── admin tool: generate password reset token (Service Panel action) ── */
+async function showGenerateResetCode() {
   openModal(`
     <div style="font-family:var(--f-cond);font-weight:700;font-size:16px;text-transform:uppercase;letter-spacing:0.04em;margin-bottom:12px">Generate reset code</div>
-    <div style="font-size:13px;color:var(--label-dim);margin-bottom:14px">Enter the username that needs a new passcode.</div>
+    <div style="font-size:13px;color:var(--label-dim);margin-bottom:14px">Enter the username that needs a new password.</div>
     <input class="inp" id="fp-username" type="text" placeholder="username" style="font-size:13px;padding:8px 10px;width:100%;margin-bottom:16px">
     <div id="fp-token-result" style="display:none;margin-bottom:14px;padding:12px;border:1px solid var(--nixie);border-radius:2px;background:var(--nixie-bg)">
       <div style="font-family:var(--f-mono);font-size:10px;text-transform:uppercase;color:var(--label-dim);margin-bottom:6px">Reset code (valid 1 hour)</div>
@@ -475,19 +465,19 @@ async function showForgotPasscode() {
 
 async function showResetCode() {
   openModal(`
-    <div style="font-family:var(--f-cond);font-weight:700;font-size:16px;text-transform:uppercase;letter-spacing:0.04em;margin-bottom:12px">Reset your passcode</div>
-    <div style="font-size:13px;color:var(--label-dim);margin-bottom:14px">Enter the reset code and your new passcode.</div>
+    <div style="font-family:var(--f-cond);font-weight:700;font-size:16px;text-transform:uppercase;letter-spacing:0.04em;margin-bottom:12px">Reset your password</div>
+    <div style="font-size:13px;color:var(--label-dim);margin-bottom:14px">Enter the reset code and your new password.</div>
     <div class="field" style="gap:6px;margin-bottom:12px">
       <label class="t-label" style="font-size:12px">Reset code</label>
       <input class="inp" id="rc-token" type="text" placeholder="Paste the code here" style="font-size:13px;padding:8px 10px;width:100%;font-family:var(--f-mono)">
     </div>
     <div class="field" style="gap:6px;margin-bottom:18px">
-      <label class="t-label" style="font-size:12px">New passcode</label>
-      <input class="inp" id="rc-password" type="password" placeholder="Choose a new passcode" style="font-size:13px;padding:8px 10px;width:100%">
+      <label class="t-label" style="font-size:12px">New password</label>
+      <input class="inp" id="rc-password" type="password" placeholder="Choose a new password" style="font-size:13px;padding:8px 10px;width:100%">
     </div>
     <div style="display:flex;justify-content:flex-end;gap:8px">
       <button class="btn" id="rc-close" style="font-size:12px;border-color:var(--inset-edge)">Cancel</button>
-      <button id="rc-submit" style="font-family:var(--f-mono);font-size:11px;font-weight:700;background:${AMBER};color:var(--amber-ink);border:none;padding:8px 14px;border-radius:2px;cursor:pointer">Reset passcode</button>
+      <button id="rc-submit" style="font-family:var(--f-mono);font-size:11px;font-weight:700;background:${AMBER};color:var(--amber-ink);border:none;padding:8px 14px;border-radius:2px;cursor:pointer">Reset password</button>
     </div>`);
   $('rc-close').addEventListener('click', closeModal);
   const doReset = async () => {
@@ -496,7 +486,7 @@ async function showResetCode() {
     if (!token || !password) { toast('Both fields are required', 'error'); return; }
     try {
       const r = await api('/api/reset-password', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token, new_password: password }) });
-      toast('Passcode reset — signed in as ' + r.username);
+      toast('Password reset — signed in as ' + r.username);
       closeModal();
       await refreshCsrfToken();
       await checkAuth();
@@ -511,7 +501,7 @@ async function submitAuth(ev) {
   ev.preventDefault();
   const username = $('auth-user').value.trim();
   const password = $('auth-pass').value;
-  if (!username || !password) { toast('Operator and passcode required', 'error'); return; }
+  if (!username || !password) { toast('Operator and password required', 'error'); return; }
   try {
     await api('/api/' + S.authMode, {
       method: 'POST',
@@ -3182,7 +3172,10 @@ async function loadSettingsPage() {
           <div style="background:repeating-linear-gradient(45deg,${AMBER} 0 10px,#141518 10px 20px);padding:3px;border-radius:2px">
             <div style="background:var(--svc);border-radius:1px;padding:12px 16px;display:flex;align-items:center;justify-content:space-between;gap:12px">
               <div style="font-family:var(--f-mono);font-size:10px;color:var(--label-dim);text-transform:uppercase;letter-spacing:0.06em">Ends this operator session</div>
-              <button id="svc-logout" style="font-family:var(--f-cond);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:0.03em;background:var(--input);border:1px solid var(--red);color:var(--red);padding:7px 16px;border-radius:2px;cursor:pointer">Log out</button>
+              <div style="display:flex;gap:8px;align-items:center">
+                ${S.isAdmin ? `<button id="svc-reset-code" style="font-family:var(--f-cond);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:0.03em;background:var(--input);border:1px solid var(--amber);color:var(--amber);padding:7px 16px;border-radius:2px;cursor:pointer">Generate reset code</button>` : ''}
+                <button id="svc-logout" style="font-family:var(--f-cond);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:0.03em;background:var(--input);border:1px solid var(--red);color:var(--red);padding:7px 16px;border-radius:2px;cursor:pointer">Log out</button>
+              </div>
             </div>
           </div>
         </div>
@@ -3298,6 +3291,9 @@ async function loadSettingsPage() {
   });
 
   $('svc-logout').addEventListener('click', logout);
+  // Admin-only reset-code generator — only exists when S.isAdmin is true
+  const resetBtn = $('svc-reset-code');
+  if (resetBtn) resetBtn.addEventListener('click', showGenerateResetCode);
 
   // faceplate prefs
   $('ctl-theme').addEventListener('click', () => {
@@ -3381,7 +3377,6 @@ document.addEventListener('DOMContentLoaded', () => {
   });
   // Account recovery links (login page)
   $('auth-forgot-username').addEventListener('click', showForgotUsername);
-  $('auth-forgot-passcode').addEventListener('click', showForgotPasscode);
   $('auth-reset-code').addEventListener('click', showResetCode);
   checkAuth();
 });
