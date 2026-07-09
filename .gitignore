@@ -9,6 +9,7 @@ test_audio.mp3
 .claude/*
 !.claude/skills/
 !.claude/skills/**
+!.claude/rules.md
 .serena/
 *.log
 dist/
