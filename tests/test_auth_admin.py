@@ -299,5 +299,6 @@ class TestEnvVarIsolation:
         expected = os.environ.get("WHISPERDESK_DATA_DIR", "")
         assert expected, "conftest should have set WHISPERDESK_DATA_DIR"
         assert str(app_module.DATA_DIR) == expected
-        # Must NOT be the production data dir
-        assert "data" != app_module.DATA_DIR.name or expected.endswith("data") is False or True  # temp dir name varies
+        # Must NOT be the production data dir — conftest uses tempfile.mkdtemp
+        # which produces paths like /tmp/whisperdesk-test-XXXXXX, never ./data
+        assert app_module.DATA_DIR != app_module.BASE_DIR / "data"
