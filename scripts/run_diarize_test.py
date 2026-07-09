@@ -11,7 +11,7 @@ port = "9790"
 env = os.environ.copy()
 env.update({
     "PORT": port,
-    "WHISPERDECK_DATA_DIR": data_dir,
+    "WHISPERDESK_DATA_DIR": data_dir,
     "HUGGINGFACE_TOKEN": os.environ.get("HUGGINGFACE_TOKEN", ""),
 })
 

@@ -69,7 +69,7 @@ def resolve_provider_key(db, user_id: int, provider: str) -> tuple[str, dict]:
     import os
     from pathlib import Path
     _base = Path(__file__).parent.parent.resolve()
-    _data = Path(os.environ.get("WHISPERDECK_DATA_DIR", str(_base / "data")))
+    _data = Path(os.environ.get("WHISPERDESK_DATA_DIR") or os.environ.get("WHISPERDECK_DATA_DIR") or str(_base / "data"))
     _secret_path = _data / ".session_secret"
     _secret = _secret_path.read_text().strip() if _secret_path.exists() else ""
     raw_key = cfg.api_key or ""

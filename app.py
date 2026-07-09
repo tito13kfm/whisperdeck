@@ -55,7 +55,20 @@ from services.security import (
 # ── App Setup ──────────────────────────────────────────────────────────────
 
 BASE_DIR = Path(__file__).parent.resolve()
-DATA_DIR = Path(os.environ["WHISPERDECK_DATA_DIR"]) if os.environ.get("WHISPERDECK_DATA_DIR") else BASE_DIR / "data"
+# Support the correctly-spelled WHISPERDESK_DATA_DIR, with a fallback to the
+# legacy typo'd WHISPERDECK_DATA_DIR for backward compatibility with existing
+# deploy scripts and the portable .bat launcher.  A deprecation warning is
+# printed when only the old name is set so operators can migrate.
+if os.environ.get("WHISPERDESK_DATA_DIR"):
+    DATA_DIR = Path(os.environ["WHISPERDESK_DATA_DIR"])
+elif os.environ.get("WHISPERDECK_DATA_DIR"):
+    print(
+        "[deprecation] WHISPERDECK_DATA_DIR is deprecated — "
+        "rename to WHISPERDESK_DATA_DIR (note: DESK, not DECK)"
+    )
+    DATA_DIR = Path(os.environ["WHISPERDECK_DATA_DIR"])
+else:
+    DATA_DIR = BASE_DIR / "data"
 UPLOAD_DIR = DATA_DIR / "uploads"
 TRANSCRIPT_DIR = DATA_DIR / "transcripts"
 VOICES_DIR = DATA_DIR / "voices"
@@ -76,16 +89,22 @@ else:
     SESSION_SECRET = secrets.token_hex(32)
     SESSION_SECRET_PATH.write_text(SESSION_SECRET)
 
+# Capture whether the DB file already exists *before* init_db(), which calls
+# Base.metadata.create_all() and creates the file on a fresh install.  The
+# data-safety warning should only fire when a pre-existing DB has zero users
+# (misconfiguration / wrong DATA_DIR), not on a genuine first run.
+_db_preexisted = DB_PATH.exists()
 engine, SessionLocal, migrated_tables = init_db(str(DB_PATH))
 
-# ── Data-safety guard: warn loudly if the database exists but has zero users.
+# ── Data-safety guard: warn loudly if a pre-existing database has zero users.
 #    This catches a fresh clone, a misconfigured DATA_DIR, or a database that
 #    was silently replaced — all cases where the operator's transcripts may be
 #    in a different (still-existing) database file the app isn't pointing at.
+#    Skipped on a genuine first install (DB didn't exist before init_db).
 _startup_db = SessionLocal()
 try:
     _user_count = _startup_db.query(User).count()
-    if _user_count == 0 and DB_PATH.exists():
+    if _user_count == 0 and _db_preexisted:
         print(
             "\n" + "!" * 72 + "\n"
             "  WARNING: The database exists but contains zero user accounts.\n"
@@ -304,6 +323,10 @@ async def forgot_password(request: Request, data: dict = Body(...), db: Session 
     """Admin-only: generate a one-time reset token for any user.
     The token is returned directly (no email) — the admin shares it with
     the affected user out-of-band."""
+    # CSRF check — consistent with other state-changing admin actions (#22)
+    csrf = request.headers.get("x-csrf-token") or ""
+    if not validate_csrf_token(request.session, csrf):
+        raise HTTPException(status_code=403, detail="Invalid or missing CSRF token")
     if not current_user.is_admin:
         raise HTTPException(status_code=403, detail="Only administrators can generate password reset tokens")
     client_ip = request.client.host if request.client else None
@@ -322,6 +345,10 @@ async def forgot_password(request: Request, data: dict = Body(...), db: Session 
 @app.post("/api/reset-password")
 async def reset_password_route(request: Request, data: dict = Body(...), db: Session = Depends(get_db)):
     """Reset a password using a valid one-time token. Auto-logs in on success."""
+    # CSRF check — the endpoint auto-logs in on success, creating a session
+    csrf = request.headers.get("x-csrf-token") or ""
+    if not validate_csrf_token(request.session, csrf):
+        raise HTTPException(status_code=403, detail="Invalid or missing CSRF token")
     client_ip = request.client.host if request.client else None
     if client_ip and not rate_limiter.check(f"reset-password:{client_ip}", max_requests=5, window_seconds=300):
         raise HTTPException(status_code=429, detail="Too many attempts — try again later")
@@ -348,8 +375,12 @@ async def admin_users(db: Session = Depends(get_db), current_user: User = Depend
 
 
 @app.post("/api/admin/promote")
-async def admin_promote(data: dict = Body(...), db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+async def admin_promote(request: Request, data: dict = Body(...), db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     """Admin-only: grant admin status to another user."""
+    # CSRF check — privilege escalation is more sensitive than provider config (#22)
+    csrf = request.headers.get("x-csrf-token") or ""
+    if not validate_csrf_token(request.session, csrf):
+        raise HTTPException(status_code=403, detail="Invalid or missing CSRF token")
     if not current_user.is_admin:
         raise HTTPException(status_code=403, detail="Administrator access required")
     target_username = (data.get("username") or "").strip()
@@ -362,8 +393,12 @@ async def admin_promote(data: dict = Body(...), db: Session = Depends(get_db), c
 
 
 @app.post("/api/admin/demote")
-async def admin_demote(data: dict = Body(...), db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+async def admin_demote(request: Request, data: dict = Body(...), db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     """Admin-only: revoke admin status from another user (cannot self-demote)."""
+    # CSRF check — privilege changes are more sensitive than provider config (#22)
+    csrf = request.headers.get("x-csrf-token") or ""
+    if not validate_csrf_token(request.session, csrf):
+        raise HTTPException(status_code=403, detail="Invalid or missing CSRF token")
     if not current_user.is_admin:
         raise HTTPException(status_code=403, detail="Administrator access required")
     target_username = (data.get("username") or "").strip()

@@ -15,6 +15,13 @@ PBKDF2_ITERATIONS = 200_000
 RESET_TOKEN_TTL_HOURS = 1
 
 
+def hash_reset_token(token: str) -> str:
+    """Hash a reset token for storage. Uses SHA-256 (not PBKDF2) because
+    the token itself is 256-bit random — no need for slow key derivation.
+    Prevents account takeover if the database is leaked within the TTL."""
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
 def utcnow():
     return datetime.datetime.now(datetime.UTC).replace(tzinfo=None)
 
@@ -81,7 +88,8 @@ def list_usernames(db) -> list[str]:
 def generate_reset_token(db, admin_user: User, target_username: str) -> Optional[str]:
     """Admin generates a one-time reset token for *target_username*.
     Returns the plaintext token (for display to the admin), or None if the
-    target user doesn't exist.
+    target user doesn't exist. The token is hashed before storage so a DB
+    leak within the TTL window cannot be used for account takeover.
     """
     if not admin_user.is_admin:
         return None
@@ -89,7 +97,7 @@ def generate_reset_token(db, admin_user: User, target_username: str) -> Optional
     if not target:
         return None
     token = secrets.token_hex(32)
-    target.reset_token = token
+    target.reset_token = hash_reset_token(token)
     target.reset_token_expires_at = utcnow() + datetime.timedelta(hours=RESET_TOKEN_TTL_HOURS)
     db.commit()
     return token
@@ -101,13 +109,14 @@ def reset_password(db, token: str, new_password: str) -> Optional[User]:
     the caller can log them in. Returns None if the token is invalid or
     expired.
     """
+    # Hash the incoming token before querying — tokens are stored hashed
+    # at rest (see generate_reset_token / hash_reset_token).
+    token_hash = hash_reset_token(token)
     user = db.query(User).filter(
-        User.reset_token == token,
+        User.reset_token == token_hash,
         User.reset_token_expires_at > utcnow(),
     ).first()
     if not user:
-        # Also check for exact token match (for cleartext timing safety) —
-        # a non-matching token returns the same "invalid" result either way.
         return None
     salt = generate_salt()
     user.password_salt = salt

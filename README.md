@@ -175,7 +175,7 @@ whisperdeck/
 |----------|---------|----------|
 | `HUGGINGFACE_TOKEN` | pyannote model access | For ML diarization |
 | `PORT` | Override the bound port (default `9781`) | No |
-| `WHISPERDECK_DATA_DIR` | Override where the SQLite DB and uploaded audio are stored | No (defaults to `./data`) |
+| `WHISPERDESK_DATA_DIR` | Override where the SQLite DB and uploaded audio are stored | No (defaults to `./data`) |
 | `FFMPEG_DIR` | Point at a specific ffmpeg install instead of relying on PATH | No |
 | `WHISPER_CACHE_DIR` | Override the faster-whisper model cache dir (default `~/.cache/whisper`) | No |
 
