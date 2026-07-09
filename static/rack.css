@@ -528,6 +528,43 @@ textarea.inp { resize: vertical; }
   letter-spacing: 0.08em;
 }
 
+/* ── auth recovery links (login page) ── */
+.auth-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--panel-lo);
+  border: 1px solid var(--inset-edge);
+  border-radius: 2px;
+  color: var(--label-dim);
+  font-family: var(--f-mono);
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  padding: 6px 10px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: color 0.15s, border-color 0.15s, background 0.15s;
+}
+.auth-link::before {
+  content: '';
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--label-faint);
+  flex-shrink: 0;
+  transition: background 0.15s, box-shadow 0.15s;
+}
+.auth-link:hover {
+  color: var(--amber);
+  border-color: rgba(224, 168, 62, 0.4);
+  background: var(--hover);
+}
+.auth-link:hover::before {
+  background: var(--amber);
+  box-shadow: 0 0 4px var(--amber);
+}
+
 /* motion preferences: stop decorative animation, keep informational state */
 @media (prefers-reduced-motion: reduce) {
   .vfd > span.scroll { animation: none; }

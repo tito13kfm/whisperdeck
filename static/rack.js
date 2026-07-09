@@ -400,9 +400,8 @@ function toggleAuthMode() {
   $('auth-title').textContent = S.authMode === 'login' ? 'Operator sign-in' : 'Register operator';
   $('auth-submit').textContent = S.authMode === 'login' ? 'Power on' : 'Register';
   $('auth-toggle').textContent = S.authMode === 'login' ? 'No account? Register' : 'Have an account? Sign in';
-  // Show recovery links only in login mode
-  $('auth-recovery-links').style.display = S.authMode === 'login' ? 'flex' : 'none';
-  $('auth-reset-link').style.display = S.authMode === 'login' ? 'flex' : 'none';
+  // "Find username" only makes sense on the login side; reset code flows work either way.
+  $('auth-forgot-username').style.display = S.authMode === 'login' ? '' : 'none';
 }
 
 
