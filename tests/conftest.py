@@ -34,6 +34,7 @@ def pytest_configure(config):
 
 import app as app_module
 from database import init_db
+from services.security import rate_limiter
 
 
 @pytest.fixture()
@@ -63,6 +64,14 @@ def client(db_session):
         yield db_session
 
     app_module.app.dependency_overrides[app_module.get_db] = _override_get_db
+    # rate_limiter is a process-wide singleton (services/security.py). Under
+    # starlette's TestClient, request.client.host is always the constant
+    # "testclient" — never None — so app.py's "skip rate limiting when there's
+    # no real client IP" check does NOT exempt tests. Without this reset, the
+    # 5-requests/5-minutes register bucket fills after the 5th test in the
+    # whole pytest session and every later test's register call 429s, leaving
+    # its client unauthenticated and causing unrelated-looking 401s downstream.
+    rate_limiter._buckets.clear()
     test_client = TestClient(app_module.app)
     test_client.post(
         "/api/register",
