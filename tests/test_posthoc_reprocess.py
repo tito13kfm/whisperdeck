@@ -330,6 +330,9 @@ def test_context_route_extracts_terms(client, db_session):
 
 
 def test_context_route_400_without_provider_key(client, db_session):
+    # correction_provider defaults to local_llm (keyless) — force a
+    # key-requiring provider to exercise the missing-key error path.
+    client.put("/api/settings", json={"correction_provider": "groq"})
     user = _test_user(db_session)
     t = Transcript(user_id=user.id, title="c", filename="c.mp3", status="completed", full_text="x")
     db_session.add(t)

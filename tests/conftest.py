@@ -77,5 +77,10 @@ def client(db_session):
         "/api/register",
         json={"username": "testuser", "password": "testpass123"},
     )
+    # PUT/POST/PATCH/DELETE mutations require X-CSRF-Token (services/security.py,
+    # added in #22). Set it once as a default header so every test's mutation
+    # calls carry it without each test having to fetch/attach it itself.
+    csrf_token = test_client.get("/api/csrf-token").json()["token"]
+    test_client.headers["X-CSRF-Token"] = csrf_token
     yield test_client
     app_module.app.dependency_overrides.clear()
