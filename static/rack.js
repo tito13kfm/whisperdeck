@@ -206,18 +206,22 @@ function nixie(str, variant = '', color = null) {
   return '<span class="nixie ' + variant + '">' + glyphs + '</span>';
 }
 
-// 11-cell LED bargraph. cells: array of {on, color}
+// 11-cell LED bargraph. cells: array of {on, color}. Color is set via the
+// --on-color custom property so the cell class controls all the visual state.
 function bargraph(cells, height = 14) {
   const inner = cells.map(c => c.on
-    ? '<span style="background:' + c.color + ';box-shadow:0 0 4px ' + c.color + '"></span>'
+    ? '<span class="on" style="--on-color:' + c.color + '"></span>'
     : '<span></span>').join('');
   return '<span class="bargraph" style="height:' + height + 'px">' + inner + '</span>';
 }
 
+// LED dot. Off-state = bare led-dot (default dim). On-state = led-dot--on with
+// --led-color custom property. Size still needs an inline style since each
+// caller may use a different size.
 function ledDot(color, glow = true, size = 8) {
   if (!color) return '<span class="led-dot" style="width:' + size + 'px;height:' + size + 'px"></span>';
-  return '<span class="led-dot" style="width:' + size + 'px;height:' + size + 'px;background:' + color +
-    (glow ? ';box-shadow:0 0 5px ' + color : '') + '"></span>';
+  return '<span class="led-dot led-dot--on" style="width:' + size + 'px;height:' + size + 'px;--led-color:' + color +
+    ';box-shadow:0 0 5px ' + color + '"></span>';
 }
 
 // VFD value window, fixed width; marquee class added post-insert when text overflows
@@ -340,9 +344,9 @@ let pendingStyledModal = null;
 function styledConfirm(message) {
   return new Promise(resolve => {
     openModal(`
-      <div style="font-family:var(--f-cond);font-weight:700;font-size:16px;text-transform:uppercase;letter-spacing:0.04em;margin-bottom:14px">${escapeHtml(message)}</div>
-      <div style="display:flex;justify-content:flex-end;gap:8px">
-        <button class="btn" id="styled-confirm-cancel" style="font-size:12px;border-color:var(--inset-edge)">Cancel</button>
+      <h2 class="modal-title">${escapeHtml(message)}</h2>
+      <div class="modal-actions">
+        <button id="styled-confirm-cancel" class="btn btn--ghost btn--sm">Cancel</button>
         <button class="btn btn--red" id="styled-confirm-ok" style="font-size:12px">Confirm</button>
       </div>`);
     pendingStyledModal = { resolve, cancelValue: false };
@@ -354,11 +358,11 @@ function styledConfirm(message) {
 function styledPrompt(message, defaultValue) {
   return new Promise(resolve => {
     openModal(`
-      <div style="font-family:var(--f-cond);font-weight:700;font-size:16px;text-transform:uppercase;letter-spacing:0.04em;margin-bottom:12px">${escapeHtml(message)}</div>
+      <h2 class="modal-title">${escapeHtml(message)}</h2>
       <input class="inp" id="styled-prompt-input" type="text" value="${escapeHtml(defaultValue || '')}" style="font-size:13px;padding:8px 10px;width:100%;margin-bottom:16px">
-      <div style="display:flex;justify-content:flex-end;gap:8px">
-        <button class="btn" id="styled-prompt-cancel" style="font-size:12px;border-color:var(--inset-edge)">Cancel</button>
-        <button id="styled-prompt-ok" style="font-family:var(--f-mono);font-size:11px;font-weight:700;background:${AMBER};color:var(--amber-ink);border:none;padding:8px 14px;border-radius:2px;cursor:pointer">OK</button>
+      <div class="modal-actions">
+        <button id="styled-prompt-cancel" class="btn btn--ghost btn--sm">Cancel</button>
+        <button id="styled-prompt-ok" class="btn btn--amber btn--sm">OK</button>
       </div>`);
     const input = $('styled-prompt-input');
     input.focus();
@@ -413,22 +417,22 @@ async function showForgotUsername() {
     const usernames = data.usernames || [];
     if (!usernames.length) {
       openModal(`
-        <div style="font-family:var(--f-cond);font-weight:700;font-size:16px;text-transform:uppercase;letter-spacing:0.04em;margin-bottom:12px">Registered operators</div>
+        <h2 class="modal-title">Registered operators</h2>
         <div style="font-size:13px;color:var(--label-dim);margin-bottom:16px">No operators are registered yet.</div>
         <div style="display:flex;justify-content:flex-end">
-          <button class="btn" id="fu-close" style="font-size:12px;border-color:var(--inset-edge)">Close</button>
+          <button id="fu-close" class="btn btn--ghost btn--sm">Close</button>
         </div>`);
       $('fu-close').addEventListener('click', closeModal);
       return;
     }
     openModal(`
-      <div style="font-family:var(--f-cond);font-weight:700;font-size:16px;text-transform:uppercase;letter-spacing:0.04em;margin-bottom:12px">Registered operators</div>
+      <h2 class="modal-title">Registered operators</h2>
       <div style="font-size:12.5px;color:var(--label-dim);margin-bottom:14px">${usernames.length} operator${usernames.length !== 1 ? 's' : ''} on this system:</div>
       <div style="display:flex;flex-direction:column;gap:8px;margin-bottom:18px">
         ${usernames.map(u => '<div style="font-family:var(--f-mono);font-size:14px;background:var(--input);border:1px solid var(--input-edge);padding:10px 14px;border-radius:2px">' + escapeHtml(u) + '</div>').join('')}
       </div>
       <div style="display:flex;justify-content:flex-end">
-        <button class="btn" id="fu-close" style="font-size:12px;border-color:var(--inset-edge)">Close</button>
+        <button id="fu-close" class="btn btn--ghost btn--sm">Close</button>
       </div>`);
     $('fu-close').addEventListener('click', closeModal);
   } catch (e) { toast(e.message, 'error'); }
@@ -437,7 +441,7 @@ async function showForgotUsername() {
 /* ── admin tool: generate password reset token (Service Panel action) ── */
 async function showGenerateResetCode() {
   openModal(`
-    <div style="font-family:var(--f-cond);font-weight:700;font-size:16px;text-transform:uppercase;letter-spacing:0.04em;margin-bottom:12px">Generate reset code</div>
+    <h2 class="modal-title">Generate reset code</h2>
     <div style="font-size:13px;color:var(--label-dim);margin-bottom:14px">Enter the username that needs a new password.</div>
     <input class="inp" id="fp-username" type="text" placeholder="username" style="font-size:13px;padding:8px 10px;width:100%;margin-bottom:16px">
     <div id="fp-token-result" style="display:none;margin-bottom:14px;padding:12px;border:1px solid var(--nixie);border-radius:2px;background:var(--nixie-bg)">
@@ -445,9 +449,9 @@ async function showGenerateResetCode() {
       <div id="fp-token-text" style="font-family:var(--f-mono);font-size:12px;color:var(--nixie);word-break:break-all;text-shadow:0 0 4px rgba(255,138,61,0.4)"></div>
       <div style="font-size:10px;color:var(--label-dim);margin-top:8px">Give this code to the operator — they enter it on the login screen.</div>
     </div>
-    <div style="display:flex;justify-content:flex-end;gap:8px">
-      <button class="btn" id="fp-close" style="font-size:12px;border-color:var(--inset-edge)">Close</button>
-      <button id="fp-generate" style="font-family:var(--f-mono);font-size:11px;font-weight:700;background:${AMBER};color:var(--amber-ink);border:none;padding:8px 14px;border-radius:2px;cursor:pointer">Generate</button>
+    <div class="modal-actions">
+      <button id="fp-close" class="btn btn--ghost btn--sm">Close</button>
+      <button id="fp-generate" class="btn btn--amber btn--sm">Generate</button>
     </div>`);
   $('fp-close').addEventListener('click', closeModal);
   const doGenerate = async () => {
@@ -465,7 +469,7 @@ async function showGenerateResetCode() {
 
 async function showResetCode() {
   openModal(`
-    <div style="font-family:var(--f-cond);font-weight:700;font-size:16px;text-transform:uppercase;letter-spacing:0.04em;margin-bottom:12px">Reset your password</div>
+    <h2 class="modal-title">Reset your password</h2>
     <div style="font-size:13px;color:var(--label-dim);margin-bottom:14px">Enter the reset code and your new password.</div>
     <div class="field" style="gap:6px;margin-bottom:12px">
       <label class="t-label" style="font-size:12px">Reset code</label>
@@ -475,9 +479,9 @@ async function showResetCode() {
       <label class="t-label" style="font-size:12px">New password</label>
       <input class="inp" id="rc-password" type="password" placeholder="Choose a new password" style="font-size:13px;padding:8px 10px;width:100%">
     </div>
-    <div style="display:flex;justify-content:flex-end;gap:8px">
-      <button class="btn" id="rc-close" style="font-size:12px;border-color:var(--inset-edge)">Cancel</button>
-      <button id="rc-submit" style="font-family:var(--f-mono);font-size:11px;font-weight:700;background:${AMBER};color:var(--amber-ink);border:none;padding:8px 14px;border-radius:2px;cursor:pointer">Reset password</button>
+    <div class="modal-actions">
+      <button id="rc-close" class="btn btn--ghost btn--sm">Cancel</button>
+      <button id="rc-submit" class="btn btn--amber btn--sm">Reset password</button>
     </div>`);
   $('rc-close').addEventListener('click', closeModal);
   const doReset = async () => {
@@ -557,7 +561,7 @@ async function loadDashboard() {
   root.innerHTML = `
     <div class="page-head">
       <h1 class="t-title">Monitor</h1>
-      <div class="page-status" style="color:${GREEN}">${ledDot(GREEN, true, 9)}${escapeHtml(greeting())}</div>
+      <div class="page-status page-status--ok">${ledDot(GREEN, true, 9)}${escapeHtml(greeting())}</div>
     </div>
     <div class="unit" id="dash-stats" style="display:grid;grid-template-columns:repeat(4,1fr);padding:8px 28px"></div>
     <div class="t-cap" style="font-size:10.5px;letter-spacing:0.14em;margin:20px 0 8px 36px">Recent signals</div>
@@ -594,7 +598,7 @@ async function loadDashboard() {
           <span style="display:block;font-family:var(--f-mono);font-size:10.5px;color:var(--label-dim);margin-top:2px">${escapeHtml(transcriptMeta(t))}</span>
         </span>
         ${bargraph(sv.cells)}
-        <span style="font-family:var(--f-mono);font-size:10px;text-transform:uppercase;letter-spacing:0.05em;color:${sv.color};text-align:right">${escapeHtml(sv.word)}</span>
+        <span class="status-badge status-badge--${escapeHtml(sv.word)}" data-word="${escapeHtml(sv.word)}">${escapeHtml(sv.word)}</span>
       </button>`;
     }).join('') : '<div class="empty-unit">No signals yet — load a tape on the Transcribe deck</div>';
     $('dash-recents').querySelectorAll('[data-open]').forEach(b =>
@@ -1361,11 +1365,11 @@ function openRecModal() {
       <span style="width:9px;height:9px;border-radius:50%;background:${RED};box-shadow:0 0 6px ${RED}"></span>
       <span style="font-family:var(--f-cond);font-weight:700;font-size:16px;text-transform:uppercase;letter-spacing:0.04em">Start a live capture?</span>
     </div>
-    <div style="font-size:13.5px;line-height:1.55;color:var(--body);margin-bottom:8px">This records your microphone (left channel) and system audio (right channel) until you press Stop. Nothing has been recorded yet.</div>
+    <p class="modal-body">This records your microphone (left channel) and system audio (right channel) until you press Stop. Nothing has been recorded yet.</p>
     <div style="font-family:var(--f-mono);font-size:10.5px;color:var(--label-dim);margin-bottom:18px">The recording stays on this machine.</div>
-    <div style="display:flex;justify-content:flex-end;gap:8px">
-      <button class="btn" id="rec-notnow" style="font-size:12px;border-color:var(--inset-edge)">Not now</button>
-      <button id="rec-start" style="font-family:var(--f-mono);font-size:11px;font-weight:700;background:${AMBER};color:var(--amber-ink);border:none;padding:8px 14px;border-radius:2px;cursor:pointer">● Start recording</button>
+    <div class="modal-actions">
+      <button id="rec-notnow" class="btn btn--ghost btn--sm">Not now</button>
+      <button id="rec-start" class="btn btn--amber btn--sm">● Start recording</button>
     </div>`);
   $('rec-notnow').addEventListener('click', closeModal);
   $('rec-start').addEventListener('click', () => {
@@ -1540,7 +1544,7 @@ async function loadTranscripts() {
   root.innerHTML = `
     <div class="page-head">
       <h1 class="t-title">Tape library</h1>
-      <div class="page-status" id="bank-status" style="color:${GREEN}">${ledDot(GREEN, true, 9)}${list.length} channels · ${active} active</div>
+      <div class="page-status page-status--ok">${ledDot(GREEN, true, 9)}${list.length} channels · ${active} active</div>
     </div>
     <div style="display:flex;gap:10px;margin-bottom:14px;padding:0 4px">
       <input id="bank-search" class="inp" type="text" placeholder="Search title or filename…" value="${escapeHtml(S.bankQuery || '')}" style="font-size:12px;padding:8px 10px 8px 16px;flex:1;max-width:320px">
@@ -1655,7 +1659,7 @@ function renderBankRows(preservedOpenIds) {
         ${bargraph(sv.cells, 16)}
         <div style="display:flex;flex-direction:column;align-items:flex-end;gap:3px">
           ${nixie(sv.nix, sv.nixVariant)}
-          <div style="font-family:var(--f-mono);font-size:10px;text-transform:uppercase;letter-spacing:0.05em;color:${sv.color}">${escapeHtml(sv.word)}</div>
+          <div class="status-badge status-badge--${escapeHtml(sv.word)}" data-word="${escapeHtml(sv.word)}">${escapeHtml(sv.word)}</div>
         </div>
       </summary>
       <div style="padding:12px 22px 16px 34px;border-top:1px solid var(--panel-lo)">
@@ -1735,7 +1739,7 @@ async function loadQueue() {
         ${bargraph(cells)}
         <div style="display:flex;flex-direction:column;align-items:flex-end;gap:3px">
           ${nixie(sv.nix, sv.variant)}
-          <div style="font-family:var(--f-mono);font-size:10px;text-transform:uppercase;letter-spacing:0.05em;color:${sv.color || 'var(--label-dim)'}">${escapeHtml(sv.word)}</div>
+          <div class="status-badge status-badge--${escapeHtml(sv.word)}" data-word="${escapeHtml(sv.word)}">${escapeHtml(sv.word)}</div>
         </div>
       </summary>
       <div style="padding:12px 22px 14px 34px;border-top:1px solid var(--panel-lo);display:flex;gap:8px;flex-wrap:wrap">
@@ -1750,7 +1754,7 @@ async function loadQueue() {
     <div class="page-head">
       <h1 class="t-title">Queue</h1>
       <div style="display:flex;align-items:center;gap:14px">
-        <div class="page-status" style="color:${active ? AMBER : GREEN}">${ledDot(active ? AMBER : GREEN, true, 9)}${jobs.length} jobs · ${active} active</div>
+        <div class="page-status page-status--${active ? 'busy' : 'ok'}">${ledDot(active ? AMBER : GREEN, true, 9)}${jobs.length} jobs · ${active} active</div>
         ${finishedCount ? `<button class="btn" style="font-size:12px;padding:6px 12px;border-color:var(--inset-edge)" data-jact="clear-finished">Clear finished (${finishedCount})</button>` : ''}
       </div>
     </div>
@@ -2008,7 +2012,7 @@ async function openEnrollMarkedModal() {
   const options = voices.map(v => `<option value="${escapeHtml(v.name)}">${escapeHtml(v.name)}</option>`).join('');
   const speakerOptions = speakers.map(sp => `<option value="${escapeHtml(sp)}">${escapeHtml(sp)} (${seedClips[sp].length} clip${seedClips[sp].length !== 1 ? 's' : ''})</option>`).join('');
   openModal(`
-    <div style="font-family:var(--f-cond);font-weight:700;font-size:16px;text-transform:uppercase;letter-spacing:0.04em;margin-bottom:12px">Enroll marked clips</div>
+    <h2 class="modal-title">Enroll marked clips</h2>
     <div style="display:flex;flex-direction:column;gap:10px;margin-bottom:16px">
       <div class="field" style="gap:4px">
         <label class="t-label" style="font-size:12px">Flagged speaker</label>
@@ -2022,9 +2026,9 @@ async function openEnrollMarkedModal() {
         <input class="inp" id="enroll-marked-new" type="text" placeholder="New speaker name" style="font-size:12px;padding:7px 9px;margin-top:6px">
       </div>
     </div>
-    <div style="display:flex;justify-content:flex-end;gap:8px">
-      <button class="btn" id="enroll-marked-cancel" style="font-size:12px;border-color:var(--inset-edge)">Cancel</button>
-      <button id="enroll-marked-go" style="font-family:var(--f-mono);font-size:11px;font-weight:700;background:${AMBER};color:var(--amber-ink);border:none;padding:8px 14px;border-radius:2px;cursor:pointer">Enroll</button>
+    <div class="modal-actions">
+      <button id="enroll-marked-cancel" class="btn btn--ghost btn--sm">Cancel</button>
+      <button id="enroll-marked-go" class="btn btn--amber btn--sm">Enroll</button>
     </div>`);
   $('enroll-marked-cancel').addEventListener('click', closeModal);
   $('enroll-marked-go').addEventListener('click', async () => {
@@ -2054,7 +2058,7 @@ async function openRetagModal() {
   try { voices = await api('/api/voices'); } catch { /* picker still works with just "new name" */ }
   const options = voices.map(v => `<option value="${escapeHtml(v.name)}">${escapeHtml(v.name)}</option>`).join('');
   openModal(`
-    <div style="font-family:var(--f-cond);font-weight:700;font-size:16px;text-transform:uppercase;letter-spacing:0.04em;margin-bottom:12px">Re-tag ${selectedSegments.size} line${selectedSegments.size !== 1 ? 's' : ''}</div>
+    <h2 class="modal-title">Re-tag ${selectedSegments.size} line${selectedSegments.size !== 1 ? 's' : ''}</h2>
     <div style="display:flex;flex-direction:column;gap:10px;margin-bottom:16px">
       <div class="field" style="gap:4px">
         <label class="t-label" style="font-size:12px">Correct speaker</label>
@@ -2064,9 +2068,9 @@ async function openRetagModal() {
         <input class="inp" id="retag-new" type="text" placeholder="New speaker name" style="font-size:12px;padding:7px 9px;margin-top:6px">
       </div>
     </div>
-    <div style="display:flex;justify-content:flex-end;gap:8px">
-      <button class="btn" id="retag-cancel" style="font-size:12px;border-color:var(--inset-edge)">Cancel</button>
-      <button id="retag-go" style="font-family:var(--f-mono);font-size:11px;font-weight:700;background:${AMBER};color:var(--amber-ink);border:none;padding:8px 14px;border-radius:2px;cursor:pointer">Re-tag</button>
+    <div class="modal-actions">
+      <button id="retag-cancel" class="btn btn--ghost btn--sm">Cancel</button>
+      <button id="retag-go" class="btn btn--amber btn--sm">Re-tag</button>
     </div>`);
   $('retag-cancel').addEventListener('click', closeModal);
   $('retag-go').addEventListener('click', async () => {
@@ -2211,14 +2215,14 @@ async function openCompareModal(title, fetchItems, extractText, renderDiff) {
   if (items.length < 1) { toast('Nothing to compare yet', 'info'); return; }
   const optionHtml = items.map(it => `<option value="${it.id}">${escapeHtml(it.optionLabel)}${it.result ? '' : ' (no snapshot)'}</option>`).join('');
   openModal(`
-    <div style="font-family:var(--f-cond);font-weight:700;font-size:16px;text-transform:uppercase;letter-spacing:0.04em;margin-bottom:14px">${escapeHtml(title)}</div>
+    <h2 class="modal-title">${escapeHtml(title)}</h2>
     <div style="display:flex;gap:10px;margin-bottom:14px">
       <select id="compare-item-a" class="inp" style="flex:1;font-size:12px;padding:8px 10px">${optionHtml}</select>
       <select id="compare-item-b" class="inp" style="flex:1;font-size:12px;padding:8px 10px">${optionHtml}</select>
     </div>
     <div id="compare-diff-out" style="max-height:50vh;overflow:auto;font-size:13px;line-height:1.6;white-space:pre-wrap;padding:10px;border:1px solid var(--inset-edge)"></div>
     <div style="display:flex;justify-content:flex-end;margin-top:14px">
-      <button class="btn" id="compare-close" style="font-size:12px;border-color:var(--inset-edge)">Close</button>
+      <button id="compare-close" class="btn btn--ghost btn--sm">Close</button>
     </div>`);
   const byId = Object.fromEntries(items.map(it => [String(it.id), it]));
   const update = () => {
@@ -2416,7 +2420,7 @@ function renderDetail() {
       <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:14px">
         <div style="font-size:12.5px"><div style="font-family:var(--f-mono);font-size:10px;text-transform:uppercase;letter-spacing:0.08em;color:var(--label-dim);margin-bottom:3px">Duration</div>${formatDur(t.duration_seconds)}</div>
         <div style="font-size:12.5px"><div style="font-family:var(--f-mono);font-size:10px;text-transform:uppercase;letter-spacing:0.08em;color:var(--label-dim);margin-bottom:3px">Provider</div>${escapeHtml((t.provider || '—') + (t.model ? ' · ' + t.model : ''))}</div>
-        <div style="font-size:12.5px"><div style="font-family:var(--f-mono);font-size:10px;text-transform:uppercase;letter-spacing:0.08em;color:var(--label-dim);margin-bottom:3px">Status</div><span style="color:${sv.color}">${escapeHtml(sv.word)}</span></div>
+        <div style="font-size:12.5px"><div style="font-family:var(--f-mono);font-size:10px;text-transform:uppercase;letter-spacing:0.08em;color:var(--label-dim);margin-bottom:3px">Status</div><span class="status-badge status-badge--${escapeHtml(sv.word)}" data-word="${escapeHtml(sv.word)}">${escapeHtml(sv.word)}</span></div>
         <div style="font-size:12.5px"><div style="font-family:var(--f-mono);font-size:10px;text-transform:uppercase;letter-spacing:0.08em;color:var(--label-dim);margin-bottom:3px">Speakers</div>${t.speaker_count || '—'}</div>
         <div style="font-size:12.5px"><div style="font-family:var(--f-mono);font-size:10px;text-transform:uppercase;letter-spacing:0.08em;color:var(--label-dim);margin-bottom:3px">Segments</div>${(t.segments || []).length}</div>
       </div>
@@ -2885,7 +2889,7 @@ let enrollFile = null;
 function openEnrollModal() {
   enrollFile = null;
   openModal(`
-    <div style="font-family:var(--f-cond);font-weight:700;font-size:16px;text-transform:uppercase;letter-spacing:0.04em;margin-bottom:12px">Enroll a speaker</div>
+    <h2 class="modal-title">Enroll a speaker</h2>
     <div style="display:flex;flex-direction:column;gap:10px;margin-bottom:12px">
       <div class="field" style="gap:4px">
         <label class="t-label" style="font-size:12px" for="enroll-name">Speaker name</label>
@@ -2901,9 +2905,9 @@ function openEnrollModal() {
       </div>
     </div>
     <div style="font-size:12px;line-height:1.5;color:${AMBER};margin-bottom:16px">Enrolling saves this voice to the shared roster — future diarized transcripts will auto-name matching speakers.</div>
-    <div style="display:flex;justify-content:flex-end;gap:8px">
-      <button class="btn" id="enroll-cancel" style="font-size:12px;border-color:var(--inset-edge)">Cancel</button>
-      <button id="enroll-go" style="font-family:var(--f-mono);font-size:11px;font-weight:700;background:${AMBER};color:var(--amber-ink);border:none;padding:8px 14px;border-radius:2px;cursor:pointer">Enroll to roster</button>
+    <div class="modal-actions">
+      <button id="enroll-cancel" class="btn btn--ghost btn--sm">Cancel</button>
+      <button id="enroll-go" class="btn btn--amber btn--sm">Enroll to roster</button>
     </div>`);
   $('enroll-cancel').addEventListener('click', closeModal);
   $('enroll-file-btn').addEventListener('click', () => {
@@ -2937,14 +2941,14 @@ let addClipFile = null;
 function openAddClipModal(profileId) {
   addClipFile = null;
   openModal(`
-    <div style="font-family:var(--f-cond);font-weight:700;font-size:16px;text-transform:uppercase;letter-spacing:0.04em;margin-bottom:12px">Add a clip</div>
+    <h2 class="modal-title">Add a clip</h2>
     <div class="field" style="gap:4px;margin-bottom:16px">
       <label class="t-label" style="font-size:12px">Voice sample</label>
       <button id="add-clip-file-btn" style="font-family:var(--f-mono);font-size:11px;background:var(--panel-lo);border:1px dashed var(--dash);color:var(--label-dim);padding:12px;border-radius:2px;cursor:pointer">Choose an audio file…</button>
     </div>
-    <div style="display:flex;justify-content:flex-end;gap:8px">
-      <button class="btn" id="add-clip-cancel" style="font-size:12px;border-color:var(--inset-edge)">Cancel</button>
-      <button id="add-clip-go" style="font-family:var(--f-mono);font-size:11px;font-weight:700;background:${AMBER};color:var(--amber-ink);border:none;padding:8px 14px;border-radius:2px;cursor:pointer">Add clip</button>
+    <div class="modal-actions">
+      <button id="add-clip-cancel" class="btn btn--ghost btn--sm">Cancel</button>
+      <button id="add-clip-go" class="btn btn--amber btn--sm">Add clip</button>
     </div>`);
   $('add-clip-cancel').addEventListener('click', closeModal);
   $('add-clip-file-btn').addEventListener('click', () => {
@@ -2981,9 +2985,9 @@ function openIdentifyModal() {
     <div class="t-label" style="font-size:12px;margin-bottom:6px">Match strictness</div>
     <div style="display:flex;gap:6px;margin-bottom:16px" id="identify-thresholds"></div>
     <div id="identify-result" style="display:none;border:1px solid ${GREEN};border-radius:2px;padding:10px 14px;margin-bottom:16px;justify-content:space-between;align-items:center"></div>
-    <div style="display:flex;justify-content:flex-end;gap:8px">
-      <button class="btn" id="identify-close" style="font-size:12px;border-color:var(--inset-edge)">Close</button>
-      <button id="identify-go" style="font-family:var(--f-mono);font-size:11px;font-weight:700;background:${AMBER};color:var(--amber-ink);border:none;padding:8px 14px;border-radius:2px;cursor:pointer">Run match</button>
+    <div class="modal-actions">
+      <button id="identify-close" class="btn btn--ghost btn--sm">Close</button>
+      <button id="identify-go" class="btn btn--amber btn--sm">Run match</button>
     </div>`);
   renderThresholds();
   $('identify-close').addEventListener('click', closeModal);
