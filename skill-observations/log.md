@@ -4,7 +4,8 @@ Observations captured during task-oriented work. Each entry identifies a
 potential skill improvement or new skill opportunity.
 
 **Status key:** OPEN = not yet actioned | ACTIONED = skill updated/created |
-DECLINED = user decided not to pursue
+DECLINED = user decided not to pursue | ESCALATED = needs a user decision;
+stays in the active log (never archived) until resolved to ACTIONED or DECLINED
 
 ---
 
@@ -187,3 +188,18 @@ DECLINED = user decided not to pursue
 **Suggested improvement:** A docs-rewrite workflow skill: (1) inventory user-facing docs vs internal artifacts; (2) before restructuring, verify every checkable claim (versions, env vars, endpoints, commands, model lists) against source, preferring authoritative extraction (route decorators, registry literals) over convenience helpers; (3) treat empty output from a discovery helper as suspect until the helper itself is read.
 
 **Principle:** A rewrite propagates whatever the old text got wrong, so accuracy verification is a precondition of restructuring, not a separate task. And a helper that exits 0 with no output is indistinguishable from "nothing found"; read the helper before trusting its silence.
+
+### Observation 12: Fix plan for scheduled automation must verify next fire time from the scheduler itself
+
+**Status:** OPEN
+**Date:** 2026-07-10
+**Session context:** Code review of dff67fc..HEAD found the MWF scheduled-review pipeline broken; advisor review of the fix plan flagged "next run is tomorrow" as an urgent missed risk, but schtasks showed the actual next run was Monday 7/13, not Friday 7/11.
+**Skill:** code-review, verification-before-completion
+**Type:** open-source
+**Phase/Area:** Risk assessment when a fix targets scheduled/cron automation
+
+**Issue:** Two related misses. (1) My original fix plan for a broken scheduled job did not consider when the job would next fire, so a broken run could have landed before the fix. (2) The advisor inferred the next fire time from the cadence description ("MWF") instead of querying the scheduler, and got the date wrong; only running `schtasks /query` gave the real answer.
+
+**Suggested improvement:** When a finding or fix touches scheduled automation, the plan must include: query the scheduler for the actual next fire time (schtasks/cron, not the cadence label), and if a broken run would fire before the fix merges, disable the task first (reversible) and re-enable after verified fix.
+
+**Principle:** A cadence label ("MWF mornings") is a claim about configuration, not the configuration. The scheduler's own query output is the only authoritative source for when a job fires next, and fix plans for time-triggered systems need a "what fires before this lands" check.
