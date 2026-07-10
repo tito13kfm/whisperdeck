@@ -11,6 +11,7 @@ DECLINED = user decided not to pursue
 ## 2026-07-01/02
 
 ### Observation 1: Asserted repo identity from metadata proximity, not content
+**Status:** ACTIONED — Applied to CLAUDE.md claim-verification section as (wd#1) (weekly review 2026-07-10)
 
 **Date:** 2026-07-02
 **Session context:** Setting up a missing git remote for whisperdesk after discovering no remote was configured locally.
@@ -27,6 +28,7 @@ DECLINED = user decided not to pursue
 ---
 
 ### Observation 2: Plan text itself contained a Critical spec defect
+**Status:** ACTIONED — Confirmation of existing plan-mandated-finding rule; no change needed (weekly review 2026-07-10)
 
 **Date:** 2026-07-02
 **Session context:** Subagent-driven-development execution of the transcription-ux-improvements plan, Task 3 (cancel/resume transcription jobs).
@@ -43,6 +45,7 @@ DECLINED = user decided not to pursue
 ---
 
 ### Observation 3: Plan scoped a UI edit to one of two sibling render blocks, only whole-branch review caught the divergence
+**Status:** ACTIONED — Applied to CLAUDE.md mirror/round-trip section clause (c) as (wd#3) (weekly review 2026-07-10)
 
 **Date:** 2026-07-02
 **Session context:** Final whole-branch review of the transcription-ux-improvements plan, whisperdesk. Task 5 added a `cancelled`-aware status badge to the dashboard's "recent transcripts" list per its brief. The final reviewer found that the main Transcripts list page — a separate render block in the same file, showing the same underlying data — was never touched, so a cancelled transcript displays there as red "Failed", directly contradicting the cancel/resume feature in the page a user would actually browse to find and resume it.
@@ -59,6 +62,7 @@ DECLINED = user decided not to pursue
 ---
 
 ### Observation 4: "Discard this work" menu option offered after a clean final review, read as an insult
+**Status:** ACTIONED — Applied to CLAUDE.md Collaboration section as (wd#4) (weekly review 2026-07-10)
 
 **Date:** 2026-07-02
 **Session context:** finishing-a-development-branch's Step 4 menu, presented after the transcription-ux-improvements branch had already passed a final whole-branch review with a "ready to merge: yes" verdict and one round of fix-and-reverify.
@@ -75,6 +79,7 @@ DECLINED = user decided not to pursue
 ---
 
 ### Observation 5: Plan test used fake byte payload against a route with a real pre-processing step, not just the mocked one
+**Status:** ACTIONED — Applied to CLAUDE.md "Green proves only the layer you ran" rule 3 as (wd#5) (weekly review 2026-07-10)
 
 **Date:** 2026-07-03
 **Session context:** Executing Task 6 of the hotword-glossary-and-correction-pass plan (whisperdesk), wiring `context_doc` extraction into `POST /api/transcribe`.
@@ -102,7 +107,7 @@ DECLINED = user decided not to pursue
 
 **Principle:** The safest temporary mutation is one that never touches disk. Prefer verification channels whose cleanup is implicit (page reload) over ones requiring an explicit restore step that can be forgotten or done wrong.
 
-**Status:** OPEN
+**Status:** ACTIONED — Applied to CLAUDE.md verification-gates section as (wd#6) (weekly review 2026-07-10)
 
 ### Observation 7: Seeded fake in-progress rows got consumed by the live job dispatcher
 
@@ -119,7 +124,7 @@ DECLINED = user decided not to pursue
 
 **Principle:** A live system's queue states are commands, not data. Seeding them schedules work; the honest fixture set is exactly the states no daemon claims.
 
-**Status:** OPEN
+**Status:** ACTIONED — Applied to CLAUDE.md "Verifying against a live app" as (wd#7) (weekly review 2026-07-10)
 
 ### Observation 8: New input source shipped without cross-checking every consumer of its output format
 
@@ -136,10 +141,10 @@ DECLINED = user decided not to pursue
 
 **Principle:** Producer-consumer joins fail on properties invisible at either end alone. Test the join with the producer's real artifact, not a stand-in that predates the feature.
 
-**Status:** OPEN
+**Status:** ACTIONED — Applied to CLAUDE.md "Verifying against a live app" as (wd#8) (weekly review 2026-07-10)
 
 ### Observation 9: Grep output showed phantom backslashes in JS string literals; Read disproved before acting
-**Status:** OPEN
+**Status:** ACTIONED — Applied to CLAUDE.md claim-verification section as (wd#9) (weekly review 2026-07-10)
 
 **Date:** 2026-07-04
 **Session context:** Planning post-hoc reprocess features for WhisperDeck; exploring rack.js with Grep
@@ -154,7 +159,7 @@ DECLINED = user decided not to pursue
 **Principle:** Search output is a lossy view of a file; only a byte-faithful Read is evidence. Verify surprising content at the source before treating it as a defect.
 
 ### Observation 10: Compound UI action — failure in step B suppressed feedback for already-committed step A
-**Status:** OPEN
+**Status:** ACTIONED — Applied to CLAUDE.md "Verifying against a live app" as (wd#10) (weekly review 2026-07-10)
 
 **Date:** 2026-07-04
 **Session context:** WhisperDeck speaker-naming feature; rename-then-enroll flow in the transcript detail screen
@@ -167,3 +172,18 @@ DECLINED = user decided not to pursue
 **Suggested improvement:** Add to the verify skill's checklist: for any UI action that chains multiple mutations, exercise the flow with each later step forced to fail and assert the UI still reflects every earlier step that committed. Structure code so refresh/feedback for step A does not live inside step B's failure path.
 
 **Principle:** In a compound action, each committed step's user feedback must be independent of later steps' outcomes — one shared try/catch around sequential mutations silently converts a partial success into an apparent no-op.
+
+### Observation 11: Docs rewrite surfaced silent-empty helper script and unverified doc claims
+**Status:** ACTIONED — Applied to CLAUDE.md "Docs rewrites" section as (wd#11); new-skill option declined in favor of rule (weekly review 2026-07-10)
+
+**Date:** 2026-07-10
+**Session context:** Full rewrite of WhisperDeck README.md and INSTALL.md for simplicity and accuracy
+**Skill:** New skill candidate: docs-accuracy-rewrite
+**Type:** open-source
+**Phase/Area:** Pre-rewrite verification sweep
+
+**Issue:** The docs rewrite request said nothing about accuracy, but a claim-by-claim check against the code found the README stale in four ways (wrong version badge, hotwords described as transcription-time boosting when they only feed the correction pass, 12+ missing API endpoints, whole shipped features absent). Separately, the repo's own scripts/list_api_endpoints.py returned zero output with exit 0 because its regex cannot match template literals; trusting it would have reproduced the stale endpoint list. Routes were pulled from app.py decorators instead.
+
+**Suggested improvement:** A docs-rewrite workflow skill: (1) inventory user-facing docs vs internal artifacts; (2) before restructuring, verify every checkable claim (versions, env vars, endpoints, commands, model lists) against source, preferring authoritative extraction (route decorators, registry literals) over convenience helpers; (3) treat empty output from a discovery helper as suspect until the helper itself is read.
+
+**Principle:** A rewrite propagates whatever the old text got wrong, so accuracy verification is a precondition of restructuring, not a separate task. And a helper that exits 0 with no output is indistinguishable from "nothing found"; read the helper before trusting its silence.
