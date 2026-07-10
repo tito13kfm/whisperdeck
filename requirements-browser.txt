@@ -1,0 +1,18 @@
+# Optional: real-browser end-to-end tests via Playwright.
+# Use this when a test needs to drive a real Chromium (clicking, keyboard,
+# screenshots, file uploads) rather than the FastAPI TestClient used by
+# the rest of the suite. The API tests in tests/ do not need this.
+#
+# Install:
+#   .venv\Scripts\python.exe -m pip install -r requirements-browser.txt
+#   .venv\Scripts\python.exe -m playwright install chromium
+#
+# Then run only the browser tests:
+#   .venv\Scripts\python.exe -m pytest tests/ -k e2e_browser -m e2e
+#
+# `chromium` is the only browser installed by the second command above;
+# Firefox and WebKit are also available via `playwright install firefox`
+# if a test specifically needs them.
+
+playwright>=1.48.0
+pytest-playwright>=0.5.0
