@@ -13,7 +13,7 @@ stays in the active log (never archived) until resolved to ACTIONED or DECLINED
 
 ### Observation 12: Fix plan for scheduled automation must verify next fire time from the scheduler itself
 
-**Status:** ESCALATED — CLAUDE.md edit blocked by sensitive-file permission gate in headless run; staged copy with the (wd#12) rule at skill-observations/claudemd-staged-2026-07-10.md, apply by copying over C:\Users\tito1\.claude\CLAUDE.md (2026-07-10)
+**Status:** ACTIONED — Applied to CLAUDE.md claim-verification section as (wd#12); staged copy applied manually in-session after the sensitive-file gate blocked the headless run (2026-07-10)
 **Date:** 2026-07-10
 **Session context:** Code review of dff67fc..HEAD found the MWF scheduled-review pipeline broken; advisor review of the fix plan flagged "next run is tomorrow" as an urgent missed risk, but schtasks showed the actual next run was Monday 7/13, not Friday 7/11.
 **Skill:** code-review, verification-before-completion
