@@ -1,128 +1,160 @@
 # WhisperDeck
 
-**Transcribe · Diarize · Summarize · Identify** — a local-first web app for turning audio/video into useful transcripts.
+**Transcribe · Diarize · Summarize · Identify**
 
-![WhisperDeck](https://img.shields.io/badge/version-0.6-blue)
-![Python](https://img.shields.io/badge/python-3.11%2B-blue)
+![WhisperDeck](https://img.shields.io/badge/version-0.7-blue)
+![Python](https://img.shields.io/badge/python-3.11--3.13-blue)
 ![License](https://img.shields.io/badge/license-Hippocratic%203.0-lightgrey)
 
----
+WhisperDeck is a self-hosted transcription studio that runs in your browser. Upload audio or video, get a transcript with speaker labels, then clean it up, summarize it, and identify who was talking. Everything runs on your own machine unless you deliberately pick a cloud provider, and it works out of the box with no API key: the default Moonshine provider transcribes locally on CPU.
 
-## Overview
-
-WhisperDeck is a self-hosted transcription studio that runs in your browser. Upload audio or video files, get accurate transcripts with speaker labels, generate summaries, and identify known speakers — all without leaving your machine (unless you choose a cloud provider). It's multi-user (register/login, per-user data and settings) and processes everything through a background job queue with live progress, cancel/resume, and retry.
-
-**Key capabilities:**
-- **Multiple transcription backends** — local (Moonshine, faster-whisper) and cloud (Groq, OpenAI, Replicate, OpenRouter, or any OpenAI-compatible endpoint)
-- **Speaker diarization** — ML-based via pyannote.audio or fast heuristic fallback
-- **Voice identification** — enroll a roster of known speakers (with multiple clips each) and auto-relabel matching voices across transcripts
-- **LLM-powered correction & summarization** — clean up transcripts and generate concise summaries, run as background jobs
-- **Background job queue** — chunked long-file transcription, correction, summarization, re-diarization, and voice matching all run as trackable jobs with progress, cancel/resume/retry, and dismiss/clear
-- **Per-user accounts** — session-based login, each user's transcripts/settings/provider keys are isolated
-- **Web UI** — drag-and-drop upload, real-time progress, searchable transcript viewer
-- **REST API** — scriptable endpoints for integration
+It's multi-user (register/login, per-user transcripts, settings, and API keys), and every long-running operation goes through a background job queue with live progress, cancel/resume, and retry.
 
 ---
 
-## Quick Start (Windows)
+## Quick Start
+
+**Windows (from source):**
 
 ```cmd
-# 1. Install ffmpeg (required for cloud providers)
 winget install Gyan.FFmpeg
 
-# 2. Clone and enter the repo
 git clone https://github.com/tito13kfm/whisperdesk.git
 cd whisperdesk
 
-# 3. Create venv & install deps (Python 3.11-3.13)
 py -3.13 -m venv .venv
 .venv\Scripts\python.exe -m pip install --upgrade pip
 .venv\Scripts\python.exe -m pip install -r requirements.txt
 
-# 4. Run
 run.bat
-# Opens http://localhost:9781
 ```
 
+Open http://localhost:9781, register an account, and drop a file on the Transcribe page. The first account you register is automatically the admin.
+
 **Linux/macOS:**
+
 ```bash
-# Install ffmpeg first (apt install ffmpeg / brew install ffmpeg)
+# install ffmpeg first: apt install ffmpeg / brew install ffmpeg
 python3.13 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 python app.py
 ```
 
-See [INSTALL.md](INSTALL.md) for detailed setup, including optional diarization/voice-ID extras.
+**Portable build (Windows, no Python install needed):** `scripts/build_release.ps1` produces a self-contained zip under `dist/` with an embedded Python 3.13 runtime and a static ffmpeg. Unzip anywhere and run.
+
+[INSTALL.md](INSTALL.md) walks through all of this in detail, including the optional diarization and voice-ID extras.
 
 ---
 
-## Features in Detail
+## Features
 
-### Authentication
+### Transcription providers
 
-WhisperDeck is multi-user. First run creates no default account — register one via the web UI (or `POST /api/register`). Sessions are cookie-based; each user's transcripts, provider API keys, and settings are scoped to their own account. The session-signing secret is auto-generated on first launch and stored locally — no env var to set.
+| Provider | Runs | API key | Default model | Notes |
+|----------|------|---------|---------------|-------|
+| **Moonshine** | Local | No | `base` | The default. English-only, fast on CPU, installed by `requirements.txt`. Also: `tiny`, `tiny-streaming`, `small-streaming`, `medium-streaming` |
+| **Built-in (faster-whisper)** | Local | No | `tiny` | Multilingual. Optional: `pip install faster-whisper`. Pick `large-v3` for accuracy (slow on CPU) |
+| **Groq** | Cloud | Yes (`gsk_`) | `whisper-large-v3-flash` | Free tier, hosted GPUs. Use `whisper-large-v3` for noisy or accented audio |
+| **OpenAI** | Cloud | Yes (`sk-`) | `whisper-1` | $0.006/min |
+| **Replicate** | Cloud | Yes (`r8_`) | `whisper-large-v3-turbo` | Pay-per-run |
+| **OpenRouter** | Cloud | Yes (`sk-or-`) | `openai/whisper-1` | One API for several Whisper hosts |
+| **Local / Custom** | Local | Optional | any | Any OpenAI-compatible endpoint (Whisper.cpp, LocalAI, ...) |
 
-### Transcription Providers
+On first launch the Transcribe page auto-selects the first provider whose health check passes, which is normally Moonshine. Switch providers and paste API keys under **Settings → Providers**.
 
-| Provider | Type | API Key | Models | Notes |
-|----------|------|---------|--------|-------|
-| **Moonshine** | Local | ❌ | `tiny`, `tiny-streaming`, `base`, `small-streaming`, `medium-streaming` | Default. English-only, fast, no GPU |
-| **Built-in (faster-whisper)** | Local | ❌ | `tiny`, `base`, `small`, `medium`, `large-v3` | Multilingual. Needs `pip install faster-whisper` |
-| **Groq** | Cloud | ✅ | `whisper-large-v3-flash`, `whisper-large-v3` | Free tier, hosted GPUs, best for noisy/accented audio |
-| **OpenAI** | Cloud | ✅ | `whisper-1` | $0.006/min, high accuracy |
-| **Replicate** | Cloud | ✅ | `whisper-large-v3-turbo` | Pay-per-run |
-| **OpenRouter** | Cloud | ✅ | `openai/whisper-1`, others | Unified API for multiple providers |
-| **Local / Custom** | Local | Optional | Any | Any OpenAI-compatible endpoint (e.g., LocalAI, Ollama for LLM tasks) |
+Long recordings are split into chunks and processed through the job queue rather than blocking a single request, so a two-hour meeting doesn't tie up the browser tab.
 
-> **Default behavior:** On first launch, the Transcribe page auto-selects the first healthy provider (usually Moonshine). Switch providers in Settings → Providers.
-
-Long recordings are automatically split into chunks and processed through the background queue (see below) instead of blocking a single request.
-
-### Speaker Diarization
+### Speaker diarization
 
 Two modes:
-1. **Heuristic (default)** — assigns speakers based on pause gaps. No ML deps, fast, but unreliable with overlapping speech.
-2. **pyannote.audio (recommended)** — real ML-based speaker separation.
 
-**Enable pyannote:**
-```bash
-.venv\Scripts\python.exe -m pip install -r requirements-diarization.txt
-```
-Then:
-1. Create a free HuggingFace account
-2. Accept licenses for `pyannote/speaker-diarization-3.1` and `pyannote/segmentation-3.0`
-3. Create a read token at https://huggingface.co/settings/tokens
-4. Set `HUGGINGFACE_TOKEN` env var (or `.env` file)
+- **Heuristic (default):** alternates speaker labels on pause gaps. No extra dependencies, but it's a guess, and it's unreliable for real meetings.
+- **pyannote.audio (recommended):** real ML speaker separation. Install `requirements-diarization.txt` and set a HuggingFace token (steps in [INSTALL.md](INSTALL.md#4-diarization-recommended-pyannoteaudio)).
 
-**GPU acceleration (NVIDIA only on Windows):**
-```bash
-pip install torch --index-url https://download.pytorch.org/whl/cu121
-```
-AMD GPUs run CPU-only on Windows (no ROCm PyTorch build).
+You can re-diarize an existing transcript at any time; it runs as a `rediarize` job on the Queue screen.
 
-Re-diarization of an existing transcript runs as a background job (`rediarize`), visible on the Queue screen.
+### Voice identification
 
-### Voice Identification
+Enroll a roster of known speakers, each with one or more voice clips, and WhisperDeck relabels matching speakers across a transcript via a `voice_match` job. You can also enroll a speaker directly from a transcript segment you've already identified by ear.
 
-Enroll a roster of known speakers — each profile can hold multiple voice clips — and WhisperDeck can auto-relabel matching speakers across a transcript's segments via a background `voice_match` job.
+Embedding backends are auto-detected in priority order: **speechbrain** (most accurate, `pip install speechbrain torchaudio`), then **pyannote.audio** (comes with the diarization install), then **librosa MFCC** (always available, basic).
 
-Embedding backends (auto-detected, in priority order):
-1. **speechbrain** — most accurate (`pip install speechbrain torchaudio`)
-2. **pyannote.audio** — enabled by diarization install above
-3. **librosa (MFCC)** — always available, basic fallback
+### Hotwords and LLM correction
 
-### Summarization & Correction
+Keep a per-user glossary of names, jargon, and product terms the model tends to mishear. You can add terms manually or paste a meeting-context document and let the app extract them. The glossary feeds the LLM correction pass that runs after transcription; it does not change the transcription itself.
 
-On the transcript detail page, pick an LLM provider (Groq, OpenAI, OpenRouter, or a local Ollama-compatible endpoint) to:
-- **Correct** — fix transcription errors, normalize punctuation
-- **Summarize** — generate concise meeting notes
+### Correction and summarization
 
-Both run as background jobs. Uses the same API keys as transcription for Groq/OpenAI/OpenRouter.
+On the transcript detail page, pick an LLM provider (Groq, OpenAI, OpenRouter, or a local Ollama-compatible endpoint) and run:
 
-### Background Job Queue
+- **Correct:** fix transcription errors and normalize punctuation, guided by your hotword glossary.
+- **Summarize:** generate meeting notes.
 
-Every long-running operation — chunked transcription, correction, summarization, re-diarization, voice matching — runs as a job on the Queue screen, with live progress, cancel/resume (chunked transcription), retry-failed-chunks, and rerun (LLM jobs). Finished jobs (completed/failed/partial/cancelled) can be dismissed individually or bulk-cleared without deleting the underlying transcript or job history.
+Both run as background jobs and reuse the API keys you already saved for transcription.
+
+### Run history and versions
+
+Every correction, summary, re-diarization, and voice-match run is recorded per transcript, so you can compare what a correction pass actually changed (word-level diff) or how two summary runs differ. Re-transcribing with a different provider or model creates a linked version chain, letting you A/B providers on the same audio.
+
+### Job queue
+
+The Queue screen shows every background job (chunked transcription, correction, summary, rediarize, voice match) with live progress. Chunked transcriptions support cancel, resume, and retry-failed-chunks; LLM jobs support rerun and auto-retry on transient failures. Finished jobs can be dismissed one at a time or bulk-cleared without touching the underlying transcripts.
+
+### Accounts and admin
+
+Sessions are cookie-based and the signing secret is generated on first launch and stored in the data directory, so there's no `SECRET_KEY` to configure. Each user's transcripts, settings, and provider keys are isolated.
+
+The first registered user is the admin. Admins can list users, promote or demote other admins, and generate one-time password-reset tokens to hand to a locked-out user (there's no email flow; you share the token yourself). If the admin is the one locked out, `scripts/reset_password.py` resets any password directly against the database from the command line.
+
+---
+
+## Configuration
+
+### Environment variables
+
+All optional. The app runs with none of them set.
+
+| Variable | Purpose | Default |
+|----------|---------|---------|
+| `PORT` | Port to bind | `9781` |
+| `WHISPERDESK_DATA_DIR` | Where the SQLite DB, uploads, and session secret live (`WHISPERDECK_DATA_DIR` also accepted) | `./data` |
+| `HUGGINGFACE_TOKEN` | pyannote model access, needed for ML diarization | unset |
+| `FFMPEG_DIR` | Directory containing ffmpeg, if it's not on PATH | use PATH |
+| `WHISPER_CACHE_DIR` | faster-whisper model cache | `~/.cache/whisper` |
+
+There is no `DATABASE_URL`: storage is always local SQLite under the data directory.
+
+### Provider API keys
+
+Paste them in the web UI under **Settings → Providers**. Prefixes are validated on input: Groq `gsk_`, OpenAI `sk-`, Replicate `r8_`, OpenRouter `sk-or-`.
+
+---
+
+## API
+
+The web UI is a single-page app talking to a JSON API, and everything it does you can script. Two things to know before calling it from code:
+
+1. **Authenticate first.** `POST /api/login` (or `/api/register`) sets a session cookie; send it on subsequent requests.
+2. **CSRF on mutations.** State-changing endpoints (settings, provider config, admin actions, password reset) require an `X-CSRF-Token` header. Fetch a token from `GET /api/csrf-token`.
+
+| Area | Endpoints |
+|------|-----------|
+| Auth | `POST /api/register`, `/api/login`, `/api/logout` · `GET /api/me`, `/api/csrf-token` |
+| Account recovery | `POST /api/forgot-username` (lists usernames), `/api/forgot-password` (admin: mint reset token), `/api/reset-password` |
+| Admin | `GET /api/admin/users` · `POST /api/admin/promote`, `/api/admin/demote` |
+| Settings | `GET`/`PUT /api/settings` |
+| Providers | `GET /api/providers`, `/api/providers/{name}`, `/api/providers/{name}/models` · `PUT /api/providers/{name}` |
+| Transcription | `POST /api/transcribe` · `GET /api/transcripts` · `GET`/`PATCH`/`DELETE /api/transcripts/{id}` · `GET .../audio` · `POST .../retranscribe`, `.../cancel`, `.../resume`, `.../retry-failed-chunks` |
+| Transcript tools | `POST .../correct`, `.../summarize`, `.../rediarize`, `.../voice-match`, `.../context` (attach hotword-source doc) · `GET .../summary` |
+| Run history | `GET .../runs/{kind}`, `GET .../versions` |
+| Speakers | `POST .../speakers/rename`, `.../segments/retag`, `.../enroll-speaker` · `POST /api/diarize` (standalone) |
+| Jobs | `GET /api/jobs` · `POST /api/jobs/{id}/cancel`, `.../rerun`, `.../dismiss` · `POST /api/jobs/clear` |
+| Voices | `GET /api/voices` · `POST /api/voices/enroll`, `/api/voices/identify` · `POST /api/voices/{id}/clips` · `GET .../clips/{clip_id}/audio` · `DELETE /api/voices/{id}`, `.../clips/{clip_id}` |
+| Hotwords | `GET`/`POST /api/hotwords` · `DELETE /api/hotwords/{id}` |
+| Meta | `GET /api/health`, `/api/status` |
+
+(`...` abbreviates `/api/transcripts/{id}` or `/api/voices/{id}`.)
 
 ---
 
@@ -130,159 +162,79 @@ Every long-running operation — chunked transcription, correction, summarizatio
 
 ```
 whisperdeck/
-├── app.py                 # FastAPI entry point, all routes
-├── run.bat                # Windows launcher (auto-detects .venv)
-├── requirements.txt       # Core dependencies
-├── requirements-diarization.txt  # Optional pyannote deps
-├── INSTALL.md             # Detailed setup guide
-├── backends/              # Transcription provider implementations
-│   ├── __init__.py        # Registry & factory
-│   ├── base.py            # BaseProvider abstract class
-│   ├── moonshine.py       # Local Moonshine (default)
-│   ├── builtin.py         # faster-whisper wrapper
-│   ├── groq.py            # Groq API
-│   ├── openai.py          # OpenAI API
-│   ├── replicate.py       # Replicate API
-│   ├── openrouter.py      # OpenRouter API
-│   └── local.py           # OpenAI-compatible local endpoint
+├── app.py                        # FastAPI entry point, all routes
+├── run.bat                       # Windows launcher (auto-detects .venv)
+├── requirements.txt              # Core deps (includes Moonshine)
+├── requirements-diarization.txt  # Optional pyannote extras
+├── requirements-browser.txt      # Optional Playwright e2e test extras
+├── backends/                     # Transcription providers
+│   ├── __init__.py               # Registry & factory
+│   ├── base.py                   # BaseProvider abstract class
+│   ├── moonshine.py              # Local Moonshine (default)
+│   ├── builtin.py                # faster-whisper wrapper
+│   └── groq.py / openai.py / replicate.py / openrouter.py / local.py
 ├── services/
-│   ├── audio_prep.py      # ffmpeg transcoding, chunking
-│   ├── auth.py            # PBKDF2 password hashing, sessions
-│   ├── correction.py       # LLM transcript correction
-│   ├── diarization.py     # Heuristic + pyannote diarization
-│   ├── hotwords.py        # Custom vocabulary boosting
-│   ├── llm_jobs.py        # Correction/summary/rediarize/voice-match jobs
-│   ├── model_catalog.py   # Curated LLM model lists with live pricing
-│   ├── queue.py           # Chunked-transcription background job queue
-│   ├── settings.py        # Per-user settings
-│   ├── transcription.py   # Inline (non-chunked) transcription pipeline
-│   └── voice_id.py        # Voice enrollment & identification
-├── database/
-│   └── __init__.py        # SQLAlchemy models (User, Transcript, LlmJob, VoiceProfile, etc.)
-└── static/                # Web UI (vanilla JS + HTML, no template engine)
-    ├── index.html
-    ├── rack.css
-    └── rack.js
+│   ├── audio_prep.py             # ffmpeg transcoding, chunking
+│   ├── auth.py                   # Password hashing, sessions, reset tokens, admin
+│   ├── correction.py             # LLM transcript correction + context extraction
+│   ├── diarization.py            # Heuristic + pyannote diarization
+│   ├── hotwords.py               # Per-user glossary (feeds the correction pass)
+│   ├── llm_jobs.py               # Correction/summary/rediarize/voice-match jobs
+│   ├── model_catalog.py          # Curated LLM model lists with pricing
+│   ├── queue.py                  # Chunked-transcription job queue
+│   ├── settings.py               # Per-user settings
+│   ├── transcription.py          # Inline (non-chunked) transcription
+│   └── voice_id.py               # Voice enrollment & identification
+├── database/__init__.py          # SQLAlchemy models
+├── static/                       # Web UI (vanilla JS + HTML, no framework)
+├── scripts/                      # build_release.ps1, reset_password.py, dev helpers
+└── tests/                        # pytest suite; tests/e2e/ needs Playwright
 ```
-
----
-
-## Configuration
-
-### Environment Variables
-
-| Variable | Purpose | Required |
-|----------|---------|----------|
-| `HUGGINGFACE_TOKEN` | pyannote model access | For ML diarization |
-| `PORT` | Override the bound port (default `9781`) | No |
-| `WHISPERDESK_DATA_DIR` | Override where the SQLite DB and uploaded audio are stored | No (defaults to `./data`) |
-| `FFMPEG_DIR` | Point at a specific ffmpeg install instead of relying on PATH | No |
-| `WHISPER_CACHE_DIR` | Override the faster-whisper model cache dir (default `~/.cache/whisper`) | No |
-
-There's no `DATABASE_URL` or `SECRET_KEY` — storage is always local SQLite under the data dir above, and the session-signing secret is generated once and saved to disk (see Authentication).
-
-### Provider API Keys
-
-Set in the web UI: **Settings → Providers** → paste key per provider.
-
-Key prefixes (validated on input):
-- Groq: `gsk_`
-- OpenAI: `sk-`
-- Replicate: `r8_`
-- OpenRouter: `sk-or-`
-
----
-
-## API Endpoints
-
-| Method | Path | Description |
-|--------|------|-------------|
-| `GET` | `/` | Web UI |
-| `GET` | `/api/health` | Provider/diarization status |
-| `GET` | `/api/status` | App status |
-| `POST` | `/api/register` | Create an account |
-| `POST` | `/api/login` | Log in |
-| `POST` | `/api/logout` | Log out |
-| `GET` | `/api/me` | Current user |
-| `GET`/`PUT` | `/api/settings` | Per-user settings |
-| `GET` | `/api/providers` | List providers |
-| `GET` | `/api/providers/{name}` | Provider detail |
-| `GET` | `/api/providers/{name}/models` | Provider's available models |
-| `PUT` | `/api/providers/{name}` | Save provider API key/config |
-| `GET` | `/api/correction-models/{provider}` | LLM models available for correction/summary |
-| `POST` | `/api/transcribe` | Start transcription (chunked if long) |
-| `GET` | `/api/transcripts` | List transcripts |
-| `GET`/`DELETE` | `/api/transcripts/{id}` | Get/delete a transcript |
-| `GET` | `/api/transcripts/{id}/audio` | Stream stored audio |
-| `GET` | `/api/transcripts/{id}/summary` | Get generated summary |
-| `POST` | `/api/transcripts/{id}/summarize` | Enqueue a summary job |
-| `POST` | `/api/transcripts/{id}/correct` | Enqueue a correction job |
-| `POST` | `/api/transcripts/{id}/rediarize` | Enqueue a re-diarization job |
-| `POST` | `/api/transcripts/{id}/voice-match` | Enqueue a voice-match job |
-| `POST` | `/api/transcripts/{id}/retranscribe` | Re-run transcription with a different provider/model |
-| `POST` | `/api/transcripts/{id}/cancel`/`resume` | Cancel/resume a chunked transcription in progress |
-| `POST` | `/api/transcripts/{id}/retry-failed-chunks` | Retry failed chunks |
-| `POST` | `/api/transcripts/{id}/context` | Attach a context document (hotword extraction source) |
-| `POST` | `/api/transcripts/{id}/speakers/rename` | Rename a speaker label |
-| `POST` | `/api/transcripts/{id}/segments/retag` | Reassign a segment's speaker |
-| `POST` | `/api/transcripts/{id}/enroll-speaker` | Enroll a speaker directly from a transcript segment |
-| `POST` | `/api/diarize` | Standalone diarization on an audio file |
-| `GET` | `/api/jobs` | Master job queue list |
-| `POST` | `/api/jobs/{id}/cancel`/`rerun`/`dismiss` | Manage an individual job |
-| `POST` | `/api/jobs/clear` | Bulk-clear all finished jobs |
-| `GET`/`POST` | `/api/voices` / `/api/voices/enroll` | List / enroll voice profiles |
-| `POST` | `/api/voices/identify` | Identify a speaker from a clip |
-| `POST` | `/api/voices/{id}/clips` | Add a clip to a roster profile |
-| `GET` | `/api/voices/{id}/clips/{clip_id}/audio` | Stream a roster clip |
-| `DELETE` | `/api/voices/{id}` / `/api/voices/{id}/clips/{clip_id}` | Delete a profile / clip |
-| `GET`/`POST`/`DELETE` | `/api/hotwords` / `/api/hotwords/{id}` | Manage custom vocabulary |
 
 ---
 
 ## Development
 
-### Run Tests
+Run the tests:
+
 ```bash
-.venv\Scripts\python.exe -m pytest
+.venv\Scripts\python.exe -m pytest              # unit/API tests, no browser needed
+.venv\Scripts\python.exe -m pytest tests/e2e -m e2e   # real-browser tests (see INSTALL.md §7)
 ```
 
-### Code Style
-- Type hints throughout
-- Async/await for I/O
-- Services are stateless functions/classes (no FastAPI deps)
-- Providers implement `BaseProvider` interface
+Adding a transcription provider:
 
-### Adding a Provider
-1. Create `backends/newprovider.py` subclassing `BaseProvider`
-2. Implement `transcribe()`, `check_health()`, `list_models()`
-3. Register in `backends/__init__.py`'s `PROVIDER_REGISTRY`
-4. Add metadata to `list_providers()`
+1. Create `backends/newprovider.py` subclassing `BaseProvider`; implement `transcribe()`, `check_health()`, `list_models()`.
+2. Register it in `PROVIDER_REGISTRY` in `backends/__init__.py` and add its metadata to `list_providers()`.
+
+Conventions: type hints throughout, async for I/O, services stay framework-free (no FastAPI imports), providers only talk through the `BaseProvider` interface.
+
+The feature roadmap and known accepted gaps live in [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ---
 
 ## Troubleshooting
 
-| Issue | Fix |
-|-------|-----|
-| `ffmpeg not found` | Install ffmpeg and restart terminal, or set `FFMPEG_DIR` |
-| `moonshine-voice not installed` | `pip install moonshine-voice` (in requirements.txt) |
-| `pyannote import fails` | `pip install -r requirements-diarization.txt` + set `HUGGINGFACE_TOKEN` |
-| `CUDA out of memory` | Use smaller model or CPU-only torch |
-| `Port 9781 in use` | Set the `PORT` env var or kill the existing process |
-| `Database locked` | Ensure only one app instance runs; SQLite doesn't support concurrent writers |
+| Symptom | Fix |
+|---------|-----|
+| `ffmpeg not found` | Install ffmpeg and open a new terminal, or set `FFMPEG_DIR` |
+| `moonshine-voice not installed` | `pip install -r requirements.txt` (it's a core dep) |
+| pyannote import fails | `pip install -r requirements-diarization.txt` and set `HUGGINGFACE_TOKEN` |
+| `CUDA out of memory` | Pick a smaller model, or use CPU-only torch |
+| Port 9781 in use | Set `PORT`, or stop the other instance |
+| `Database locked` | Run only one app instance; SQLite has a single writer |
+| Admin locked out | `python scripts/reset_password.py --username <name> --new-password <pass>` |
 
 ---
 
 ## License
 
-[Hippocratic License 3.0](LICENSE.md) (base terms, no additional modules) — permissive like MIT for intellectual property, with an added condition that Licensee not use the software to violate fundamental human rights (no genocide, slavery, torture, discrimination, forced labor, union-busting, etc. — see [firstdonoharm.dev](https://firstdonoharm.dev/) for the full rationale). Not OSI-approved (it restricts fields of use), so some organizations' legal teams won't touch it.
-
----
+[Hippocratic License 3.0](LICENSE.md), base terms with no additional modules. Permissive like MIT for intellectual property, plus a condition that the software not be used to violate fundamental human rights (see [firstdonoharm.dev](https://firstdonoharm.dev/)). It is not OSI-approved because it restricts fields of use, and some organizations' legal teams won't touch it; know that before depending on it commercially.
 
 ## Acknowledgments
 
-- [Moonshine](https://github.com/usefulsensors/moonshine) — tiny, fast on-device ASR
-- [pyannote.audio](https://github.com/pyannote/pyannote-audio) — state-of-the-art speaker diarization
-- [faster-whisper](https://github.com/SYSTRAN/faster-whisper) — optimized Whisper inference
-- [Groq](https://groq.com/), [OpenAI](https://openai.com/), [Replicate](https://replicate.com/), [OpenRouter](https://openrouter.ai/) — cloud inference providers
-- [FastAPI](https://fastapi.tiangolo.com/), [SQLAlchemy](https://www.sqlalchemy.org/), [httpx](https://www.python-httpx.org/) — core framework deps
+- [Moonshine](https://github.com/usefulsensors/moonshine): tiny, fast on-device ASR
+- [pyannote.audio](https://github.com/pyannote/pyannote-audio): ML speaker diarization
+- [faster-whisper](https://github.com/SYSTRAN/faster-whisper): optimized Whisper inference
+- [Groq](https://groq.com/), [OpenAI](https://openai.com/), [Replicate](https://replicate.com/), [OpenRouter](https://openrouter.ai/): cloud inference
+- [FastAPI](https://fastapi.tiangolo.com/), [SQLAlchemy](https://www.sqlalchemy.org/), [httpx](https://www.python-httpx.org/): core framework
