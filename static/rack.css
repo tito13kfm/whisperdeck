@@ -189,7 +189,7 @@ button.unit:hover { border-color: var(--dash); }
 .rail-btn.active .led { background: var(--amber); box-shadow: 0 0 5px var(--amber); }
 .rail-btn.active .lbl { color: var(--label); }
 .rail-foot { margin-top: auto; display: flex; flex-direction: column; gap: 7px; padding: 0 8px; }
-.rail-foot .row { display: flex; justify-content: space-between; font-family: var(--f-mono); font-size: 9.5px; color: var(--label-dim); text-transform: uppercase; letter-spacing: 0.08em; }
+.rail-foot .row { display: flex; justify-content: space-between; font-family: var(--f-mono); font-size: 10.5px; color: var(--label-dim); text-transform: uppercase; letter-spacing: 0.08em; }
 
 .main-col { flex: 1; min-width: 0; display: flex; justify-content: center; }
 .content {

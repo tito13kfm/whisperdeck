@@ -512,8 +512,7 @@ async function submitAuth(ev) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ username, password }),
     });
-    $('auth-led').style.background = GREEN;
-    $('auth-led').style.boxShadow = '0 0 5px ' + GREEN;
+    $('auth-led').classList.add('ok');
     await refreshCsrfToken();
     await checkAuth();
   } catch (e) {
@@ -539,7 +538,7 @@ function transcriptMeta(t) {
   if (t.duration_seconds != null) parts.push(formatDur(t.duration_seconds));
   if (sv.word === 'done' && t.speaker_count) parts.push(t.speaker_count + ' speakers');
   if (sv.word === 'running') parts.push('transcribing…');
-  if (sv.word === 'working') parts.push('processing' + (t.duration_seconds ? ' ' + Math.round(t.duration_seconds / 60) + '-min recording' : '') + ' — no section data on this run');
+  if (sv.word === 'working') parts.push('transcribing a ' + (t.duration_seconds ? Math.round(t.duration_seconds / 60) + '-min ' : '') + 'recording — running as one block');
   if (sv.word === 'waiting') parts.push('rate-limited — waiting');
   if (sv.word === 'queued') parts.push('awaiting turn');
   if (sv.word === 'failed' && t.error) parts.push(t.error);
@@ -1873,8 +1872,8 @@ function segmentsHtml(t) {
     .map((sg, i) => ({ sg, i }))
     .filter(({ sg }) => !q || (sg.text || '').toLowerCase().includes(q) || (sg.speaker || '').toLowerCase().includes(q));
   if (!segs.length) {
-    return '<div style="padding:30px;text-align:center;font-family:var(--f-mono);font-size:11px;color:var(--label-dim)">' +
-      (q ? 'NO SEGMENTS MATCH — CLEAR THE SEARCH OR CHECK JOB STATUS' : 'NO SEGMENTS YET — CHECK JOB STATUS') + '</div>';
+    return '<div class="empty-unit">' +
+      (q ? 'No segments match — clear the search or check job status' : 'No segments yet — check job status') + '</div>';
   }
   const segBtn = 'background:none;border:1px solid var(--inset-edge);border-radius:3px;width:24px;height:22px;cursor:pointer;font-size:10px;padding:0;flex-shrink:0';
   return segs.map(({ sg, i }) => {
@@ -2395,7 +2394,7 @@ function renderDetail() {
     extraActs.push('<button class="btn" style="font-size:12px;padding:7px 14px;border-color:var(--inset-edge)" data-dact="resume">Resume</button>');
 
   root.innerHTML = `
-    <div class="page-head" style="gap:14px">
+    <div class="page-head page-head--with-actions">
       <h1 class="t-title" style="min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(t.title || t.filename || 'Untitled')}</h1>
       <div style="display:flex;gap:8px;flex-shrink:0">
         ${extraActs.join('')}
@@ -2904,7 +2903,7 @@ function openEnrollModal() {
         <button id="enroll-file-btn" style="font-family:var(--f-mono);font-size:11px;background:var(--panel-lo);border:1px dashed var(--dash);color:var(--label-dim);padding:12px;border-radius:2px;cursor:pointer">Choose an audio file…</button>
       </div>
     </div>
-    <div style="font-size:12px;line-height:1.5;color:${AMBER};margin-bottom:16px">Enrolling saves this voice to the shared roster — future diarized transcripts will auto-name matching speakers.</div>
+    <div class="modal-callout">Enrolling saves this voice to the shared roster — future diarized transcripts will auto-name matching speakers.</div>
     <div class="modal-actions">
       <button id="enroll-cancel" class="btn btn--ghost btn--sm">Cancel</button>
       <button id="enroll-go" class="btn btn--amber btn--sm">Enroll to roster</button>
