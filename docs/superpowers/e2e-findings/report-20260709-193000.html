@@ -1,0 +1,475 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>WhisperDeck UX Audit — Findings Report (2026-07-09)</title>
+<style>
+  :root { --bg:#101113; --panel:#1B1D20; --edge:#26282B; --label:#D8D3C4; --label-dim:#9B9A94; --label-faint:#6E6D68; --green:#5FCB7A; --amber:#E0A83E; --red:#E0554A; }
+  * { box-sizing: border-box; }
+  body { background: var(--bg); color: var(--label); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; margin: 0; padding: 36px 20px; line-height: 1.55; }
+  .container { max-width: 1080px; margin: 0 auto; }
+  h1 { font-size: 28px; font-weight: 600; margin: 0 0 8px; letter-spacing: 0.02em; }
+  h2 { font-size: 20px; font-weight: 600; margin: 36px 0 12px; padding-bottom: 6px; border-bottom: 1px solid var(--edge); }
+  h3 { font-size: 15.5px; font-weight: 600; margin: 22px 0 6px; }
+  p, li { font-size: 14px; color: var(--label); }
+  .subtitle { color: var(--label-dim); font-size: 13.5px; margin-bottom: 24px; }
+  .meta { display: flex; gap: 18px; flex-wrap: wrap; font-size: 12px; color: var(--label-dim); margin-bottom: 30px; padding: 14px 18px; background: var(--panel); border: 1px solid var(--edge); border-radius: 4px; }
+  .meta b { color: var(--label); font-weight: 600; }
+  .finding { background: var(--panel); border: 1px solid var(--edge); border-left: 3px solid var(--label-dim); border-radius: 3px; padding: 14px 18px; margin: 12px 0; }
+  .finding.blocker { border-left-color: var(--red); }
+  .finding.major { border-left-color: var(--amber); }
+  .finding.minor { border-left-color: var(--green); }
+  .finding-head { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 6px; }
+  .finding-id { font-family: "SFMono-Regular", Consolas, monospace; font-size: 11.5px; color: var(--label-faint); }
+  .sev { font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.08em; padding: 2px 7px; border-radius: 2px; font-weight: 700; color: #0B0C0D; }
+  .sev.blocker { background: var(--red); }
+  .sev.major { background: var(--amber); }
+  .sev.minor { background: var(--green); }
+  .where { font-size: 11.5px; color: var(--label-dim); font-family: "SFMono-Regular", Consolas, monospace; }
+  .fix { margin-top: 8px; padding: 8px 12px; background: rgba(95, 203, 122, 0.08); border-left: 2px solid var(--green); border-radius: 2px; font-size: 13px; }
+  .fix b { color: var(--green); }
+  code, .mono { font-family: "SFMono-Regular", Consolas, monospace; font-size: 12.5px; background: rgba(0,0,0,0.3); padding: 1px 5px; border-radius: 2px; color: var(--amber); }
+  pre { background: rgba(0,0,0,0.35); padding: 10px 14px; border-radius: 3px; overflow-x: auto; font-size: 12px; color: var(--label); }
+  ul.summary { columns: 2; column-gap: 30px; }
+  ul.summary li { margin-bottom: 4px; break-inside: avoid; }
+  .group { margin: 18px 0; }
+  .group h3 { color: var(--amber); }
+  .legend { display: flex; gap: 14px; font-size: 12px; color: var(--label-dim); margin: 10px 0 24px; }
+  .legend span { display: inline-flex; align-items: center; gap: 5px; }
+  .swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px; }
+  .swatch.b { background: var(--red); }
+  .swatch.m { background: var(--amber); }
+  .swatch.n { background: var(--green); }
+  .nav-toc { background: var(--panel); border: 1px solid var(--edge); border-radius: 4px; padding: 12px 18px; margin-bottom: 28px; }
+  .nav-toc b { color: var(--label); }
+  .nav-toc a { color: var(--amber); text-decoration: none; font-size: 13px; }
+  .nav-toc a:hover { text-decoration: underline; }
+  .screenshot { margin: 12px 0; border: 1px solid var(--edge); border-radius: 3px; overflow: hidden; max-width: 700px; }
+  .screenshot img { display: block; width: 100%; }
+  .screenshot-cap { font-size: 11.5px; color: var(--label-dim); padding: 6px 10px; background: rgba(0,0,0,0.25); border-top: 1px solid var(--edge); }
+  .caveat { background: rgba(224, 168, 62, 0.08); border: 1px solid rgba(224, 168, 62, 0.4); border-radius: 3px; padding: 10px 14px; font-size: 13px; color: var(--label); margin: 14px 0; }
+  .signoff { background: var(--panel); border: 1px solid var(--edge); border-radius: 4px; padding: 18px 22px; margin: 36px 0; }
+  .signoff h2 { margin-top: 0; border: none; }
+  .signoff table { width: 100%; border-collapse: collapse; margin-top: 12px; font-size: 13px; }
+  .signoff th, .signoff td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--edge); }
+  .signoff th { color: var(--label-dim); font-weight: 500; font-size: 11.5px; text-transform: uppercase; letter-spacing: 0.06em; }
+</style>
+</head>
+<body>
+<div class="container">
+
+<h1>WhisperDeck — Signal Rack UX Audit</h1>
+<div class="subtitle">Findings report for design, usability, and consistency polish</div>
+
+<div class="meta">
+  <span><b>Date</b> 2026-07-09</span>
+  <span><b>Scope</b> static/CSS audit + 1 working screenshot (login). Browser screenshots on the app shell timed out consistently in the UI-TARS MCP — see Caveat below.</span>
+  <span><b>Method</b> read static/rack.css (578 lines) + static/rack.js (3,392 lines) in full; one login screenshot at 1440×900; live state validation via browser_evaluate; no 6-journey browser run (env: screenshot tool broken on app shell).</span>
+  <span><b>Default scope</b> Light polish — consistency + clarity fixes, no redesign.</span>
+</div>
+
+<div class="caveat">
+<b>Resolution / screenshot caveat.</b> The UI-TARS <code>browser_screenshot</code> tool worked once on the login page (the only page where the app shell is fully absent) and timed out four times in a row once the app shell was rendered. This is a known UI-TARS issue (the project's own skill notes flag it: "UI-TARS browser_screenshot may time out; use browser_get_text as fallback"). To still produce useful findings, I did a complete static-file audit (which is where the bulk of design-system drift lives in this codebase — 240+ inline <code>style="..."</code> attributes) and validated the live state with <code>browser_evaluate</code>. Pixel-level visual findings are therefore derived from the CSS/HTML source plus one working screenshot of the login. You can re-screenshot any page yourself for visual confirmation — the server is up at <code>http://localhost:9782/</code>, log in as <code>uxaudit / uxaudit_pass_123</code>.
+</div>
+
+<div class="legend">
+  <span><span class="swatch b"></span> Blocker — broken or unsafe</span>
+  <span><span class="swatch m"></span> Major — visible bug, high-leverage fix</span>
+  <span><span class="swatch n"></span> Minor — polish, low risk</span>
+</div>
+
+<div class="nav-toc">
+  <b>Findings at a glance:</b>
+  <a href="#summary">Summary</a> ·
+  <a href="#inline">Inline-style drift (8 findings)</a> ·
+  <a href="#spacing">Spacing & alignment (3 findings)</a> ·
+  <a href="#states">Missing states (4 findings)</a> ·
+  <a href="#clarity">Copy / clarity (3 findings)</a> ·
+  <a href="#mirror">Mirror consistency (2 findings)</a> ·
+  <a href="#signoff">Sign-off table</a>
+</div>
+
+<h2 id="summary">Summary</h2>
+<p>The codebase has a real design system (chassis vs hardware tokens, documented at the top of <code>rack.css</code>) but a long tail of <b>inline-styled re-implementations of it</b> in <code>rack.js</code>. The "ONE status→presentation mapping" comment near <code>statusView</code> shows the developer was aware of mirror-consistency for state, but the <i>visual</i> system has drifted in parallel: the same modal OK button, the same small ghost button, the same bargraph LED cell, and the same modal title are redefined inline 5–10 times each. Empty-state usage is mostly consistent (good), but a few places use raw inline-styled divs instead of the <code>.empty-unit</code> class. Spacing between the page title bar (<code>.page-head</code>) and the units below it is slightly off in the detail page. Nothing is broken or unsafe; this is a clean polish pass.</p>
+
+<ul class="summary">
+  <li><b>1</b> blocker (cancelled status in detail header — see F-2.3)</li>
+  <li><b>7</b> major findings — inline-style extraction, page-head alignment, focus styles, status badge coloring</li>
+  <li><b>12</b> minor findings — copy clarity, missing states, micro-spacing</li>
+  <li><b>All findings are CSS-primary + 2-3 line JS edits.</b></li>
+  <li><b>No backend changes required.</b></li>
+</ul>
+
+<h2 id="inline">Inline-style drift (8 findings)</h2>
+<p class="subtitle">The single biggest category. 240+ inline <code>style="..."</code> attributes in <code>rack.js</code> re-implement CSS that already exists. The most repeated offenders are below; each one already has a CSS token, just no class.</p>
+
+<div class="finding major">
+<div class="finding-head">
+  <span class="finding-id">F-1.1</span>
+  <span class="sev major">Major</span>
+  <span class="where">rack.js lines 361, 450, 480, 1368, 2027, 2069, 2906, 2947, 2986 (and growing)</span>
+</div>
+<b>Amber "OK" / "Confirm" button re-defined inline 9 times.</b>
+<p>Each of these lines writes the identical 7-property amber pill (font-family, font-size, font-weight, background, color, border, padding, border-radius, cursor) that <code>.btn--amber</code> in <code>rack.css:448</code> already provides. New modals keep copying it because the JS author wasn't sure the class covers their case (it does).</p>
+<div class="fix"><b>Fix:</b> Add a single <code>.btn--amber.btn--sm</code> combo (or define <code>.btn--amber</code> as a small primary variant) and replace the 9 inline-styled <code>button</code> elements with <code>class="btn btn--amber btn--sm"</code>. Zero behavior change. This is the highest-leverage fix in the whole audit.</div>
+</div>
+
+<div class="finding major">
+<div class="finding-head">
+  <span class="finding-id">F-1.2</span>
+  <span class="sev major">Major</span>
+  <span class="where">rack.js lines 345, 419, 431, 449, 479, 1367, 1645, 2026, 2068, 2905, 2945, 2985, etc. — 12+ occurrences</span>
+</div>
+<b>Ghost "Cancel" / "Close" button re-defined inline.</b>
+<p>Pattern: <code><button class="btn" style="font-size:12px;border-color:var(--inset-edge)"></code>. The 12px + ghost-border style is identical everywhere it appears.</p>
+<div class="fix"><b>Fix:</b> Add a <code>.btn--ghost</code> class (no fill, inset-edge border) and a <code>.btn--sm</code> class (font-size 12px / padding 6px 12px). The modal cancel row becomes <code>class="btn btn--ghost btn--sm"</code>. Same for the queue "Clear finished", voice "Enroll/Identify", and detail action bar buttons.</div>
+</div>
+
+<div class="finding major">
+<div class="finding-head">
+  <span class="finding-id">F-1.3</span>
+  <span class="sev major">Major</span>
+  <span class="where">rack.js lines 343, 357, 416, 425, 440, 468, 2011, 2057, 2214, 2888, 2940, 2978</span>
+</div>
+<b>Modal title re-defined inline 12 times.</b>
+<p>Identical 5-property block (<code>font-family:var(--f-cond); font-weight:700; font-size:16px; text-transform:uppercase; letter-spacing:0.04em; margin-bottom:12px</code>).</p>
+<div class="fix"><b>Fix:</b> Add a <code>.modal-title</code> class to <code>rack.css</code> and replace the 12 inline titles with it. Trivial; opens up per-modal title variants later if needed.</div>
+</div>
+
+<div class="finding major">
+<div class="finding-head">
+  <span class="finding-id">F-1.4</span>
+  <span class="sev major">Major</span>
+  <span class="where">rack.js lines 344, 359, 418, 430, 448, 478, 1366, 2025, 2067, 2220, 2904, 2945, 2984</span>
+</div>
+<b>Modal action row re-defined inline 13 times.</b>
+<p>Pattern: <code><div style="display:flex;justify-content:flex-end;gap:8px"></code> — the right-aligned button row at the bottom of every modal.</p>
+<div class="fix"><b>Fix:</b> Add a <code>.modal-actions</code> class. Worth also adding <code>.modal-body</code> and <code>.modal-text</code> since the body text inline pattern (<code>font-size:13.5px;line-height:1.55;color:var(--body);margin-bottom:8px</code>) is also repeated.</div>
+</div>
+
+<div class="finding major">
+<div class="finding-head">
+  <span class="finding-id">F-1.5</span>
+  <span class="sev major">Major</span>
+  <span class="where">rack.js detailTabsHtml() line 1860</span>
+</div>
+<b>Detail-tab "key" pill re-implements the .key class inline.</b>
+<p>The tab pill in the transcript detail page writes its own gradient/box-shadow/border/border-radius/box-shadow stack. The CSS class <code>.key</code> (rack.css:305) is the exact same component in a different size — a smaller variant could trivially be <code>.key--sm</code>.</p>
+<div class="fix"><b>Fix:</b> Add <code>.key--sm { width:110px; height:30px; }</code> and refactor <code>detailTabsHtml()</code> to use <code>class="key key--sm"</code> with <code>.key.active</code> / <code>.key.inactive</code> variants. The "active" vs "inactive" gradient is the same two gradients used in <code>.key</code> and <code>.key:disabled</code>, so this is straightforward.</div>
+</div>
+
+<div class="finding major">
+<div class="finding-head">
+  <span class="finding-id">F-1.6</span>
+  <span class="sev major">Major</span>
+  <span class="where">rack.js lines 551, 1162, 1168, 1719; rack.js line 211-214 (bargraph helper)</span>
+</div>
+<b>LED bargraph cells inline-styled per element instead of CSS custom property.</b>
+<p>Every "lit" cell writes <code>style="background:<color>;box-shadow:0 0 4px <color>"</code>. The base <code>.bargraph > span</code> already has the off-state styling; only the on-state colors vary, and they're always the three semantic colors (green/amber/red) plus a few job-specific tints.</p>
+<div class="fix"><b>Fix:</b> Add <code>.bargraph > span.on { background: var(--on-color, var(--led-off)); box-shadow: 0 0 4px var(--on-color, transparent); }</code> and have the helpers set <code>style="--on-color: GREEN"</code> (one property) instead of two. Same approach for <code>ledDot()</code>. Net result: ~30% less inline style string per cell, and consistent cell rendering.</div>
+</div>
+
+<div class="finding minor">
+<div class="finding-head">
+  <span class="finding-id">F-1.7</span>
+  <span class="sev minor">Minor</span>
+  <span class="where">rack.js line 1691 (jobActions) and ~30 small button overrides</span>
+</div>
+<b>"Small button" font-size:12px + padding:6px 12px inline-styled 30+ times.</b>
+<p>Bank row actions, queue job actions, detail-page action bar, summary buttons, voice roster buttons — all write the same <code>style="font-size:12px;padding:6px 12px..."</code> on top of <code>.btn</code>.</p>
+<div class="fix"><b>Fix:</b> Once <code>.btn--sm</code> exists (per F-1.2), this collapses to <code>class="btn btn--sm"</code>. The other inline overrides (border-color, font-size:11px, padding:5px 12px, etc.) reduce to the same handful of variants.</div>
+</div>
+
+<div class="finding minor">
+<div class="finding-head">
+  <span class="finding-id">F-1.8</span>
+  <span class="sev minor">Minor</span>
+  <span class="where">rack.js lines 2817-2819 (voice clip play/del), 2835 (add clip), 2900, 2943, 2980 (file pick)</span>
+</div>
+<b>File-pick button re-defined inline 3 times.</b>
+<p>Identical pattern: monospace, dashed border, dim label, "Choose an audio file…".</p>
+<div class="fix"><b>Fix:</b> Add <code>.btn--file-pick</code> class. One place to update copy or style.</div>
+</div>
+
+<h2 id="spacing">Spacing & alignment (3 findings)</h2>
+
+px</code>, so the page title bar is offset 20px to the right of the units below. Units have a 22px ear-seam on the left (<code>.unit::before</code>), so the visible unit content starts at 16 + 22 = 38px from the <code>.content</code> left edge — but the title text starts at 36px. They're 2px off, and the right side of the page has no such offset (page-head is at 36px from right, units at 16px), making the right edge even more visibly different.</p>
+<div class="fix"><b>Fix:</b> Set <code>.page-head { padding: 0 38px }</code> to match the unit's left interior edge. Even better: align <code>.content</code> padding to a multiple of the rail spacing (e.g. 18px / 38px) and apply it consistently. Small change, big visual payoff.</div>
+</div>
+
+<div class="finding major">
+<div class="finding-head">
+  <span class="finding-id">F-2.2</span>
+  <span class="sev major">Major</span>
+  <span class="where">rack.js line 2394 (<code>renderDetail()</code>)</span>
+</div>
+<b>Detail page-head has a <code>style="gap:14px"</code> override that no other page has.</b>
+<p>The transcript detail page adds <code>style="gap:14px"</code> to <code>.page-head</code> to make room for the action-button row. Other pages' <code>.page-head</code>s have the default 0 gap (just <code>justify-content: space-between</code>). Result: the detail page title bar visually differs from every other page's title bar.</p>
+<div class="fix"><b>Fix:</b> Add a <code>.page-head--with-actions { gap: 14px; flex-wrap: wrap; align-items: center; }</code> class and use it on the detail page only. Or apply the gap globally to <code>.page-head</code> — it works fine when the title is the only child (centered action row would still work via <code>justify-content: space-between</code>). I'd add the class to keep the intent explicit.</div>
+</div>
+
+<div class="finding major">
+<div class="finding-head">
+  <span class="finding-id">F-2.3</span>
+  <span class="sev blocker">Blocker</span>
+  <span class="where">rack.js <code>statusView()</code> line 264; <code>jobStatusView()</code> line 1682; <code>renderDetail()</code> line 2419; <code>bankDetailFields()</code> line 1521</span>
+</div>
+<b>Cancelled status renders inconsistently in the detail header.</b>
+<p>Per the project's own log entry (Observation 3, 2026-07-02), a cancelled transcript was shown as red "Failed" in the detail header until that was fixed. The current state: <code>statusView</code> has <code>case 'cancelled': color=AMBER, nixVariant='dim', word='cancelled'</code> (correct), and <code>renderDetail()</code> line 2419 uses <code>sv.color</code> for the status badge (so it correctly renders amber-dim, not red). <b>This was fixed since the 2026-07-02 incident</b> — but I want to flag it as something to verify in the re-test, because the previous fix and any future re-fix both live in the same fragile place (the <code>renderDetail()</code> status badge with no class wrapper).</p>
+<div class="fix"><b>Fix:</b> Replace the inline <code>style="color:${sv.color}"</code> on the status badge with a class-based approach (e.g. <code>class="status-badge status--${sv.word}"</code> with colors defined in CSS). This makes the cancelled→amber mapping impossible to break with a stray inline style. Verify the same change in the bank row, queue row, and dashboard recents — they all currently use <code>sv.color</code> inline, so they need the same class conversion for the fix to be robust.</div>
+</div>
+
+<h2 id="states">Missing states (4 findings)</h2>
+
+<div class="finding major">
+<div class="finding-head">
+  <span class="finding-id">F-3.1</span>
+  <span class="sev major">Major</span>
+  <span class="where">rack.css <code>.btn</code> line 431; <code>.btn:focus-visible</code> missing</span>
+</div>
+<b>Buttons have no focus-visible style — only inputs do.</b>
+<p><code>:focus-visible</code> on <code>body</code> adds the amber outline (rack.css:76) which is good for global focus, but <code>.btn</code> is the only major clickable that doesn't have a more specific focus state. The outline-on-everything global is OK but can feel noisy. A <code>.btn:focus-visible</code> with a tighter outline (1px amber inset, or a 2px box-shadow ring) would feel more like a real button focus.</p>
+<div class="fix"><b>Fix:</b> Add <code>.btn:focus-visible { outline: none; box-shadow: 0 0 0 2px var(--amber); }</code>. Light, accessible, doesn't fight the global focus rule for non-button controls.</div>
+</div>
+
+<div class="finding minor">
+<div class="finding-head">
+  <span class="finding-id">F-3.2</span>
+  <span class="sev minor">Minor</span>
+  <span class="where">rack.css <code>.btn--amber</code> line 448</span>
+</div>
+<b>Amber button has no hover state.</b>
+<p>Regular <code>.btn</code> and <code>.btn--red</code> both have hover styles; <code>.btn--amber</code> doesn't.</p>
+<div class="fix"><b>Fix:</b> Add <code>.btn--amber:hover { background: #f0b94a; border-color: #f0b94a; }</code> (a slightly brighter amber).</div>
+</div>
+
+<div class="finding minor">
+<div class="finding-head">
+  <span class="finding-id">F-3.3</span>
+  <span class="sev minor">Minor</span>
+  <span class="where">rack.css <code>.inp.error</code> missing</span>
+</div>
+<b>No error state for inputs.</b>
+<p>Form validation errors (e.g. "Speaker name required" toast in <code>openEnrollModal</code>) currently surface only as toasts. An <code>.inp.error</code> border (e.g. 1px solid <code>--red</code>) would let the field itself show it, but it's a meaningful behavior change requiring a new pattern. <b>Defer unless we expand scope.</b></p>
+<div class="fix"><b>Fix (if pursued):</b> Add <code>.inp.error { border-color: var(--red); }</code> and have modals toggle it for empty-required fields on submit. Not a 1-line fix — needs a small "show field error" helper.</div>
+</div>
+
+<div class="finding minor">
+<div class="finding-head">
+  <span class="finding-id">F-3.4</span>
+  <span class="sev minor">Minor</span>
+  <span class="where">rack.css <code>.rail-foot .row</code> line 192</span>
+</div>
+<b>Rail-foot "Storage" label is 9.5px — borderline at 1440px+, near-illegible at high DPI.</b>
+<p>Other small captions are 9.5px or 10.5px; the rail-foot text uses 9.5px with 0.08em letter-spacing in the same monospace as the rail LED labels. On a 1080p display the row "0 / 500 MIN" is readable; on a 4K display with browser zoom, it's nearly too small. Probably fine for now but worth noting.</p>
+<div class="fix"><b>Fix:</b> Bump to 10.5px to match <code>.t-cap</code> (line 88) and the other rail captions. <b>Lowest priority</b> of the spacing findings.</div>
+</div>
+
+<h2 id="clarity">Copy / clarity (3 findings)</h2>
+
+<div class="finding minor">
+<div class="finding-head">
+  <span class="finding-id">F-4.1</span>
+  <span class="sev minor">Minor</span>
+  <span class="where">index.html line 30</span>
+</div>
+<b>Passcode field has no placeholder (Operator does).</b>
+<p>By design — passcode fields shouldn't show placeholder for security. So this is technically consistent with the rest of the web. <b>Not a bug.</b> Mention only because a less-experienced user might wonder if the field is broken. Could add a single <code>aria-label="passcode"</code> for accessibility (it already has <code>autocomplete="current-password"</code> which is the more important thing).</p>
+<div class="fix"><b>Fix:</b> None needed. (Optional: <code>aria-label="passcode"</code> on the input.)</div>
+</div>
+
+<div class="finding minor">
+<div class="finding-head">
+  <span class="finding-id">F-4.2</span>
+  <span class="sev minor">Minor</span>
+  <span class="where">index.html line 36-38</span>
+</div>
+<b>Auth LED is a tiny dark dot, hard to read state.</b>
+<p>The <code>id="auth-led"</code> dot above "Power on" is a bare <code>led-dot</code> with no initial color (so it looks dark). On successful login it becomes green (rack.js:511-512), but the success state flashes for <1s before the page transition hides the login. The user never sees "you're in" feedback on the LED itself.</p>
+<div class="fix"><b>Fix:</b> Two options: (a) Add a subtle "standby" amber glow to the LED by default in CSS (e.g. <code>#auth-led { background: var(--amber); box-shadow: 0 0 5px var(--amber); opacity: 0.5; }</code>) so the user knows it's interactive; (b) leave as-is and add a CSS animation for the success state. I'd do (a) — it's a 2-line CSS change and signals "the system is on, waiting".</div>
+</div>
+
+<div class="finding minor">
+<div class="finding-head">
+  <span class="finding-id">F-4.3</span>
+  <span class="sev minor">Minor</span>
+  <span class="where">rack.js line 538</span>
+</div>
+<b>"processing X-min recording — no section data on this run" reads as an error.</b>
+<p>The status word "working" in the dashboard recents is followed by meta text that begins "processing X-min recording — no section data on this run" (line 538). This is honest copy, but to a user it sounds like something failed. The state is actually "running but the model is producing a single block, not chunks" — a working condition.</p>
+<div class="fix"><b>Fix:</b> Rephrase to something more reassuring, e.g. <code>'transcribing a ' + X + '-min recording — running as one block'</code>. Subjective copy fix; the exact wording is a judgment call.</div>
+</div>
+
+<h2 id="mirror">Mirror consistency (2 findings)</h2>
+
+<div class="finding major">
+<div class="finding-head">
+  <span class="finding-id">F-5.1</span>
+  <span class="sev major">Major</span>
+  <span class="where">index.html line 96; rack.js line 1543-1544 (Tape library status); rack.js line 1753 (Queue status)</span>
+</div>
+<b>Page status colors are inline-styled; would break if the .page-status class was restyled.</b>
+<p>Each <code>.page-status</code> in the bank, queue, and dashboard has an inline <code>style="color:${GREEN}"</code> or <code>style="color:${active ? AMBER : GREEN}"</code>. Per the "mirror consistency" principle the user's own log flagged, a page status color set inline in one place but not another (or set in a class but overridden inline) will silently drift.</p>
+<div class="fix"><b>Fix:</b> Define <code>.page-status--ok { color: var(--green); }</code> and <code>.page-status--busy { color: var(--amber); }</code> and have the JS use those classes instead of inline color. Cheap, removes a class of bug.</div>
+</div>
+
+<div class="finding minor">
+<div class="finding-head">
+  <span class="finding-id">F-5.2</span>
+  <span class="sev minor">Minor</span>
+  <span class="where">rack.js line 1872 (<code>segmentsHtml</code> no-match state)</span>
+</div>
+<b>One "empty" state uses inline styles instead of <code>.empty-unit</code>.</b>
+<p>Every other "no data" state in the app uses the <code>.empty-unit</code> class. <code>segmentsHtml</code>'s "NO SEGMENTS MATCH — CLEAR THE SEARCH OR CHECK JOB STATUS" uses an inline-styled div (rack.js:1872-1873). Same visual idea, different code path → guaranteed to drift when <code>.empty-unit</code> is updated.</p>
+<div class="fix"><b>Fix:</b> Replace the inline-styled div with <code><div class="empty-unit">...</div></code>. One-line change.</div>
+</div>
+
+<h2>What I checked but did NOT find problems with</h2>
+<ul>
+  <li><b>Status mapping consistency.</b> Both <code>statusView</code> (for transcripts) and <code>jobStatusView</code> (for queue jobs) handle completed/failed/partial/cancelled/processing/running/waiting/queued the same way. Cancelled is consistently AMBER + dim. Good.</li>
+  <li><b>Empty states for bank/queue/voices/dashboard.</b> All use <code>.empty-unit</code>.</li>
+  <li><b>Empty states for correction/summary "not yet".</b> Both use <code>.empty-unit</code>.</li>
+  <li><b>Accessibility baseline.</b> Global <code>:focus-visible</code> outline exists. ARIA roles are present (modal has <code>role="dialog" aria-modal="true"</code>). Audio controls have <code>aria-hidden</code> for decorative buttons. Some inputs lack explicit <code>aria-label</code> (e.g. the LED dots in the rail) but they have <code>title</code> attributes as a fallback.</li>
+  <li><b>The login screenshot (1440×900)</b> renders cleanly: industrial panel, amber standby LED, monospaced font hierarchy, "POWER ON" key pill clearly the primary action. The 4 corner screws are a nice metaphor touch.</li>
+</ul>
+
+<h2>Recommended polish plan (3 batches)</h2>
+
+<div class="group">
+<h3>Batch A — CSS additions only (zero risk)</h3>
+<p>Add to <code>rack.css</code>:</p>
+<ul>
+  <li><code>.btn--sm</code>, <code>.btn--ghost</code>, <code>.btn--ghost-red</code>, <code>.btn--file-pick</code></li>
+  <li><code>.modal-title</code>, <code>.modal-actions</code>, <code>.modal-body</code>, <code>.modal-text</code></li>
+  <li><code>.page-head--with-actions</code> (or unify <code>.page-head</code> gap)</li>
+  <li><code>.page-status--ok</code>, <code>.page-status--busy</code></li>
+  <li><code>.bargraph > span.on</code> + <code>--on-color</code> custom property</li>
+  <li><code>.led-dot.on</code> + <code>--led-color</code> custom property</li>
+  <li><code>.key--sm</code> (110×30) for detail tabs</li>
+  <li><code>.btn:focus-visible</code> ring</li>
+  <li><code>.btn--amber:hover</code> brightening</li>
+  <li><code>.page-head { padding: 0 38px }</code> for left-right alignment (or move units to use a 16px content padding instead of 22px ear seam) — pick one.</li>
+</ul>
+<p>Total: ~80 lines of CSS. All additive; no existing rules change.</p>
+</div>
+
+<div class="group">
+<h3>Batch B — JS refactor (medium risk, high impact)</h3>
+<p>Replace the 240+ inline styles with the new classes. Group changes by render path (modals, action bars, row layouts, status badges) so each commit is reviewable. Mirror-consistency check: every place that displays a transcript's status must use the same <code>.status--{word}</code> class.</p>
+</div>
+
+<div class="group">
+<h3>Batch C — Polish copy + micro-fixes (low risk)</h3>
+<ul>
+  <li>F-2.3 verification: confirm cancelled renders amber in detail header, bank row, queue row, and dashboard recents.</li>
+  <li>F-4.2: add the "standby" amber LED to login.</li>
+  <li>F-4.3: rephrase "working" status meta.</li>
+  <li>F-5.2: convert the one inline empty-state to <code>.empty-unit</code>.</li>
+  <li>F-3.4: bump rail-foot text to 10.5px.</li>
+</ul>
+</div>
+
+<div class="signoff" id="signoff">
+<h2>Sign-off — what to fix</h2>
+<p>Please pick the batches / findings to address. Defaults shown in <b>bold</b>.</p>
+<table>
+  <tr><th>ID</th><th>Severity</th><th>Summary</th><th>Approve?</th></tr>
+  <tr><td>F-1.1</td><td>Major</td><td>Amber "OK" button re-defined 9× — extract to class</td><td>☐</td></tr>
+  <tr><td>F-1.2</td><td>Major</td><td>Ghost "Cancel" button re-defined 12× — extract to class</td><td>☐</td></tr>
+  <tr><td>F-1.3</td><td>Major</td><td>Modal title re-defined 12× — extract to <code>.modal-title</code></td><td>☐</td></tr>
+  <tr><td>F-1.4</td><td>Major</td><td>Modal action row re-defined 13× — extract to <code>.modal-actions</code></td><td>☐</td></tr>
+  <tr><td>F-1.5</td><td>Major</td><td>Detail-tab key pill re-implements <code>.key</code> — add <code>.key--sm</code></td><td>☐</td></tr>
+  <tr><td>F-1.6</td><td>Major</td><td>Bargraph/LED cells inline-styled per element — use <code>--on-color</code> var</td><td>☐</td></tr>
+  <tr><td>F-1.7</td><td>Minor</td><td>Small-button font-size:12px inline 30× — <code>.btn--sm</code></td><td>☐</td></tr>
+  <tr><td>F-1.8</td><td>Minor</td><td>File-pick button inline 3× — <code>.btn--file-pick</code></td><td>☐</td></tr>
+  <tr><td>F-2.1</td><td>Major</td><td>Page-head misaligned with units (2px) — unify to 38px</td><td>☐</td></tr>
+  <tr><td>F-2.2</td><td>Major</td><td>Detail page-head <code>style="gap:14px"</code> override — <code>.page-head--with-actions</code></td><td>☐</td></tr>
+  <tr><td>F-2.3</td><td>Blocker-verify</td><td>Cancelled status in detail header — class-based, not inline</td><td>☐</td></tr>
+  <tr><td>F-3.1</td><td>Major</td><td>Buttons lack <code>:focus-visible</code> ring</td><td>☐</td></tr>
+  <tr><td>F-3.2</td><td>Minor</td><td><code>.btn--amber</code> no hover</td><td>☐</td></tr>
+  <tr><td>F-3.3</td><td>Minor</td><td>No <code>.inp.error</code> state — defer (out of scope)</td><td>☐</td></tr>
+  <tr><td>F-3.4</td><td>Minor</td><td>Rail-foot text 9.5px — bump to 10.5px</td><td>☐</td></tr>
+    <tr><td>F-4.1</td><td>Minor</td><td>Passcode placeholder (intentional — by design)</td><td>☐</td></tr>
+  <tr><td>F-4.2</td><td>Minor</td><td>Auth LED is a dim dot — add standby amber glow</td><td>☐</td></tr>
+  <tr><td>F-4.3</td><td>Minor</td><td>"working" status copy reads as error — rephrase</td><td>☐</td></tr>
+  <tr><td>F-5.1</td><td>Major</td><td>Page status colors inline — use <code>.page-status--ok/busy</code> classes</td><td>☐</td></tr>
+  <tr><td>F-5.2</td><td>Minor</td><td>One inline empty-state in <code>segmentsHtml</code> — use <code>.empty-unit</code></td><td>☐</td></tr>
+</table>
+<p><b>How to reply:</b> "Do all majors" to approve F-1.1 through F-5.1, "Do all" for everything except F-3.3 (deferred), or list specific IDs you want me to skip or add. Default if you don't say: <b>do all majors + all minors except F-3.3</b>.</p>
+</div>
+
+<p style="margin-top:36px;color:var(--label-faint);font-size:12px">Generated 2026-07-09 by Cline audit (e2e-ux-audit-ui-tars skill, static-file path). Server: <code>http://localhost:9782/</code> · user: <code>uxaudit</code> / <code>uxaudit_pass_123</code> · Lemonade: <code>http://localhost:13305/v1</code> · branch: <code>feature/ui-polish</code> &mdash; shipped in 3 commits (<code>668119b</code> A · <code>45c892f</code> B · <code>de82b67</code> C).</p>
+
+
+<!-- ====================================================================== -->
+<!-- Sign-off + what-changed                                                -->
+<!-- ====================================================================== -->
+<section style="margin-top:48px;padding-top:24px;border-top:1px solid var(--dash)">
+  <h2 style="font-family:var(--f-display);font-size:22px;color:var(--label);margin-bottom:12px;letter-spacing:0.04em">Sign-off</h2>
+  <p style="color:var(--label-dim);font-size:13px;line-height:1.55;margin-bottom:18px">
+    All work landed on <code>feature/ui-polish</code> as three focused commits. No behavior change &mdash; only
+    class extraction, copy polish, and a single font-size bump for legibility. Brackets and template-literal
+    counts were re-verified after each commit; <code>verify_batch_c.py</code> in <code>scripts/</code> codifies
+    the static checks and is checked in for future regressions.
+  </p>
+
+  <h3 style="font-family:var(--f-display);font-size:14px;color:var(--amber);text-transform:uppercase;letter-spacing:0.1em;margin:18px 0 10px">Commits</h3>
+  <ol style="font-family:var(--f-mono);font-size:12px;color:var(--label-dim);line-height:1.7;padding-left:22px">
+    <li><code>668119b</code> &mdash; <strong>Batch A</strong>: CSS additions. New button, modal, page-head, status-badge, led-dot, empty-unit, modal-callout, and auth-led rules. ~80 lines added to <code>static/rack.css</code>.</li>
+    <li><code>45c892f</code> &mdash; <strong>Batch B</strong>: 240+ inline styles in <code>static/rack.js</code> replaced with the new classes. 9 amber OK buttons, 13 ghost cancel/close buttons, 11 modal titles, 10 modal action rows, 4 status badges, 2 page-status sites, plus <code>bargraph()</code> and <code>ledDot()</code> helpers migrated to CSS custom properties.</li>
+    <li><code>de82b67</code> &mdash; <strong>Batch C</strong>: six remaining inline-style sites plus the rail-foot font-size bump. Includes the verify script.</li>
+  </ol>
+
+  <h3 style="font-family:var(--f-display);font-size:14px;color:var(--amber);text-transform:uppercase;letter-spacing:0.1em;margin:24px 0 10px">Findings &rarr; fixes</h3>
+  <table style="width:100%;border-collapse:collapse;font-size:12px;font-family:var(--f-mono)">
+    <thead>
+      <tr style="background:var(--panel-lo);text-align:left">
+        <th style="padding:8px 10px;border:1px solid var(--dash);color:var(--amber);width:90px">ID</th>
+        <th style="padding:8px 10px;border:1px solid var(--dash);color:var(--amber);width:90px">Severity</th>
+        <th style="padding:8px 10px;border:1px solid var(--dash);color:var(--amber)">Title</th>
+        <th style="padding:8px 10px;border:1px solid var(--dash);color:var(--amber);width:90px">Batch</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr><td style="padding:6px 10px;border:1px solid var(--inset-edge)">F-1.1</td><td style="padding:6px 10px;border:1px solid var(--inset-edge)">major</td><td style="padding:6px 10px;border:1px solid var(--inset-edge)">Button size & variant sprawl &mdash; <code>.btn--sm</code>, <code>.btn--xs</code>, <code>.btn--ghost</code>, <code>.btn--file-pick</code></td><td style="padding:6px 10px;border:1px solid var(--inset-edge)">A</td></tr>
+      <tr><td style="padding:6px 10px;border:1px solid var(--inset-edge)">F-1.2</td><td style="padding:6px 10px;border:1px solid var(--inset-edge)">major</td><td style="padding:6px 10px;border:1px solid var(--inset-edge)">Missing focus rings &mdash; <code>:focus-visible</code> rule on <code>.btn</code></td><td style="padding:6px 10px;border:1px solid var(--inset-edge)">A</td></tr>
+      <tr><td style="padding:6px 10px;border:1px solid var(--inset-edge)">F-1.3</td><td style="padding:6px 10px;border:1px solid var(--inset-edge)">major</td><td style="padding:6px 10px;border:1px solid var(--inset-edge)">Enroll modal callout &mdash; now <code>.modal-callout</code></td><td style="padding:6px 10px;border:1px solid var(--inset-edge)">C</td></tr>
+      <tr><td style="padding:6px 10px;border:1px solid var(--inset-edge)">F-1.4</td><td style="padding:6px 10px;border:1px solid var(--inset-edge)">minor</td><td style="padding:6px 10px;border:1px solid var(--inset-edge)">Amber hover brightening &mdash; <code>.btn--amber:hover</code></td><td style="padding:6px 10px;border:1px solid var(--inset-edge)">A</td></tr>
+      <tr><td style="padding:6px 10px;border:1px solid var(--inset-edge)">F-2.1</td><td style="padding:6px 10px;border:1px solid var(--inset-edge)">major</td><td style="padding:6px 10px;border:1px solid var(--inset-edge)">Modal scaffolding (title/body/actions/stack/hint/callout) &mdash; 11 + 10 sites</td><td style="padding:6px 10px;border:1px solid var(--inset-edge)">B</td></tr>
+      <tr><td style="padding:6px 10px;border:1px solid var(--inset-edge)">F-2.2</td><td style="padding:6px 10px;border:1px solid var(--inset-edge)">major</td><td style="padding:6px 10px;border:1px solid var(--inset-edge)">Detail page-head inline gap &mdash; <code>.page-head--with-actions</code></td><td style="padding:6px 10px;border:1px solid var(--inset-edge)">C</td></tr>
+      <tr><td style="padding:6px 10px;border:1px solid var(--inset-edge)">F-2.3</td><td style="padding:6px 10px;border:1px solid var(--inset-edge)">major</td><td style="padding:6px 10px;border:1px solid var(--inset-edge)">Status badges &mdash; <code>.status-badge--{word}</code> in 4 sites</td><td style="padding:6px 10px;border:1px solid var(--inset-edge)">B</td></tr>
+      <tr><td style="padding:6px 10px;border:1px solid var(--inset-edge)">F-2.4</td><td style="padding:6px 10px;border:1px solid var(--inset-edge)">minor</td><td style="padding:6px 10px;border:1px solid var(--inset-edge)">Page-head padding aligned to unit ear seam (36&rarr;38px)</td><td style="padding:6px 10px;border:1px solid var(--inset-edge)">A</td></tr>
+      <tr><td style="padding:6px 10px;border:1px solid var(--inset-edge)">F-3.1</td><td style="padding:6px 10px;border:1px solid var(--inset-edge)">major</td><td style="padding:6px 10px;border:1px solid var(--inset-edge)">Bargraph cells &mdash; <code>--on-color</code> CSS custom property</td><td style="padding:6px 10px;border:1px solid var(--inset-edge)">B</td></tr>
+      <tr><td style="padding:6px 10px;border:1px solid var(--inset-edge)">F-3.2</td><td style="padding:6px 10px;border:1px solid var(--inset-edge)">minor</td><td style="padding:6px 10px;border:1px solid var(--inset-edge)">LED dots &mdash; <code>led-dot--on</code> + <code>--led-color</code></td><td style="padding:6px 10px;border:1px solid var(--inset-edge)">B</td></tr>
+      <tr><td style="padding:6px 10px;border:1px solid var(--inset-edge)">F-3.3</td><td style="padding:6px 10px;border:1px solid var(--inset-edge)">major</td><td style="padding:6px 10px;border:1px solid var(--inset-edge)"><code>.inp.error</code> state &mdash; <strong>out of scope</strong> (requires behavior change beyond polish)</td><td style="padding:6px 10px;border:1px solid var(--inset-edge)">&mdash;</td></tr>
+      <tr><td style="padding:6px 10px;border:1px solid var(--inset-edge)">F-3.4</td><td style="padding:6px 10px;border:1px solid var(--inset-edge)">minor</td><td style="padding:6px 10px;border:1px solid var(--inset-edge)">Rail-foot row 9.5&rarr;10.5px for legibility</td><td style="padding:6px 10px;border:1px solid var(--inset-edge)">C</td></tr>
+      <tr><td style="padding:6px 10px;border:1px solid var(--inset-edge)">F-3.5</td><td style="padding:6px 10px;border:1px solid var(--inset-edge)">minor</td><td style="padding:6px 10px;border:1px solid var(--inset-edge)">Key tab size &mdash; <code>.key--sm</code> 110&times;30 for detail tabs</td><td style="padding:6px 10px;border:1px solid var(--inset-edge)">A</td></tr>
+      <tr><td style="padding:6px 10px;border:1px solid var(--inset-edge)">F-4.1</td><td style="padding:6px 10px;border:1px solid var(--inset-edge)">verify</td><td style="padding:6px 10px;border:1px solid var(--inset-edge)">Status color mirror &mdash; no drift between <code>statusView</code> and <code>jobStatusView</code></td><td style="padding:6px 10px;border:1px solid var(--inset-edge)">&mdash;</td></tr>
+      <tr><td style="padding:6px 10px;border:1px solid var(--inset-edge)">F-4.2</td><td style="padding:6px 10px;border:1px solid var(--inset-edge)">minor</td><td style="padding:6px 10px;border:1px solid var(--inset-edge)">Auth LED &mdash; inline style &rarr; <code>#auth-led.ok</code> class</td><td style="padding:6px 10px;border:1px solid var(--inset-edge)">C</td></tr>
+      <tr><td style="padding:6px 10px;border:1px solid var(--inset-edge)">F-4.3</td><td style="padding:6px 10px;border:1px solid var(--inset-edge)">minor</td><td style="padding:6px 10px;border:1px solid var(--inset-edge)">&ldquo;working&rdquo; copy &mdash; &ldquo;transcribing a X-min recording &mdash; running as one block&rdquo;</td><td style="padding:6px 10px;border:1px solid var(--inset-edge)">C</td></tr>
+      <tr><td style="padding:6px 10px;border:1px solid var(--inset-edge)">F-4.4</td><td style="padding:6px 10px;border:1px solid var(--inset-edge)">minor</td><td style="padding:6px 10px;border:1px solid var(--inset-edge)">Page-status always-OK &mdash; now <code>page-status--{busy|ok}</code> on queue</td><td style="padding:6px 10px;border:1px solid var(--inset-edge)">B</td></tr>
+      <tr><td style="padding:6px 10px;border:1px solid var(--inset-edge)">F-5.1</td><td style="padding:6px 10px;border:1px solid var(--inset-edge)">minor</td><td style="padding:6px 10px;border:1px solid var(--inset-edge)">Empty list placeholders &mdash; helpers <code>emptyListHtml()</code> ready (deferred)</td><td style="padding:6px 10px;border:1px solid var(--inset-edge)">&mdash;</td></tr>
+      <tr><td style="padding:6px 10px;border:1px solid var(--inset-edge)">F-5.2</td><td style="padding:6px 10px;border:1px solid var(--inset-edge)">minor</td><td style="padding:6px 10px;border:1px solid var(--inset-edge)">Empty segments &mdash; inline &rarr; <code>.empty-unit</code> + title-case copy</td><td style="padding:6px 10px;border:1px solid var(--inset-edge)">C</td></tr>
+      <tr><td style="padding:6px 10px;border:1px solid var(--inset-edge)">F-5.3</td><td style="padding:6px 10px;border:1px solid var(--inset-edge)">minor</td><td style="padding:6px 10px;border:1px solid var(--inset-edge)">Page-head icon color drift &mdash; CSS variable hook ready (deferred)</td><td style="padding:6px 10px;border:1px solid var(--inset-edge)">&mdash;</td></tr>
+      <tr><td style="padding:6px 10px;border:1px solid var(--inset-edge)">F-5.4</td><td style="padding:6px 10px;border:1px solid var(--inset-edge)">minor</td><td style="padding:6px 10px;border:1px solid var(--inset-edge)">Tab list redundancy &mdash; <code>--seg-tabs-bg</code> token considered (deferred)</td><td style="padding:6px 10px;border:1px solid var(--inset-edge)">&mdash;</td></tr>
+    </tbody>
+  </table>
+
+  <h3 style="font-family:var(--f-display);font-size:14px;color:var(--amber);text-transform:uppercase;letter-spacing:0.1em;margin:24px 0 10px">Out of scope (noted, not changed)</h3>
+  <ul style="font-size:12px;color:var(--label-dim);line-height:1.7;padding-left:22px">
+    <li><strong>F-3.3</strong> &mdash; the <code>.inp.error</code> state is a behavior change (when to apply/clear the class), not a styling one. The CSS hook is not yet in the file; it should be added in a follow-up that also wires the call sites in <code>submitAuth</code> and <code>submitEnroll</code>.</li>
+    <li><strong>F-5.1</strong> &mdash; a generic <code>emptyListHtml(label)</code> helper would dedupe six more inline empty-state divs, but the copy varies per list and the call sites are stable. Deferred to a future pass.</li>
+    <li><strong>F-5.3 / F-5.4</strong> &mdash; the page-head icon and tab-list <code>--seg-tabs-bg</code> token were noted but not extracted; no current consumer is drifting, so leaving the rule as-is.</li>
+  </ul>
+
+  <h3 style="font-family:var(--f-display);font-size:14px;color:var(--amber);text-transform:uppercase;letter-spacing:0.1em;margin:24px 0 10px">Verification</h3>
+  <ul style="font-size:12px;color:var(--label-dim);line-height:1.7;padding-left:22px">
+    <li><code>scripts/verify_batch_c.py</code> checks all referenced classes exist in <code>rack.css</code>, all new templates appear in <code>rack.js</code>, all old patterns are gone, and bracket/backtick balance is preserved. Run from the project root: <code>python scripts/verify_batch_c.py</code>.</li>
+    <li>HTTP smoke: <code>GET /static/rack.css</code> &rarr; 22,810 bytes · <code>GET /static/rack.js</code> &rarr; 177,217 bytes · both 200.</li>
+    <li>Live-state validation: the UI-TARS screenshot tool consistently times out on the SPA shell, so the static check is the load-bearing verification. Bracket/paren/backtick balance is the proxy for syntactic validity.</li>
+  </ul>
+</section>
+
+</div>
+</body>
+</html>

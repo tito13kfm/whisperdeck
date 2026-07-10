@@ -20,3 +20,8 @@ tests/fixtures/
 scripts/cookies.txt
 scripts/providers_backup.json
 
+# UX-audit runtime artifacts (PID file, local config, one-off setup scripts)
+scripts/ux_audit_*
+scripts/provider_local.json
+scripts/settings_payload.json
+

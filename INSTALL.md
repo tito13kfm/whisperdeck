@@ -121,3 +121,29 @@ accurate speechbrain backend instead:
 Uses whatever provider you select on the transcript detail page (Groq,
 OpenAI, or a local Ollama-compatible endpoint) — same API key as
 transcription for Groq/OpenAI.
+
+## 7. Browser-based end-to-end tests (optional)
+
+The default `pytest` suite uses FastAPI's `TestClient` — fast, no real
+browser, no Chromium download. For tests that need to drive a real
+browser (clicks, keyboard, file uploads, screenshots, layout), Playwright
+is available as a separate optional extra:
+
+```
+.venv\Scripts\python.exe -m pip install -r requirements-browser.txt
+.venv\Scripts\python.exe -m playwright install chromium
+```
+
+Run only the e2e tests (skip them in the default suite):
+
+```
+.venv\Scripts\python.exe -m pytest tests/e2e -m e2e
+.venv\Scripts\python.exe -m pytest -m "not e2e"
+```
+
+The `tests/e2e/conftest.py` `live_server` fixture starts a real uvicorn
+in a background thread so the browser can hit it over a real socket;
+`tests/conftest.py` handles per-test data isolation (it redirects
+`WHISPERDESK_DATA_DIR` to a tempdir and resets the rate-limiter).
+The `tests/e2e/test_browser_smoke.py` file is a working template that
+exercises the login form and the app shell — copy it for new flows.
