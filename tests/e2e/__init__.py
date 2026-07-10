@@ -1,4 +1,4 @@
-"""E2E test package — real-browser tests via Playwright.
+r"""E2E test package — real-browser tests via Playwright.
 
 These tests are NOT part of the default `pytest` run. They require:
   - Playwright + Chromium installed (`pip install -r requirements-browser.txt`

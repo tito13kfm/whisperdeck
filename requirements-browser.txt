@@ -8,7 +8,7 @@
 #   .venv\Scripts\python.exe -m playwright install chromium
 #
 # Then run only the browser tests:
-#   .venv\Scripts\python.exe -m pytest tests/ -k e2e_browser -m e2e
+#   .venv\Scripts\python.exe -m pytest tests/e2e -m e2e
 #
 # `chromium` is the only browser installed by the second command above;
 # Firefox and WebKit are also available via `playwright install firefox`

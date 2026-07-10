@@ -20,28 +20,32 @@ for cls, label in [
     print(f"  {label:<28} -> {n} match(es)")
 
 print("\n=== JS template / pattern references ===")
+# (needle, label, expect_present) -- expect_present=True means n>=1 is OK,
+# False means n==0 is OK (an old pattern that must have been fully replaced).
 checks = [
-    ('class="empty-unit"',       "empty-unit template"),
-    ('class="modal-callout"',    "modal-callout template"),
-    ("'auth-led').classList.add('ok')", "auth-led classList.add('ok')"),
-    ('page-head--with-actions',  "page-head--with-actions class"),
-    ('transcribing a ',          "new 'working' copy phrase"),
-    ('running as one block',     "new 'working' suffix"),
-    ('processing ',              "OLD 'working' copy phrase (should be 0)"),
-    ('NO SEGMENTS',              "OLD ALL-CAPS empty text (should be 0)"),
-    ('font-size: 9.5px',         "OLD rail-foot 9.5px (should be 0)"),
-    ('style="gap:14px"',         "OLD detail page-head gap inline (should be 0)"),
-    ('class="btn btn--ghost btn--sm"', "ghost-sm buttons"),
-    ('class="btn btn--amber btn--sm"', "amber-sm buttons"),
-    ('class="modal-actions"',    "modal-actions class"),
-    ('class="modal-title"',      "modal-title class"),
-    ('status-badge--',           "status-badge variants"),
-    ('page-status--',            "page-status variants"),
+    ('class="empty-unit"',       "empty-unit template", True),
+    ('class="modal-callout"',    "modal-callout template", True),
+    ("'auth-led').classList.add('ok')", "auth-led classList.add('ok')", True),
+    ('page-head--with-actions',  "page-head--with-actions class", True),
+    ('transcribing a ',          "new 'working' copy phrase", True),
+    ('running as one block',     "new 'working' suffix", True),
+    ('no section data on this run', "OLD 'working' copy phrase (should be 0)", False),
+    ('NO SEGMENTS',              "OLD ALL-CAPS empty text (should be 0)", False),
+    ('font-size: 9.5px',         "OLD rail-foot 9.5px (should be 0)", False),
+    ('style="gap:14px"',         "OLD detail page-head gap inline (should be 0)", False),
+    ('class="btn btn--ghost btn--sm"', "ghost-sm buttons", True),
+    ('class="btn btn--amber btn--sm"', "amber-sm buttons", True),
+    ('class="modal-actions"',    "modal-actions class", True),
+    ('class="modal-title"',      "modal-title class", True),
+    ('status-badge--',           "status-badge variants", True),
+    ('page-status--',            "page-status variants", True),
 ]
-for needle, label in checks:
+all_ok = True
+for needle, label, expect_present in checks:
     n = js.count(needle)
-    flag = "OK" if n >= 0 else "?"
-    print(f"  {label:<45} -> {n}  [{flag}]")
+    ok = (n >= 1) if expect_present else (n == 0)
+    all_ok = all_ok and ok
+    print(f"  {label:<45} -> {n}  [{'OK' if ok else 'FAIL'}]")
 
 print("\n=== Bracket/paren balance check on rack.js ===")
 open_braces = js.count("{")
@@ -59,3 +63,9 @@ print(f"  backticks: {backticks}  (even required)")
 print("\n=== Line counts ===")
 print(f"  rack.css: {len(css.splitlines())} lines, {len(css)} bytes")
 print(f"  rack.js : {len(js.splitlines())} lines, {len(js)} bytes")
+
+balance_ok = (open_braces == close_braces and open_parens == close_parens
+              and open_brackets == close_brackets and backticks % 2 == 0)
+if not (all_ok and balance_ok):
+    raise SystemExit("\nFAIL: one or more checks above did not pass.")
+print("\nAll checks passed.")
