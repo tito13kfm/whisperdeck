@@ -28,7 +28,7 @@ stays in the active log (never archived) until resolved to ACTIONED or DECLINED
 
 ### Observation 13: Sensitive-file gate blocks scheduled review's CLAUDE.md edit regardless of acceptEdits + add-dir
 
-**Status:** OPEN
+**Status:** ACTIONED — Fixed by PR #29: agent stages the full updated CLAUDE.md, run_scheduled_review.ps1 applies it after a clean exit (2026-07-10)
 **Date:** 2026-07-10
 **Session context:** First scheduled autonomous skill review run (post PR #28). The run's core apply step, inserting a rule into the user-level CLAUDE.md, was refused by the harness.
 **Skill:** task-observer (scheduled review pipeline), update-config
