@@ -10,6 +10,8 @@ WhisperDeck is a self-hosted transcription studio that runs in your browser. Upl
 
 It's multi-user (register/login, per-user transcripts, settings, and API keys), and every long-running operation goes through a background job queue with live progress, cancel/resume, and retry.
 
+![WhisperDeck Monitor — at-a-glance stats, transcript library, voice roster, and storage bargraph in the "Signal Rack" chassis](screenshots/01-monitor.png)
+
 ---
 
 ## Quick Start
@@ -45,6 +47,8 @@ python app.py
 
 [INSTALL.md](INSTALL.md) walks through all of this in detail, including the optional diarization and voice-ID extras.
 
+![Tape library — searchable, sortable list of all transcripts with per-row open / cancel / resume / rename / delete actions](screenshots/03-tape-library.png)
+
 ---
 
 ## Features
@@ -65,6 +69,8 @@ On first launch the Transcribe page auto-selects the first provider whose health
 
 Long recordings are split into chunks and processed through the job queue rather than blocking a single request, so a two-hour meeting doesn't tie up the browser tab.
 
+![Transcribe page — drag-and-drop upload, provider/model/language selectors, diarize toggle, live-capture, and the reel-to-reel deck animation](screenshots/02-transcribe.png)
+
 ### Speaker diarization
 
 Two modes:
@@ -74,15 +80,21 @@ Two modes:
 
 You can re-diarize an existing transcript at any time; it runs as a `rediarize` job on the Queue screen.
 
+![Transcript detail — speaker-labelled segments with per-segment audio playback, speaker rename, and the corrected/summary tabs](screenshots/04-transcript-detail.png)
+
 ### Voice identification
 
 Enroll a roster of known speakers, each with one or more voice clips, and WhisperDeck relabels matching speakers across a transcript via a `voice_match` job. You can also enroll a speaker directly from a transcript segment you've already identified by ear.
 
 Embedding backends are auto-detected in priority order: **speechbrain** (most accurate, `pip install speechbrain torchaudio`), then **pyannote.audio** (comes with the diarization install), then **librosa MFCC** (always available, basic).
 
+![Voice roster — enrolled speaker profiles with their voice-clip samples, ready for voice-match across new transcripts](screenshots/07-voice-roster.png)
+
 ### Hotwords and LLM correction
 
 Keep a per-user glossary of names, jargon, and product terms the model tends to mishear. You can add terms manually or paste a meeting-context document and let the app extract them. The glossary feeds the LLM correction pass that runs after transcription; it does not change the transcription itself.
+
+![Hotword glossary — per-user list of names, jargon, and product terms that guide the LLM correction pass](screenshots/09-hotwords.png)
 
 ### Correction and summarization
 
@@ -93,11 +105,15 @@ On the transcript detail page, pick an LLM provider (Groq, OpenAI, OpenRouter, o
 
 Both run as background jobs and reuse the API keys you already saved for transcription.
 
+![LLM-corrected transcript — the same source audio after a correction pass, with normalized punctuation and hotword-driven fixes](screenshots/05-corrected.png)
+
 ### Run history and versions
 
 Every correction, summary, re-diarization, and voice-match run is recorded per transcript, so you can compare what a correction pass actually changed (word-level diff) or how two summary runs differ. Re-transcribing with a different provider or model creates a linked version chain, letting you A/B providers on the same audio.
 
 ### Job queue
+
+![Job queue — live LED-bargraph progress for transcription chunks, correction, summary, rediarize, and voice-match jobs, with cancel/rerun/dismiss controls](screenshots/06-queue.png)
 
 The Queue screen shows every background job (chunked transcription, correction, summary, rediarize, voice match) with live progress. Chunked transcriptions support cancel, resume, and retry-failed-chunks; LLM jobs support rerun and auto-retry on transient failures. Finished jobs can be dismissed one at a time or bulk-cleared without touching the underlying transcripts.
 
@@ -106,6 +122,19 @@ The Queue screen shows every background job (chunked transcription, correction, 
 Sessions are cookie-based and the signing secret is generated on first launch and stored in the data directory, so there's no `SECRET_KEY` to configure. Each user's transcripts, settings, and provider keys are isolated.
 
 The first registered user is the admin. Admins can list users, promote or demote other admins, and generate one-time password-reset tokens to hand to a locked-out user (there's no email flow; you share the token yourself). If the admin is the one locked out, `scripts/reset_password.py` resets any password directly against the database from the command line.
+
+### UI themes
+
+The "Signal Rack" chassis has four switchable faceplate finishes — pick one in **Service panel** (or click the faceplate knob in the top bar). Hardware behavior is identical across themes; only the chassis colors change.
+
+| | |
+|:---:|:---:|
+| ![Charcoal — default dark chassis](screenshots/10-theme-charcoal.png) | ![Silverface — warm light chassis](screenshots/10-theme-silverface.png) |
+| **Charcoal** (default) | **Silverface** |
+| ![Champagne — warm cream chassis](screenshots/10-theme-champagne.png) | ![Blue-Glass — deep cool chassis](screenshots/10-theme-blue-glass.png) |
+| **Champagne** | **Blue-Glass** |
+
+The oscilloscope/LED phosphor also has three color choices (Green, Cyan, Amber) in the same panel.
 
 ---
 
@@ -128,6 +157,8 @@ There is no `DATABASE_URL`: storage is always local SQLite under the data direct
 ### Provider API keys
 
 Paste them in the web UI under **Settings → Providers**. Prefixes are validated on input: Groq `gsk_`, OpenAI `sk-`, Replicate `r8_`, OpenRouter `sk-or-`.
+
+![Service panel — per-provider API keys, model pickers, and the WhisperDesk faceplate / phosphor theme controls](screenshots/08-service-panel.png)
 
 ---
 
