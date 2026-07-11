@@ -167,7 +167,7 @@ Paste them in the web UI under **Settings → Providers**. Prefixes are validate
 The web UI is a single-page app talking to a JSON API, and everything it does you can script. Two things to know before calling it from code:
 
 1. **Authenticate first.** `POST /api/login` (or `/api/register`) sets a session cookie; send it on subsequent requests.
-2. **CSRF on sensitive mutations.** Password reset (`POST /api/forgot-password`, `/api/reset-password`), admin actions (`POST /api/admin/promote`, `/api/admin/demote`), and provider config (`PUT /api/providers/{name}`) require an `X-CSRF-Token` header; fetch a token from `GET /api/csrf-token`. Other mutations, settings included, authenticate by session cookie alone.
+2. **CSRF on sensitive mutations.** Password reset (`POST /api/forgot-password`, `/api/reset-password`), admin actions (`POST /api/admin/promote`, `/api/admin/demote`), and provider config (`PUT /api/providers/{name}`) require an `X-CSRF-Token` header; fetch a token from `GET /api/csrf-token`. Other mutations, settings included, authenticate by session cookie alone. This is deliberate: the session cookie is `SameSite=Lax`, so modern browsers refuse to attach it to cross-site POST/PUT/DELETE requests, which blocks classic CSRF on those endpoints without a token round-trip.
 
 | Area | Endpoints |
 |------|-----------|

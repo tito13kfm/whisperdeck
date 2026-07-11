@@ -61,13 +61,17 @@ print("  ✓ diarization_backend = True")
 # ── HTTP helper with cookie jar ───────────────────────────────────────
 cj = http.cookiejar.CookieJar()
 opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cj))
+CSRF_TOKEN = None  # set after login; required by /api/providers/{name}
 
 def api_json(method, path, body=None):
     data = json.dumps(body).encode() if body else None
+    headers = {"Content-Type": "application/json"} if body else {}
+    if CSRF_TOKEN and method in ("POST", "PUT", "DELETE", "PATCH"):
+        headers["X-CSRF-Token"] = CSRF_TOKEN
     req = urllib.request.Request(
         f"http://localhost:{port}{path}",
         data=data, method=method,
-        headers={"Content-Type": "application/json"} if body else {}
+        headers=headers
     )
     resp = opener.open(req)
     return json.loads(resp.read().decode())
@@ -119,6 +123,9 @@ except urllib.error.HTTPError as e:
     print(f"  Register: {e.code} - {body}")
     print("  Trying login instead...")
     api_json("POST", "/api/login", {"username": "diartest", "password": "diartest123"})
+
+# CSRF token: PUT /api/providers/{name} validates X-CSRF-Token
+CSRF_TOKEN = api_json("GET", "/api/csrf-token").get("token")
 
 # ── Configure local provider for Lemonade ─────────────────────────────
 print("Configuring local provider...")
