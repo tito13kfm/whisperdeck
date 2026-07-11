@@ -165,7 +165,12 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-app.add_middleware(SessionMiddleware, secret_key=SESSION_SECRET)
+# Deliberate CSRF posture (issue #32): most mutations authenticate by session
+# cookie alone and rely on SameSite=Lax to block cross-site requests; only
+# high-consequence endpoints (account recovery, admin, provider config) also
+# validate X-CSRF-Token. Pin lax explicitly so a Starlette default change
+# can't silently weaken that posture.
+app.add_middleware(SessionMiddleware, secret_key=SESSION_SECRET, same_site="lax")
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────
