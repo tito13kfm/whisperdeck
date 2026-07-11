@@ -1,4 +1,11 @@
-"""Standalone test: diarization + Qwen3.5 LLM jobs."""
+"""Standalone check: diarization + Qwen3.5 LLM jobs.
+
+Not a pytest module (renamed from run_diarize_test.py): everything here runs
+at import, including starting a server and firing HTTP requests, so the
+*_test.py filename let pytest collection hang on it. Run directly:
+
+    python scripts/run_diarize_check.py
+"""
 import os, sys, json, time, warnings, subprocess, tempfile, http.client, http.cookiejar, urllib.request, random, string
 warnings.filterwarnings('ignore')
 
