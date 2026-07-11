@@ -8,11 +8,21 @@ wrapper, building paths by string concatenation, e.g.:
 so this script extracts the first argument of every api() call, collapses
 each non-literal fragment to a `{p}` placeholder, and matches the result
 against the literal paths in app.py's @app.get/post/put/delete/patch
-decorators (path params likewise collapsed to `{p}`).
+decorators (path params likewise collapsed to `{p}`). Template literals are
+handled the same way: `${...}` interpolations collapse to `{p}`.
+
+A call whose path is built entirely from a variable (e.g.
+`api('/api/' + S.authMode)`) can't be resolved statically; annotate it at
+the call site with the paths it can take and the script treats them as
+called literals:
+
+    api('/api/' + S.authMode /* api-paths: /api/login /api/register */, ...)
 
 Output: every server route with its methods, marked [SPA] if the frontend
 calls it. Exits 1 if extraction comes up empty (a broken regex should fail
 loudly, not print nothing) or if the SPA calls a path no route serves.
+Call arguments that mention /api/ but can't be resolved to a checkable
+path are printed as warnings so parser blind spots are visible.
 """
 import re
 import sys
@@ -22,6 +32,8 @@ REPO = Path(__file__).resolve().parent.parent
 
 ROUTE_RE = re.compile(r'@app\.(get|post|put|delete|patch)\(\s*"([^"]+)"')
 LITERAL_RE = re.compile(r"""^\s*('[^']*'|"[^"]*")\s*$""")
+TEMPLATE_RE = re.compile(r"^\s*`([^`]*)`\s*$")
+ANNOTATION_RE = re.compile(r"/\*\s*api-paths:\s*([^*]+)\*/")
 
 
 def _first_arg(src: str, start: int) -> str:
@@ -101,15 +113,37 @@ def server_routes() -> dict[str, set[str]]:
     return routes
 
 
-def spa_paths() -> set[str]:
-    """Normalized paths the SPA passes to api(), concat fragments -> {p}."""
-    src = (REPO / "static" / "rack.js").read_text(encoding="utf-8")
-    paths = set()
+def spa_paths(src: str | None = None) -> tuple[set[str], list[str]]:
+    """Normalized paths the SPA passes to api(), concat fragments -> {p}.
+
+    Returns (paths, suspicious): suspicious holds the collapsed form of any
+    argument that mentions /api/ but doesn't resolve to a checkable /api/...
+    path (e.g. a variable prefix like BASE + '/api/x' collapsing to
+    '{p}/api/x'), so parser blind spots warn instead of vanishing."""
+    if src is None:
+        src = (REPO / "static" / "rack.js").read_text(encoding="utf-8")
+    paths: set[str] = set()
+    suspicious: list[str] = []
     # api() covers JSON calls; new Audio(...) streams audio endpoints.
     for m in re.finditer(r"\bapi\(|\bnew Audio\(", src):
         arg = _first_arg(src, m.end())
+        # An /* api-paths: ... */ annotation names the concrete paths a
+        # dynamically-built argument can take; count them as called literals
+        # and skip operand parsing (the annotation is the full path set).
+        note = ANNOTATION_RE.search(arg)
+        if note:
+            for token in note.group(1).split():
+                if token.startswith("/api/"):
+                    paths.add(normalize(token))
+            continue
         parts = []
         for op in _split_operands(arg):
+            tpl = TEMPLATE_RE.match(op)
+            if tpl:
+                # `${...}` -> {p}; nested braces inside ${} are not handled,
+                # which is fine for the flat expressions rack.js uses.
+                parts.append(re.sub(r"\$\{[^}]*\}", "{p}", tpl.group(1)))
+                continue
             lit = LITERAL_RE.match(op)
             if lit:
                 parts.append(lit.group(1)[1:-1])  # strip the quotes
@@ -119,7 +153,9 @@ def spa_paths() -> set[str]:
         joined = re.sub(r"(\{p\})+", "{p}", "".join(parts))
         if joined.startswith("/api/"):
             paths.add(normalize(joined))
-    return paths
+        elif "/api/" in joined:
+            suspicious.append(joined)
+    return paths, suspicious
 
 
 def _compatible(route: str, called: str) -> bool:
@@ -134,7 +170,7 @@ def _compatible(route: str, called: str) -> bool:
 
 def main() -> int:
     routes = server_routes()
-    called = spa_paths()
+    called, suspicious = spa_paths()
     if not routes:
         print("ERROR: no routes extracted from app.py — extractor broken?")
         return 1
@@ -160,6 +196,8 @@ def main() -> int:
     print(f"\n{len(routes)} server routes, {len(called)} distinct SPA call paths")
     for path in sorted(dynamic):
         print(f"skipped (fully dynamic, can't check statically): {path}")
+    for form in suspicious:
+        print(f"WARNING: unresolvable call argument mentions /api/: {form}")
     if unmatched:
         print("\nSPA calls with NO matching server route:")
         for path in unmatched:
