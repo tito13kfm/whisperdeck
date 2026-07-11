@@ -18,10 +18,15 @@ Copy-Item $claudeMd "$obsDir\claudemd-backup.md" -Force
 # The agent stages CLAUDE.md updates to this file instead of editing the live
 # one (the harness sensitive-file gate blocks headless writes to CLAUDE.md
 # even with acceptEdits + --add-dir); the wrapper applies the staged file
-# below. A leftover staged file from an earlier run must never be re-applied
-# over a CLAUDE.md the user may have edited since, so clear it first.
+# below. A staged file surviving from an earlier run means that run crashed
+# after staging but before applying: its observation may already read
+# ACTIONED while CLAUDE.md never got the rule. Never re-apply it (CLAUDE.md
+# may have been edited since), but keep it as evidence instead of deleting.
 $staged = "$obsDir\claudemd-staged.md"
-Remove-Item $staged -ErrorAction SilentlyContinue
+if (Test-Path $staged) {
+    Move-Item $staged "$obsDir\claudemd-staged-orphaned-$(Get-Date -Format yyyyMMdd-HHmmss).md" -Force
+    Add-Content $statusFile "ORPHANED-STAGED $(Get-Date -Format o) earlier run staged but never applied; review the orphan file"
+}
 
 # cmd-level redirect keeps claude's stderr as plain text in the log file.
 # claude -p with no prompt argument reads the prompt from stdin, which avoids
@@ -35,8 +40,17 @@ if ($LASTEXITCODE -ne 0) {
 Add-Content $statusFile "OK $(Get-Date -Format o)"
 
 # Apply staged CLAUDE.md updates. Absent staged file means the run applied
-# nothing (no open observations, or everything escalated).
+# nothing (no open observations, or everything escalated). A clean claude
+# exit doesn't guarantee sane staged content, so sanity-check the file
+# before letting it overwrite the live CLAUDE.md: right header, and no
+# large shrink against the pre-run backup (the review only adds rules).
 if (Test-Path $staged) {
+    $firstLine = Get-Content $staged -TotalCount 1
+    $minSize = [long]((Get-Item "$obsDir\claudemd-backup.md").Length * 0.8)
+    if ($firstLine -ne "# User-level Claude Instructions" -or (Get-Item $staged).Length -lt $minSize) {
+        Add-Content $statusFile "FAILED-APPLY $(Get-Date -Format o) staged file failed sanity check (header or size)"
+        exit 1
+    }
     try {
         Copy-Item $staged $claudeMd -Force
         Add-Content $statusFile "APPLIED-CLAUDEMD $(Get-Date -Format o)"
