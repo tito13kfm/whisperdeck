@@ -507,7 +507,7 @@ async function submitAuth(ev) {
   const password = $('auth-pass').value;
   if (!username || !password) { toast('Operator and password required', 'error'); return; }
   try {
-    await api('/api/' + S.authMode, {
+    await api('/api/' + S.authMode /* api-paths: /api/login /api/register */, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ username, password }),
