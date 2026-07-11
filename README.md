@@ -136,7 +136,7 @@ Paste them in the web UI under **Settings → Providers**. Prefixes are validate
 The web UI is a single-page app talking to a JSON API, and everything it does you can script. Two things to know before calling it from code:
 
 1. **Authenticate first.** `POST /api/login` (or `/api/register`) sets a session cookie; send it on subsequent requests.
-2. **CSRF on mutations.** State-changing endpoints (settings, provider config, admin actions, password reset) require an `X-CSRF-Token` header. Fetch a token from `GET /api/csrf-token`.
+2. **CSRF on sensitive mutations.** Password reset (`POST /api/forgot-password`, `/api/reset-password`), admin actions (`POST /api/admin/promote`, `/api/admin/demote`), and provider config (`PUT /api/providers/{name}`) require an `X-CSRF-Token` header; fetch a token from `GET /api/csrf-token`. Other mutations, settings included, authenticate by session cookie alone.
 
 | Area | Endpoints |
 |------|-----------|
@@ -144,7 +144,7 @@ The web UI is a single-page app talking to a JSON API, and everything it does yo
 | Account recovery | `POST /api/forgot-username` (lists usernames), `/api/forgot-password` (admin: mint reset token), `/api/reset-password` |
 | Admin | `GET /api/admin/users` · `POST /api/admin/promote`, `/api/admin/demote` |
 | Settings | `GET`/`PUT /api/settings` |
-| Providers | `GET /api/providers`, `/api/providers/{name}`, `/api/providers/{name}/models` · `PUT /api/providers/{name}` |
+| Providers | `GET /api/providers`, `/api/providers/{name}`, `/api/providers/{name}/models` · `PUT /api/providers/{name}` · `GET /api/correction-models/{provider}` (LLM models for correct/summarize) |
 | Transcription | `POST /api/transcribe` · `GET /api/transcripts` · `GET`/`PATCH`/`DELETE /api/transcripts/{id}` · `GET .../audio` · `POST .../retranscribe`, `.../cancel`, `.../resume`, `.../retry-failed-chunks` |
 | Transcript tools | `POST .../correct`, `.../summarize`, `.../rediarize`, `.../voice-match`, `.../context` (attach hotword-source doc) · `GET .../summary` |
 | Run history | `GET .../runs/{kind}`, `GET .../versions` |
