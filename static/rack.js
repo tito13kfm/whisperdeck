@@ -522,6 +522,9 @@ async function submitAuth(ev) {
 
 async function logout() {
   try { await api('/api/logout', { method: 'POST' }); } catch { /* session may be gone */ }
+  // Logout clears the whole session server-side, invalidating csrfToken too —
+  // refresh it so a subsequent login in this page session isn't rejected.
+  await refreshCsrfToken();
   showLogin();
 }
 

@@ -2,7 +2,7 @@
 
 **Transcribe · Diarize · Summarize · Identify**
 
-![WhisperDeck](https://img.shields.io/badge/version-0.7-blue)
+![WhisperDeck](https://img.shields.io/badge/version-0.8-blue)
 ![Python](https://img.shields.io/badge/python-3.11--3.13-blue)
 ![License](https://img.shields.io/badge/license-Hippocratic%203.0-lightgrey)
 
@@ -166,8 +166,20 @@ Paste them in the web UI under **Settings → Providers**. Prefixes are validate
 
 The web UI is a single-page app talking to a JSON API, and everything it does you can script. Two things to know before calling it from code:
 
-1. **Authenticate first.** `POST /api/login` (or `/api/register`) sets a session cookie; send it on subsequent requests.
-2. **CSRF on sensitive mutations.** Password reset (`POST /api/forgot-password`, `/api/reset-password`), admin actions (`POST /api/admin/promote`, `/api/admin/demote`), and provider config (`PUT /api/providers/{name}`) require an `X-CSRF-Token` header; fetch a token from `GET /api/csrf-token`. Other mutations, settings included, authenticate by session cookie alone. This is deliberate: the session cookie is `SameSite=Lax`, so modern browsers refuse to attach it to cross-site POST/PUT/DELETE requests, which blocks classic CSRF on those endpoints without a token round-trip.
+1. **Fetch a CSRF token first.** `GET /api/csrf-token` returns `{"token": "..."}` and starts a session (cookie). Keep the cookie jar across requests.
+2. **Send `X-CSRF-Token` on every mutation.** Every non-`GET` `/api/*` request — including `POST /api/login` and `/api/register` themselves — validates the header against the token issued for its session; a missing or stale token gets a `403`. Fetch a fresh token anytime with `GET /api/csrf-token`; the previous token stays valid until a new one replaces it.
+
+> **Migrating from < 0.8:** scripts that logged in and mutated with cookie auth alone now get `403`. Round-trip a token first:
+> ```sh
+> # cookie jar keeps the session across requests
+> TOKEN=$(curl -sb cookies.txt -c cookies.txt http://localhost:9781/api/csrf-token | jq -r .token)
+> curl -sb cookies.txt -c cookies.txt -X POST http://localhost:9781/api/login \
+>   -H "Content-Type: application/json" -H "X-CSRF-Token: $TOKEN" \
+>   -d '{"username": "you", "password": "..."}'
+> curl -sb cookies.txt -c cookies.txt -X PUT http://localhost:9781/api/settings \
+>   -H "Content-Type: application/json" -H "X-CSRF-Token: $TOKEN" \
+>   -d '{"correction_provider": "local"}'
+> ```
 
 | Area | Endpoints |
 |------|-----------|

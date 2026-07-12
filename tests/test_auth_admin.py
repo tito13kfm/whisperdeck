@@ -12,12 +12,22 @@ from services.auth import hash_reset_token
 # ── Helpers ────────────────────────────────────────────────────────────────
 
 
-def _register(client, username="other", password="pass123"):
-    """Register a second user (the conftest client already has 'testuser')."""
-    # Need a fresh client without auth to register a new user
+def _fresh_client():
+    """A new TestClient with no auth, but with a CSRF token already fetched
+    and attached — every /api/* mutation requires one, including
+    /api/register and /api/login themselves (issue #36)."""
     from fastapi.testclient import TestClient
     import app as app_module
     fresh = TestClient(app_module.app)
+    csrf_token = fresh.get("/api/csrf-token").json()["token"]
+    fresh.headers["X-CSRF-Token"] = csrf_token
+    return fresh
+
+
+def _register(client, username="other", password="pass123"):
+    """Register a second user (the conftest client already has 'testuser')."""
+    # Need a fresh client without auth to register a new user
+    fresh = _fresh_client()
     resp = fresh.post("/api/register", json={"username": username, "password": password})
     return resp
 
@@ -67,13 +77,9 @@ class TestForgotPassword:
     def test_non_admin_rejected(self, client, db_session):
         # testuser is auto-admin (first user). Create a second user who is NOT
         # admin, log in as them, and verify the admin-only gate.
-        from fastapi.testclient import TestClient
-        import app as app_module
         _register(client, "nonadmin", "pass")
-        nonadmin_client = TestClient(app_module.app)
+        nonadmin_client = _fresh_client()
         nonadmin_client.post("/api/login", json={"username": "nonadmin", "password": "pass"})
-        csrf = nonadmin_client.get("/api/csrf-token").json()["token"]
-        nonadmin_client.headers["X-CSRF-Token"] = csrf
         resp = nonadmin_client.post("/api/forgot-password", json={"username": "testuser"})
         assert resp.status_code == 403
 
@@ -190,10 +196,8 @@ class TestAdminUsers:
         assert any(u["username"] == "testuser" for u in users)
 
     def test_non_admin_rejected(self, client, db_session):
-        from fastapi.testclient import TestClient
-        import app as app_module
         _register(client, "nonadmin_users", "pass")
-        nonadmin_client = TestClient(app_module.app)
+        nonadmin_client = _fresh_client()
         nonadmin_client.post("/api/login", json={"username": "nonadmin_users", "password": "pass"})
         resp = nonadmin_client.get("/api/admin/users")
         assert resp.status_code == 403
@@ -214,13 +218,9 @@ class TestAdminPromote:
         assert user.is_admin is True
 
     def test_non_admin_rejected(self, client, db_session):
-        from fastapi.testclient import TestClient
-        import app as app_module
         _register(client, "nonadmin_promote", "pass")
-        nonadmin_client = TestClient(app_module.app)
+        nonadmin_client = _fresh_client()
         nonadmin_client.post("/api/login", json={"username": "nonadmin_promote", "password": "pass"})
-        csrf = nonadmin_client.get("/api/csrf-token").json()["token"]
-        nonadmin_client.headers["X-CSRF-Token"] = csrf
         resp = nonadmin_client.post("/api/admin/promote", json={"username": "testuser"})
         assert resp.status_code == 403
 
@@ -265,13 +265,9 @@ class TestAdminDemote:
         assert resp.status_code == 400
 
     def test_non_admin_rejected(self, client, db_session):
-        from fastapi.testclient import TestClient
-        import app as app_module
         _register(client, "nonadmin_demote", "pass")
-        nonadmin_client = TestClient(app_module.app)
+        nonadmin_client = _fresh_client()
         nonadmin_client.post("/api/login", json={"username": "nonadmin_demote", "password": "pass"})
-        csrf = nonadmin_client.get("/api/csrf-token").json()["token"]
-        nonadmin_client.headers["X-CSRF-Token"] = csrf
         resp = nonadmin_client.post("/api/admin/demote", json={"username": "testuser"})
         assert resp.status_code == 403
 
