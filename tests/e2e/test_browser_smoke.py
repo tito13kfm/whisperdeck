@@ -10,6 +10,7 @@ This is the "is the e2e infrastructure working?" test. It exercises:
 If this passes, future e2e tests can rely on the same fixtures. The test
 itself is a no-op for app behavior — it just proves we can drive the UI.
 """
+import http.cookiejar
 import urllib.request
 import json
 import pytest
@@ -22,15 +23,20 @@ pytestmark = pytest.mark.e2e
 # Done at module-import time rather than as a fixture so the network
 # call only happens once and is visible if it fails.
 def _ensure_test_user(base_url):
+    # /api/register is CSRF-protected too (issue #36): use a cookie-jar-backed
+    # opener so the anonymous session from GET /api/csrf-token carries over
+    # to the register POST, same as the SPA's checkAuth() -> register flow.
+    opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
+    csrf_token = json.loads(opener.open(base_url + "/api/csrf-token", timeout=5).read()).get("token")
     body = json.dumps({"username": "e2e_smoke", "password": "e2e_smoke_pass_123"}).encode()
     req = urllib.request.Request(
         base_url + "/api/register",
         data=body,
-        headers={"Content-Type": "application/json"},
+        headers={"Content-Type": "application/json", "X-CSRF-Token": csrf_token},
         method="POST",
     )
     try:
-        urllib.request.urlopen(req, timeout=5).read()
+        opener.open(req, timeout=5).read()
     except urllib.error.HTTPError as e:
         # 409 = already registered, which is fine for a re-run.
         if e.code != 409:

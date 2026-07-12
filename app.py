@@ -20,6 +20,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse, FileResponse, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.sessions import SessionMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
 from sqlalchemy.orm import Session
 
 from database import init_db, backfill_user_id, Transcript, Summary, VoiceProfile, VoiceClip, ProviderConfig, User, LlmJob, utcnow_naive
@@ -150,7 +151,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="WhisperDeck",
-    version="0.7.0",
+    version="0.8.0",
     description="Modern meeting transcription & voice intelligence",
     lifespan=lifespan,
 )
@@ -165,11 +166,35 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-# Deliberate CSRF posture (issue #32): most mutations authenticate by session
-# cookie alone and rely on SameSite=Lax to block cross-site requests; only
-# high-consequence endpoints (account recovery, admin, provider config) also
-# validate X-CSRF-Token. Pin lax explicitly so a Starlette default change
-# can't silently weaken that posture.
+
+# CSRF-safe methods never mutate state, so they're exempt; every other
+# /api/* request must carry a token matching the one issued by
+# GET /api/csrf-token for its session — including /api/login and
+# /api/register, since the SPA always fetches a token (anonymous session)
+# before ever showing the login form (see rack.js checkAuth()).
+_CSRF_SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
+
+
+async def enforce_csrf(request: Request, call_next):
+    if request.method not in _CSRF_SAFE_METHODS and request.url.path.startswith("/api/"):
+        csrf = request.headers.get("x-csrf-token") or ""
+        if not validate_csrf_token(request.session, csrf):
+            return JSONResponse(status_code=403, content={"detail": "Invalid or missing CSRF token"})
+    return await call_next(request)
+
+
+# Starlette's add_middleware() prepends to the stack, so the *last* middleware
+# added here runs *first* on each request — enforce_csrf must therefore be
+# registered before SessionMiddleware so that, at request time, Session runs
+# first (populating request.session) and enforce_csrf runs second (reading
+# it). Registering these two in the other order raises "SessionMiddleware
+# must be installed to access request.session" even though it is.
+app.add_middleware(BaseHTTPMiddleware, dispatch=enforce_csrf)
+# CSRF posture (issue #36, supersedes the SameSite-only posture from #32):
+# every session-cookie-authenticated mutation validates X-CSRF-Token via
+# enforce_csrf above, independent of browser SameSite behavior. Pin lax
+# explicitly anyway so a Starlette default change can't silently weaken the
+# defense-in-depth layer.
 app.add_middleware(SessionMiddleware, secret_key=SESSION_SECRET, same_site="lax")
 
 
@@ -328,10 +353,6 @@ async def forgot_password(request: Request, data: dict = Body(...), db: Session 
     """Admin-only: generate a one-time reset token for any user.
     The token is returned directly (no email) — the admin shares it with
     the affected user out-of-band."""
-    # CSRF check — consistent with other state-changing admin actions (#22)
-    csrf = request.headers.get("x-csrf-token") or ""
-    if not validate_csrf_token(request.session, csrf):
-        raise HTTPException(status_code=403, detail="Invalid or missing CSRF token")
     if not current_user.is_admin:
         raise HTTPException(status_code=403, detail="Only administrators can generate password reset tokens")
     client_ip = request.client.host if request.client else None
@@ -350,10 +371,6 @@ async def forgot_password(request: Request, data: dict = Body(...), db: Session 
 @app.post("/api/reset-password")
 async def reset_password_route(request: Request, data: dict = Body(...), db: Session = Depends(get_db)):
     """Reset a password using a valid one-time token. Auto-logs in on success."""
-    # CSRF check — the endpoint auto-logs in on success, creating a session
-    csrf = request.headers.get("x-csrf-token") or ""
-    if not validate_csrf_token(request.session, csrf):
-        raise HTTPException(status_code=403, detail="Invalid or missing CSRF token")
     client_ip = request.client.host if request.client else None
     if client_ip and not rate_limiter.check(f"reset-password:{client_ip}", max_requests=5, window_seconds=300):
         raise HTTPException(status_code=429, detail="Too many attempts — try again later")
@@ -380,12 +397,8 @@ async def admin_users(db: Session = Depends(get_db), current_user: User = Depend
 
 
 @app.post("/api/admin/promote")
-async def admin_promote(request: Request, data: dict = Body(...), db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+async def admin_promote(data: dict = Body(...), db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     """Admin-only: grant admin status to another user."""
-    # CSRF check — privilege escalation is more sensitive than provider config (#22)
-    csrf = request.headers.get("x-csrf-token") or ""
-    if not validate_csrf_token(request.session, csrf):
-        raise HTTPException(status_code=403, detail="Invalid or missing CSRF token")
     if not current_user.is_admin:
         raise HTTPException(status_code=403, detail="Administrator access required")
     target_username = (data.get("username") or "").strip()
@@ -398,12 +411,8 @@ async def admin_promote(request: Request, data: dict = Body(...), db: Session = 
 
 
 @app.post("/api/admin/demote")
-async def admin_demote(request: Request, data: dict = Body(...), db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+async def admin_demote(data: dict = Body(...), db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     """Admin-only: revoke admin status from another user (cannot self-demote)."""
-    # CSRF check — privilege changes are more sensitive than provider config (#22)
-    csrf = request.headers.get("x-csrf-token") or ""
-    if not validate_csrf_token(request.session, csrf):
-        raise HTTPException(status_code=403, detail="Invalid or missing CSRF token")
     if not current_user.is_admin:
         raise HTTPException(status_code=403, detail="Administrator access required")
     target_username = (data.get("username") or "").strip()
@@ -467,7 +476,7 @@ async def health():
     return {
         "ok": True,
         "app": "WhisperDeck",
-        "version": "0.7.0",
+        "version": "0.8.0",
         "diarization_backend": diarization_service._check_pyannote(),
         "voice_id_backend": voice_id_service._backend,
     }
@@ -525,12 +534,7 @@ async def get_provider_config(name: str, db: Session = Depends(get_db), current_
 
 
 @app.put("/api/providers/{name}")
-async def update_provider_config(name: str, request: Request, data: dict = Body(...), db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    # CSRF check — reject mutation requests without a valid token
-    csrf = request.headers.get("x-csrf-token") or ""
-    if not validate_csrf_token(request.session, csrf):
-        raise HTTPException(status_code=403, detail="Invalid or missing CSRF token")
-
+async def update_provider_config(name: str, data: dict = Body(...), db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     cfg = db.query(ProviderConfig).filter(
         ProviderConfig.user_id == current_user.id,
         ProviderConfig.name == name,

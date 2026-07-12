@@ -61,7 +61,7 @@ print("  ✓ diarization_backend = True")
 # ── HTTP helper with cookie jar ───────────────────────────────────────
 cj = http.cookiejar.CookieJar()
 opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cj))
-CSRF_TOKEN = None  # set after login; required by /api/providers/{name}
+CSRF_TOKEN = None  # set below, before register/login; every mutation needs it now
 
 def api_json(method, path, body=None):
     data = json.dumps(body).encode() if body else None
@@ -91,9 +91,12 @@ def api_upload(path, filepath, extra_fields=None):
     body_bytes += f'Content-Disposition: form-data; name="file"; filename="{filename}"\r\n'.encode()
     body_bytes += b"Content-Type: audio/mpeg\r\n\r\n" + file_content + b"\r\n"
     body_bytes += f"--{boundary}--\r\n".encode()
+    headers = {"Content-Type": f"multipart/form-data; boundary={boundary}"}
+    if CSRF_TOKEN:
+        headers["X-CSRF-Token"] = CSRF_TOKEN
     req = urllib.request.Request(
         f"http://localhost:{port}{path}", data=body_bytes, method="POST",
-        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"}
+        headers=headers
     )
     resp = opener.open(req)
     return json.loads(resp.read().decode())
@@ -106,14 +109,22 @@ def api_form(method, path, fields):
         body_bytes += f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode()
         body_bytes += (value.encode() if isinstance(value, str) else value) + b"\r\n"
     body_bytes += f"--{boundary}--\r\n".encode()
+    headers = {"Content-Type": f"multipart/form-data; boundary={boundary}"}
+    if CSRF_TOKEN:
+        headers["X-CSRF-Token"] = CSRF_TOKEN
     req = urllib.request.Request(
         f"http://localhost:{port}{path}", data=body_bytes, method=method,
-        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"}
+        headers=headers
     )
     resp = opener.open(req)
     return json.loads(resp.read().decode())
 
-# ── Register & login ──────────────────────────────────────────────────
+# ── CSRF token, register & login ───────────────────────────────────────
+# /api/register and /api/login are CSRF-protected too (issue #36) — fetch
+# a token against the anonymous session before either call, mirroring what
+# the SPA does on every page load (rack.js checkAuth() -> refreshCsrfToken()).
+CSRF_TOKEN = api_json("GET", "/api/csrf-token").get("token")
+
 print("\nRegistering user...")
 try:
     api_json("POST", "/api/register", {"username": "diartest", "password": "diartest123"})
@@ -123,9 +134,6 @@ except urllib.error.HTTPError as e:
     print(f"  Register: {e.code} - {body}")
     print("  Trying login instead...")
     api_json("POST", "/api/login", {"username": "diartest", "password": "diartest123"})
-
-# CSRF token: PUT /api/providers/{name} validates X-CSRF-Token
-CSRF_TOKEN = api_json("GET", "/api/csrf-token").get("token")
 
 # ── Configure local provider for Lemonade ─────────────────────────────
 print("Configuring local provider...")

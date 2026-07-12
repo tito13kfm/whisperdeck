@@ -104,14 +104,15 @@ def client(db_session):
     # its client unauthenticated and causing unrelated-looking 401s downstream.
     rate_limiter._buckets.clear()
     test_client = TestClient(app_module.app)
+    # Every mutation, including /api/register itself, requires X-CSRF-Token
+    # (services/security.py, issue #36) — fetch and attach it before
+    # registering so every test's mutation calls carry it without each test
+    # having to fetch/attach it itself.
+    csrf_token = test_client.get("/api/csrf-token").json()["token"]
+    test_client.headers["X-CSRF-Token"] = csrf_token
     test_client.post(
         "/api/register",
         json={"username": "testuser", "password": "testpass123"},
     )
-    # PUT/POST/PATCH/DELETE mutations require X-CSRF-Token (services/security.py,
-    # added in #22). Set it once as a default header so every test's mutation
-    # calls carry it without each test having to fetch/attach it itself.
-    csrf_token = test_client.get("/api/csrf-token").json()["token"]
-    test_client.headers["X-CSRF-Token"] = csrf_token
     yield test_client
     app_module.app.dependency_overrides.clear()
