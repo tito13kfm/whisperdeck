@@ -97,6 +97,21 @@ def get_audio_duration(audio_path: str) -> float:
     return float(result.stdout.strip())
 
 
+def has_video_stream(path: str) -> bool:
+    """True if the file has at least one video stream — used to decide
+    whether to retain the original upload for playback, independent of
+    file extension (a misnamed or audio-only .mp4 must report False)."""
+    try:
+        result = subprocess.run(
+            [_ffprobe_bin(), "-v", "error", "-select_streams", "v",
+             "-show_entries", "stream=codec_type", "-of", "csv=p=0", path],
+            capture_output=True, text=True,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0 and bool(result.stdout.strip())
+
+
 _SILENCE_END_RE = re.compile(r"silence_end:\s*([\d.]+)\s*\|\s*silence_duration:\s*([\d.]+)")
 
 
