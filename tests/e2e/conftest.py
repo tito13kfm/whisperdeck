@@ -3,7 +3,7 @@
 Starts a real uvicorn server in a background thread (so the browser can hit
 it over a real socket) and skips the whole module if Playwright or
 Chromium aren't installed. Per-test isolation is handled by conftest.py
-at the parent level (WHISPERDESK_DATA_DIR redirect, rate-limiter reset).
+at the parent level (WHISPERDECK_DATA_DIR redirect, rate-limiter reset).
 """
 import os
 import socket
@@ -26,7 +26,7 @@ def live_server():
     Uses the real FastAPI app from app.py so the same routes, middleware,
     and CSRF/rate-limit logic the browser would see in production is what
     the test sees. Data isolation is already handled by tests/conftest.py
-    (WHISPERDESK_DATA_DIR redirect).
+    (WHISPERDECK_DATA_DIR redirect).
     """
     import uvicorn
     import sys

@@ -2,11 +2,11 @@
 capture_screenshots.py
 ======================
 
-Drive the WhisperDesk browser via Playwright and capture screenshots
+Drive the WhisperDeck browser via Playwright and capture screenshots
 of all major pages, switching through all 4 UI themes.
 
 Prereqs: pip install playwright && playwright install chromium
-         A WhisperDesk server running on PORT (default 9782)
+         A WhisperDeck server running on PORT (default 9782)
          A valid login (use screencap/screencap_pass_2026 or login inline)
 """
 

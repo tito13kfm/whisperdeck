@@ -7,7 +7,7 @@ Usage:
     python scripts/reset_password.py --username <name> --new-password <pass> --data-dir /path/to/data
 
 Environment variables:
-    WHISPERDESK_DATA_DIR   Override the data directory (default: ./data)
+    WHISPERDECK_DATA_DIR   Override the data directory (default: ./data)
 """
 
 import argparse
@@ -26,10 +26,10 @@ def main():
     parser = argparse.ArgumentParser(description="Reset a WhisperDeck user password")
     parser.add_argument("--username", required=True, help="Username to reset")
     parser.add_argument("--new-password", required=True, help="New password")
-    parser.add_argument("--data-dir", default=None, help="Data directory (default: $WHISPERDESK_DATA_DIR or ./data)")
+    parser.add_argument("--data-dir", default=None, help="Data directory (default: $WHISPERDECK_DATA_DIR or ./data)")
     args = parser.parse_args()
 
-    data_dir = args.data_dir or os.environ.get("WHISPERDESK_DATA_DIR") or "data"
+    data_dir = args.data_dir or os.environ.get("WHISPERDECK_DATA_DIR") or "data"
     db_path = os.path.join(data_dir, "whisperdesk.db")
 
     if not os.path.exists(db_path):

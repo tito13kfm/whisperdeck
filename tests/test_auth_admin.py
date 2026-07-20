@@ -291,9 +291,9 @@ class TestEnvVarIsolation:
         not the production data/ folder. This is the exact bug the audit found."""
         import app as app_module
         import os
-        # The conftest sets WHISPERDESK_DATA_DIR to a temp dir
-        expected = os.environ.get("WHISPERDESK_DATA_DIR", "")
-        assert expected, "conftest should have set WHISPERDESK_DATA_DIR"
+        # The conftest sets WHISPERDECK_DATA_DIR to a temp dir
+        expected = os.environ.get("WHISPERDECK_DATA_DIR", "")
+        assert expected, "conftest should have set WHISPERDECK_DATA_DIR"
         assert str(app_module.DATA_DIR) == expected
         # Must NOT be the production data dir — conftest uses tempfile.mkdtemp
         # which produces paths like /tmp/whisperdesk-test-XXXXXX, never ./data

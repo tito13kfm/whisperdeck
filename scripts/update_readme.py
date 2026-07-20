@@ -120,7 +120,7 @@ new = (
     "### Provider API keys\n\n"
     "Paste them in the web UI under **Settings → Providers**. Prefixes are validated "
     "on input: Groq `gsk_`, OpenAI `sk-`, Replicate `r8_`, OpenRouter `sk-or-`.\n\n"
-    "![Service panel — per-provider API keys, model pickers, and the WhisperDesk "
+    "![Service panel — per-provider API keys, model pickers, and the WhisperDeck "
     "faceplate / phosphor theme controls](screenshots/08-service-panel.png)"
 )
 assert old in content, "api keys anchor not found"

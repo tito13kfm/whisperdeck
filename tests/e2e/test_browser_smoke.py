@@ -61,7 +61,7 @@ def test_login_page_renders(page):
     )
     assert (
         "whisper" in page.title().lower()
-        or page.locator("text=WhisperDesk").count() > 0
+        or page.locator("text=WhisperDeck").count() > 0
     )
 
 

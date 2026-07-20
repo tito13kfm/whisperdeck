@@ -4,7 +4,7 @@ param(
 )
 
 $env:PORT = $Port
-$env:WHISPERDESK_DATA_DIR = $DataDir
+$env:WHISPERDECK_DATA_DIR = $DataDir
 $env:HUGGINGFACE_TOKEN = $env:HUGGINGFACE_TOKEN
 
 New-Item -ItemType Directory -Force -Path $DataDir | Out-Null

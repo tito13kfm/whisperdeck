@@ -34,13 +34,13 @@ def pytest_configure(config):
 
 
 # ── Prevent tests from touching the production data directory ──────────────
-# Set WHISPERDESK_DATA_DIR *before* importing app.py so that DATA_DIR,
+# Set WHISPERDECK_DATA_DIR *before* importing app.py so that DATA_DIR,
 # UPLOAD_DIR, TRANSCRIPT_DIR, VOICES_DIR, DB_PATH are all rooted in a
 # pytest-managed temp directory that is cleaned up after the session.
 # Without this, test uploads and transcript files accumulate in data/ and the
 # test database can silently replace the production one.
 
-_test_data_root = Path(os.environ.get("WHISPERDESK_TEST_DATA_DIR", ""))
+_test_data_root = Path(os.environ.get("WHISPERDECK_TEST_DATA_DIR", ""))
 if not _test_data_root or not _test_data_root.is_absolute():
     # Use a temp directory relative to the repo root — pytest's tmp_path
     # isn't available at module level, so we create one manually and clean
@@ -48,9 +48,9 @@ if not _test_data_root or not _test_data_root.is_absolute():
     _test_data_root = Path(__file__).resolve().parent.parent / ".pytest-data"
     # Force a unique per-run directory to avoid stale state
     import tempfile as _tempfile
-    _test_data_root = Path(_tempfile.mkdtemp(prefix="whisperdesk-test-"))
+    _test_data_root = Path(_tempfile.mkdtemp(prefix="whisperdeck-test-"))
 
-os.environ["WHISPERDESK_DATA_DIR"] = str(_test_data_root)
+os.environ["WHISPERDECK_DATA_DIR"] = str(_test_data_root)
 
 import app as app_module
 from database import init_db
@@ -60,7 +60,7 @@ from services.security import rate_limiter
 def pytest_sessionfinish(session, exitstatus):
     """Clean up the temp test data directory after the test session."""
     import shutil
-    _tdr = os.environ.get("WHISPERDESK_DATA_DIR", "")
+    _tdr = os.environ.get("WHISPERDECK_DATA_DIR", "")
     if _tdr and os.path.isdir(_tdr):
         try:
             shutil.rmtree(_tdr, ignore_errors=True)

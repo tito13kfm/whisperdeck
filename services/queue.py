@@ -611,7 +611,7 @@ async def _process_transcript_jobs(db, transcript_id: int, jobs: list, diarizati
     from services.settings import _decrypt_key_if_needed
     from pathlib import Path
     import os as os_module
-    _queue_data = Path(os_module.environ.get("WHISPERDESK_DATA_DIR") or os_module.environ.get("WHISPERDECK_DATA_DIR") or str(Path(__file__).parent.parent / "data"))
+    _queue_data = Path(os_module.environ.get("WHISPERDECK_DATA_DIR") or os_module.environ.get("WHISPERDESK_DATA_DIR") or str(Path(__file__).parent.parent / "data"))
     _queue_secret_path = _queue_data / ".session_secret"
     _queue_secret = _queue_secret_path.read_text().strip() if _queue_secret_path.exists() else ""
     decrypted_key = _decrypt_key_if_needed(raw_key, _queue_secret)
