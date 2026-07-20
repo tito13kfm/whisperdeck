@@ -783,7 +783,10 @@ async def list_files(db: Session = Depends(get_db), current_user: User = Depends
         real = os.path.realpath(full)
         try:
             size = os.path.getsize(full)
-            mtime = datetime.datetime.fromtimestamp(os.path.getmtime(full), datetime.UTC).isoformat()
+            # Naive-UTC isoformat (no +00:00 suffix), matching created_at and
+            # the rest of the app (utcnow_naive) — the frontend's timeAgo()
+            # appends 'Z' itself and produces Invalid Date on "...+00:00Z".
+            mtime = datetime.datetime.fromtimestamp(os.path.getmtime(full), datetime.UTC).replace(tzinfo=None).isoformat()
         except OSError:
             continue  # vanished between listdir and stat (job cleanup, concurrent delete)
         own_refs = [(t, f) for t, f in refs.get(real, []) if t.user_id == current_user.id]

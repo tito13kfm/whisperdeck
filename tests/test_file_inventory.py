@@ -481,3 +481,15 @@ def test_list_files_survives_file_vanishing_between_listdir_and_stat(client, db_
     assert r.status_code == 200
     all_paths = [f["path"] for f in r.json()["linked"]] + [f["path"] for f in r.json()["orphaned"]]
     assert str(ghost) not in all_paths
+
+
+def test_list_files_modified_at_is_naive_utc_isoformat(client, db_session, tmp_path, monkeypatch):
+    """modified_at must match the app-wide naive-UTC isoformat convention
+    (created_at etc.) — the frontend's timeAgo() appends 'Z' itself, so a
+    '+00:00' offset suffix would render as 'Invalid Date' / 'NaN ago'."""
+    import app as app_module
+    monkeypatch.setattr(app_module, "UPLOAD_DIR", tmp_path)
+    (tmp_path / "o.mp3").write_bytes(b"o")
+    r = client.get("/api/files")
+    stamp = r.json()["orphaned"][0]["modified_at"]
+    assert "+" not in stamp and not stamp.endswith("Z")
