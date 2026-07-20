@@ -464,7 +464,9 @@ async def _run_transcription_pipeline(
     # the stored audio_path already went through this decision once.
     raw_path = save_path
     if source_transcript_id is not None:
-        parent = db.query(Transcript).filter(Transcript.id == source_transcript_id).first()
+        parent = db.query(Transcript).filter(
+            Transcript.id == source_transcript_id, Transcript.user_id == current_user.id
+        ).first()
         video_path = parent.video_path if parent else None
     else:
         playable = raw_path.suffix.lower() in _VIDEO_MIME
