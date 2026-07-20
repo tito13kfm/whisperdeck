@@ -272,3 +272,212 @@ def test_list_files_shows_one_linked_entry_per_transcript_for_shared_path(client
     assert len(matching) == 2
     transcript_ids = {f["transcript_id"] for f in matching}
     assert transcript_ids == {original.id, retranscribed.id}
+
+
+def _chunk_with_status(db_session, tmp_path, status, transcript_status="processing"):
+    chunk_file = tmp_path / f"chunk_{status}.mp3"
+    chunk_file.write_bytes(b"chunk")
+    user = db_session.query(User).filter(User.username == "testuser").first()
+    t = Transcript(user_id=user.id, title="t", filename="t.mp3", status=transcript_status, full_text="")
+    db_session.add(t)
+    db_session.commit()
+    job = TranscriptionJob(transcript_id=t.id, chunk_index=0, start_time=0.0, end_time=1.0,
+                            audio_path=str(chunk_file), status=status)
+    db_session.add(job)
+    db_session.commit()
+    return chunk_file, t
+
+
+def test_list_files_excludes_failed_chunk_from_orphaned(client, db_session, tmp_path, monkeypatch):
+    """Failed chunks are not dead — the queue worker auto-retries them after
+    a backoff window, and 'Retry failed sections' resets them to pending.
+    Their files must not be offered up as orphaned garbage."""
+    import app as app_module
+    monkeypatch.setattr(app_module, "UPLOAD_DIR", tmp_path)
+    chunk_file, _ = _chunk_with_status(db_session, tmp_path, "failed", transcript_status="partial")
+
+    r = client.get("/api/files")
+    orphan_paths = [f["path"] for f in r.json()["orphaned"]]
+    assert str(chunk_file) not in orphan_paths
+
+
+def test_list_files_excludes_cancelled_chunk_from_orphaned(client, db_session, tmp_path, monkeypatch):
+    """Cancelled chunks are resumable (resume_cancelled_chunks resets them
+    to pending), so their files are still needed."""
+    import app as app_module
+    monkeypatch.setattr(app_module, "UPLOAD_DIR", tmp_path)
+    chunk_file, _ = _chunk_with_status(db_session, tmp_path, "cancelled", transcript_status="cancelled")
+
+    r = client.get("/api/files")
+    orphan_paths = [f["path"] for f in r.json()["orphaned"]]
+    assert str(chunk_file) not in orphan_paths
+
+
+def test_delete_skips_failed_chunk_as_in_use(client, db_session, tmp_path, monkeypatch):
+    import app as app_module
+    monkeypatch.setattr(app_module, "UPLOAD_DIR", tmp_path)
+    chunk_file, _ = _chunk_with_status(db_session, tmp_path, "failed", transcript_status="partial")
+
+    r = client.post("/api/files/delete", json={"paths": [str(chunk_file)]})
+    assert r.status_code == 200
+    assert any(s["path"] == str(chunk_file) and s["reason"] == "in_use" for s in r.json()["skipped"])
+    assert chunk_file.exists()
+
+
+def test_delete_skips_cancelled_chunk_as_in_use(client, db_session, tmp_path, monkeypatch):
+    import app as app_module
+    monkeypatch.setattr(app_module, "UPLOAD_DIR", tmp_path)
+    chunk_file, _ = _chunk_with_status(db_session, tmp_path, "cancelled", transcript_status="cancelled")
+
+    r = client.post("/api/files/delete", json={"paths": [str(chunk_file)]})
+    assert r.status_code == 200
+    assert any(s["path"] == str(chunk_file) and s["reason"] == "in_use" for s in r.json()["skipped"])
+    assert chunk_file.exists()
+
+
+def test_delete_skips_processing_transcripts_source_audio(client, db_session, tmp_path, monkeypatch):
+    """A processing transcript's audio_path is the pre-chunk source file —
+    chunked-path diarization reads it at finalize (_finalize_if_done guards
+    on transcript.audio_path being set, silently skipping diarization if
+    it's gone). Deleting it mid-run silently loses speaker labels."""
+    import app as app_module
+    monkeypatch.setattr(app_module, "UPLOAD_DIR", tmp_path)
+    source = tmp_path / "source.mp3"
+    source.write_bytes(b"source")
+    user = db_session.query(User).filter(User.username == "testuser").first()
+    t = Transcript(user_id=user.id, title="t", filename="t.mp3", status="processing",
+                   full_text="", audio_path=str(source))
+    db_session.add(t)
+    db_session.commit()
+
+    r = client.post("/api/files/delete", json={"paths": [str(source)]})
+    assert r.status_code == 200
+    assert any(s["path"] == str(source) and s["reason"] == "in_use" for s in r.json()["skipped"])
+    assert source.exists()
+    db_session.expire_all()
+    assert db_session.query(Transcript).filter(Transcript.id == t.id).first().audio_path == str(source)
+
+
+def test_delete_skips_source_audio_of_transcript_with_retryable_chunks(client, db_session, tmp_path, monkeypatch):
+    """A partial transcript with failed chunks can re-enter the pipeline via
+    'Retry failed sections' — its source audio_path is needed again at
+    finalize, even though the transcript's own status looks terminal."""
+    import app as app_module
+    monkeypatch.setattr(app_module, "UPLOAD_DIR", tmp_path)
+    source = tmp_path / "source.mp3"
+    source.write_bytes(b"source")
+    user = db_session.query(User).filter(User.username == "testuser").first()
+    t = Transcript(user_id=user.id, title="t", filename="t.mp3", status="partial",
+                   full_text="x", audio_path=str(source), diarize_requested=True)
+    db_session.add(t)
+    db_session.commit()
+    chunk = tmp_path / "c0.mp3"
+    chunk.write_bytes(b"c")
+    job = TranscriptionJob(transcript_id=t.id, chunk_index=0, start_time=0.0, end_time=1.0,
+                            audio_path=str(chunk), status="failed")
+    db_session.add(job)
+    db_session.commit()
+
+    r = client.post("/api/files/delete", json={"paths": [str(source)]})
+    assert r.status_code == 200
+    assert any(s["path"] == str(source) and s["reason"] == "in_use" for s in r.json()["skipped"])
+    assert source.exists()
+
+
+def test_delete_completed_transcripts_media_is_allowed(client, db_session, tmp_path, monkeypatch):
+    """Counterpart to the in_use guards: a completed transcript with only
+    completed jobs has no revival path that needs the file — deleting is the
+    user's informed choice, and has_audio-gated features degrade cleanly."""
+    import app as app_module
+    monkeypatch.setattr(app_module, "UPLOAD_DIR", tmp_path)
+    source = tmp_path / "done.mp3"
+    source.write_bytes(b"done")
+    user = db_session.query(User).filter(User.username == "testuser").first()
+    t = Transcript(user_id=user.id, title="t", filename="t.mp3", status="completed",
+                   full_text="x", audio_path=str(source))
+    db_session.add(t)
+    db_session.commit()
+    job = TranscriptionJob(transcript_id=t.id, chunk_index=0, start_time=0.0, end_time=1.0,
+                            audio_path=str(tmp_path / "c_done.mp3"), status="completed")
+    db_session.add(job)
+    db_session.commit()
+
+    r = client.post("/api/files/delete", json={"paths": [str(source)]})
+    assert r.status_code == 200
+    assert str(source) in r.json()["deleted"]
+    assert not source.exists()
+    db_session.expire_all()
+    assert db_session.query(Transcript).filter(Transcript.id == t.id).first().audio_path is None
+
+
+def test_delete_matches_db_reference_by_realpath_not_string(client, db_session, tmp_path, monkeypatch):
+    """The inventory classifies linked files by realpath, so delete must
+    too — a textual variant of the same path stored in the DB (here a
+    redundant '.' segment) must still count as a reference, or the file
+    gets removed as an 'orphan' out from under the transcript."""
+    import app as app_module
+    monkeypatch.setattr(app_module, "UPLOAD_DIR", tmp_path)
+    f = tmp_path / "variant.mp3"
+    f.write_bytes(b"variant")
+    variant = os.path.join(str(tmp_path), ".", "variant.mp3")
+    assert variant != str(f) and os.path.realpath(variant) == os.path.realpath(str(f))
+    user = db_session.query(User).filter(User.username == "testuser").first()
+    t = Transcript(user_id=user.id, title="t", filename="t.mp3", status="completed",
+                   full_text="x", audio_path=variant)
+    db_session.add(t)
+    db_session.commit()
+
+    r = client.post("/api/files/delete", json={"paths": [str(f)]})
+    assert r.status_code == 200
+    assert str(f) in r.json()["deleted"]
+    db_session.expire_all()
+    assert db_session.query(Transcript).filter(Transcript.id == t.id).first().audio_path is None
+
+
+def test_delete_transcript_keeps_file_referenced_by_sibling_under_textual_path_variant(client, db_session, tmp_path):
+    """delete_transcript's still-referenced check must also compare
+    realpaths — a sibling holding a textual variant of the same path is
+    still a live reference."""
+    from database import Transcript as _T
+    shared = tmp_path / "shared2.mp3"
+    shared.write_bytes(b"shared2")
+    variant = os.path.join(str(tmp_path), ".", "shared2.mp3")
+    user = db_session.query(User).filter(User.username == "testuser").first()
+    a = _T(user_id=user.id, title="a", filename="t.mp3", status="completed",
+           full_text="x", audio_path=str(shared))
+    b = _T(user_id=user.id, title="b", filename="t.mp3", status="completed",
+           full_text="y", audio_path=variant)
+    db_session.add_all([a, b])
+    db_session.commit()
+
+    r = client.delete(f"/api/transcripts/{a.id}")
+    assert r.status_code == 200
+    assert shared.exists()
+
+
+def test_delete_rejects_upload_dir_itself(client, db_session, tmp_path, monkeypatch):
+    import app as app_module
+    monkeypatch.setattr(app_module, "UPLOAD_DIR", tmp_path)
+    r = client.post("/api/files/delete", json={"paths": [str(tmp_path)]})
+    assert r.status_code == 400
+
+
+def test_list_files_survives_file_vanishing_between_listdir_and_stat(client, db_session, tmp_path, monkeypatch):
+    """A file deleted by another actor between os.listdir and the stat
+    calls must be skipped, not 500 the whole inventory."""
+    import app as app_module
+    monkeypatch.setattr(app_module, "UPLOAD_DIR", tmp_path)
+    ghost = tmp_path / "ghost.mp3"
+    ghost.write_bytes(b"ghost")
+    real_getsize = os.path.getsize
+
+    def flaky_getsize(p):
+        if os.path.basename(str(p)) == "ghost.mp3":
+            raise OSError("vanished")
+        return real_getsize(p)
+
+    monkeypatch.setattr(app_module.os.path, "getsize", flaky_getsize)
+    r = client.get("/api/files")
+    assert r.status_code == 200
+    all_paths = [f["path"] for f in r.json()["linked"]] + [f["path"] for f in r.json()["orphaned"]]
+    assert str(ghost) not in all_paths

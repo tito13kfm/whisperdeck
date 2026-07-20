@@ -683,6 +683,50 @@ async def get_transcript(transcript_id: int, db: Session = Depends(get_db), curr
     return _serialize_transcript(db, t)
 
 
+# Job states whose chunk files are still needed: pending/running are
+# actively in flight, failed chunks get auto-retried after a backoff window
+# (and manually via "Retry failed sections"), and cancelled chunks are
+# resumable. Only completed jobs' files are truly dead.
+_LIVE_JOB_STATUSES = ("pending", "running", "failed", "cancelled")
+
+
+def _live_job_paths(db: Session) -> set:
+    return {
+        os.path.realpath(j.audio_path)
+        for j in db.query(TranscriptionJob).filter(TranscriptionJob.status.in_(_LIVE_JOB_STATUSES)).all()
+        if j.audio_path
+    }
+
+
+def _transcript_refs_by_realpath(db: Session) -> dict:
+    """Map realpath -> [(transcript, field)] over every user's transcripts.
+    Reference checks compare resolved paths, not raw strings — a textual
+    variant of the same file (redundant separators, '.' or '..' segments)
+    stored in the DB would slip past a string-equality check and let the
+    file be deleted out from under the transcript that references it."""
+    refs = {}
+    for t in db.query(Transcript).all():
+        for field in ("audio_path", "video_path"):
+            p = getattr(t, field)
+            if p:
+                refs.setdefault(os.path.realpath(p), []).append((t, field))
+    return refs
+
+
+def _transcript_pipeline_can_resume(db: Session, t: Transcript) -> bool:
+    """True if this transcript can (re-)enter the transcription pipeline —
+    still processing, or holding any retryable/resumable chunk job. Its
+    audio_path (the pre-chunk source file) is read again at finalize for
+    chunked-path diarization, so deleting the file for such a transcript
+    would silently drop speaker labels on the eventual retry/resume."""
+    if t.status == "processing":
+        return True
+    return db.query(TranscriptionJob).filter(
+        TranscriptionJob.transcript_id == t.id,
+        TranscriptionJob.status.in_(_LIVE_JOB_STATUSES),
+    ).first() is not None
+
+
 @app.delete("/api/transcripts/{transcript_id}")
 async def delete_transcript(transcript_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     t = db.query(Transcript).filter(
@@ -690,15 +734,14 @@ async def delete_transcript(transcript_id: int, db: Session = Depends(get_db), c
     ).first()
     if not t:
         raise HTTPException(status_code=404, detail="Transcript not found")
+    refs = _transcript_refs_by_realpath(db)
     for path in (t.audio_path, t.video_path):
         if path and os.path.exists(path):
             # Retranscribe carries video_path/audio_path forward verbatim, so
             # sibling transcripts (same or different user) can reference the
             # exact same file. Removing it here would break their playback.
-            still_referenced = db.query(Transcript).filter(
-                Transcript.id != t.id,
-                (Transcript.audio_path == path) | (Transcript.video_path == path)
-            ).first() is not None
+            real = os.path.realpath(path)
+            still_referenced = any(other.id != t.id for other, _ in refs.get(real, []))
             if still_referenced:
                 continue
             try:
@@ -718,7 +761,8 @@ def _resolve_under_upload_dir(path_str: str) -> Optional[str]:
     try:
         real = os.path.realpath(path_str)
         upload_real = os.path.realpath(str(UPLOAD_DIR))
-        if os.path.commonpath([real, upload_real]) != upload_real:
+        # Strictly inside — UPLOAD_DIR itself is not a deletable target.
+        if real == upload_real or os.path.commonpath([real, upload_real]) != upload_real:
             return None
         return real
     except (OSError, ValueError, TypeError):
@@ -727,26 +771,8 @@ def _resolve_under_upload_dir(path_str: str) -> Optional[str]:
 
 @app.get("/api/files")
 async def list_files(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    in_flight_paths = {
-        os.path.realpath(j.audio_path)
-        for j in db.query(TranscriptionJob).filter(TranscriptionJob.status.in_(["pending", "running"])).all()
-        if j.audio_path
-    }
-    linked_by_path = {}
-    for t in db.query(Transcript).filter(Transcript.user_id == current_user.id).all():
-        for field in ("audio_path", "video_path"):
-            p = getattr(t, field)
-            if p and os.path.exists(p):
-                linked_by_path.setdefault(os.path.realpath(p), []).append((t, field))
-    # Any transcript row (any user) that references a path excludes it from
-    # "orphaned" even if it belongs to another user — it's just excluded
-    # from this response entirely in that case (not shown as linked OR orphaned).
-    all_referenced_paths = set(linked_by_path.keys())
-    for t in db.query(Transcript).filter(Transcript.user_id != current_user.id).all():
-        for field in ("audio_path", "video_path"):
-            p = getattr(t, field)
-            if p:
-                all_referenced_paths.add(os.path.realpath(p))
+    live_job_paths = _live_job_paths(db)
+    refs = _transcript_refs_by_realpath(db)
 
     linked, orphaned = [], []
     total_linked, total_orphaned = 0, 0
@@ -755,19 +781,26 @@ async def list_files(db: Session = Depends(get_db), current_user: User = Depends
         if not os.path.isfile(full):
             continue  # confirmed: chunk_audio writes chunks flat into UPLOAD_DIR, no subdirectory
         real = os.path.realpath(full)
-        size = os.path.getsize(full)
-        mtime = datetime.datetime.fromtimestamp(os.path.getmtime(full), datetime.UTC).isoformat()
-        if real in linked_by_path:
+        try:
+            size = os.path.getsize(full)
+            mtime = datetime.datetime.fromtimestamp(os.path.getmtime(full), datetime.UTC).isoformat()
+        except OSError:
+            continue  # vanished between listdir and stat (job cleanup, concurrent delete)
+        own_refs = [(t, f) for t, f in refs.get(real, []) if t.user_id == current_user.id]
+        if own_refs:
             # A shared path (e.g. a retranscribe chain) has multiple entries
             # here — emit one linked row per referencing transcript so the
             # dependency is visible, at the cost of counting the file's size
             # once per reference in total_linked_bytes.
-            for t, field in linked_by_path[real]:
+            for t, field in own_refs:
                 linked.append({"transcript_id": t.id, "transcript_title": t.title, "field": field,
                                 "path": full, "size_bytes": size, "modified_at": mtime})
                 total_linked += size
-        elif real in in_flight_paths or real in all_referenced_paths:
-            continue  # in-flight chunk, or belongs to another user — excluded entirely
+        elif real in live_job_paths or real in refs:
+            # Live chunk (pending/running/failed/cancelled job), or referenced
+            # only by another user's transcript — excluded from the response
+            # entirely (shown as neither linked nor orphaned).
+            continue
         else:
             orphaned.append({"path": full, "size_bytes": size, "modified_at": mtime})
             total_orphaned += size
@@ -792,35 +825,29 @@ async def delete_files(data: dict = Body(...), db: Session = Depends(get_db), cu
             raise HTTPException(status_code=400, detail=f"Path not allowed: {raw_path}")
         resolved.append((raw_path, real))
 
-    in_flight_paths = {
-        os.path.realpath(j.audio_path)
-        for j in db.query(TranscriptionJob).filter(TranscriptionJob.status.in_(["pending", "running"])).all()
-        if j.audio_path
-    }
+    live_job_paths = _live_job_paths(db)
+    refs = _transcript_refs_by_realpath(db)
     deleted, skipped = [], []
     freed_bytes = 0
     for raw_path, real in resolved:
-        if real in in_flight_paths:
+        if real in live_job_paths:
             skipped.append({"path": raw_path, "reason": "in_use"})
             continue
-        matches = db.query(Transcript).filter(
-            (Transcript.audio_path == raw_path) | (Transcript.video_path == raw_path)
-            | (Transcript.audio_path == real) | (Transcript.video_path == real)
-        ).all()
-        if len(matches) > 1:
+        entries = refs.get(real, [])
+        if len({t.id for t, _ in entries}) > 1:
             # 2+ transcripts reference this file — a same-user retranscribe
             # chain, a cross-user collision, or both. Either way, deleting
             # would silently break playback for at least one other
             # transcript, so skip regardless of who owns which row.
             skipped.append({"path": raw_path, "reason": "shared"})
             continue
-        owner_match = None
-        if len(matches) == 1:
-            m = matches[0]
-            if m.user_id == current_user.id:
-                owner_match = m
-            else:
+        if entries:
+            m = entries[0][0]
+            if m.user_id != current_user.id:
                 skipped.append({"path": raw_path, "reason": "not_found_or_forbidden"})
+                continue
+            if _transcript_pipeline_can_resume(db, m):
+                skipped.append({"path": raw_path, "reason": "in_use"})
                 continue
         try:
             size = os.path.getsize(real)  # captured before removal — gone from disk afterward
@@ -828,11 +855,12 @@ async def delete_files(data: dict = Body(...), db: Session = Depends(get_db), cu
         except OSError:
             skipped.append({"path": raw_path, "reason": "remove_failed"})
             continue
-        if owner_match:
-            if owner_match.audio_path in (raw_path, real):
-                owner_match.audio_path = None
-            if owner_match.video_path in (raw_path, real):
-                owner_match.video_path = None
+        # entries all belong to one transcript here — null every field of
+        # its that pointed at this file (audio_path and video_path can in
+        # principle both reference the same path).
+        for t, field in entries:
+            setattr(t, field, None)
+        if entries:
             db.commit()
         deleted.append(raw_path)
         freed_bytes += size
