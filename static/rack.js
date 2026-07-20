@@ -1680,7 +1680,6 @@ let detailPollTimer = null;
 // transcript opens (same-id reloads keep flags so a rename refresh
 // doesn't wipe them).
 let segAudio = null, segAudioTid = null, segPlayingBtn = null;
-let segVideoTid = null;
 let seedClips = {}; // speaker label -> [{start, end}]
 
 // Bulk re-tag mode: selectedSegments holds real indices into t.segments
@@ -1696,7 +1695,6 @@ function resetSegAudio() {
   seedClips = {};
   const v = $('seg-video');
   if (v) v.pause();
-  segVideoTid = null;
 }
 
 async function loadTranscriptDetail(id, opts = {}) {
@@ -1819,15 +1817,15 @@ function segPlay(btn) {
 function segPlayVideo(btn, t, start, end) {
   const v = $('seg-video');
   if (!v) return;
-  // Wiring is keyed off the node itself (v._wired), not segVideoTid — the
-  // node is rebuilt on every renderDetail() (rename/seed/poll), so a
-  // transcript-id-based guard would silently no-op after a mid-playback
-  // re-render (new node, no listeners, but the guard variable still says
-  // "already set up"). v._wired resets to undefined on a fresh node
-  // automatically (it's a new object), so this both survives a re-render
-  // AND avoids stacking duplicate listeners across repeated clicks on the
-  // SAME node between re-renders — src is already correct from the
-  // template (Step 2), so first-wire doesn't need to touch it.
+  // Wiring is keyed off the node itself (v._wired) — the node is rebuilt
+  // on every renderDetail() (rename/job-poll), so a transcript-id-based
+  // guard would silently no-op after a mid-playback re-render (new node,
+  // no listeners, but the guard variable still says "already set up").
+  // v._wired resets to undefined on a fresh node automatically (it's a
+  // new object), so this both survives a re-render AND avoids stacking
+  // duplicate listeners across repeated clicks on the SAME node between
+  // re-renders — src is already correct from the template (Step 2), so
+  // first-wire doesn't need to touch it.
   if (!v._wired) {
     v.addEventListener('timeupdate', () => {
       if (v._stopAt != null && v.currentTime >= v._stopAt) v.pause();
@@ -1835,10 +1833,11 @@ function segPlayVideo(btn, t, start, end) {
     v.addEventListener('pause', () => {
       if (segPlayingBtn) { segPlayingBtn.textContent = '▶'; segPlayingBtn = null; }
     });
+    v.addEventListener('error', () => toast('Video failed to load', 'error'));
     v._wired = true;
   }
-  segVideoTid = t.id;
   if (segPlayingBtn === btn && !v.paused) { v.pause(); return; }
+  if (segPlayingBtn) segPlayingBtn.textContent = '▶';
   const seekAndPlay = () => {
     v._stopAt = end;
     v.currentTime = start;
@@ -2314,7 +2313,7 @@ function renderDetail() {
     extraActs.push('<button class="btn" style="font-size:12px;padding:7px 14px;border-color:var(--inset-edge)" data-dact="resume">Resume</button>');
   // src lives in the template attribute (not set imperatively after the
   // fact) because this whole node is destroyed and rebuilt on every
-  // renderDetail() call (rename/seed-toggle/job-poll) — a freshly-rebuilt
+  // renderDetail() call (rename/job-poll-tick) — a freshly-rebuilt
   // node must be immediately pointed at the right URL with no follow-up JS.
   const videoHtml = t.has_video
     ? `<video id="seg-video" controls src="/api/transcripts/${t.id}/video" style="display:block;width:calc(100% - 72px);max-height:260px;background:#000;border:1px solid var(--inset-edge);border-radius:4px;margin:0 36px 12px"></video>`
