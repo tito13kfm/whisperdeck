@@ -2427,7 +2427,7 @@ function renderDetail() {
         <div style="font-size:12.5px"><div style="font-family:var(--f-mono);font-size:10px;text-transform:uppercase;letter-spacing:0.08em;color:var(--label-dim);margin-bottom:3px">Segments</div>${(t.segments || []).length}</div>
       </div>
     </div>
-    <div style="display:flex;gap:6px;align-items:flex-end;margin-bottom:14px;padding:0 36px">
+    <div style="display:flex;gap:6px;align-items:flex-end;flex-wrap:wrap;margin-bottom:14px;padding:0 36px">
       ${detailTabsHtml()}
       <button id="enroll-marked-btn" class="btn" style="margin-left:auto;font-size:11px;padding:6px 12px;border-color:var(--inset-edge)" ${markedSpeakers().length ? '' : 'disabled title="Flag a line with the ◈ button first"'}>Enroll marked clips</button>
       <button id="select-mode-btn" class="btn" style="font-size:11px;padding:6px 12px;border-color:var(--inset-edge)">${selectMode ? 'Cancel select' : 'Select lines…'}</button>
