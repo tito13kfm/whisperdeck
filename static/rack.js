@@ -1834,6 +1834,11 @@ function segPlayVideo(btn, t, start, end) {
     });
     v.addEventListener('pause', () => {
       if (segPlayingBtn) { segPlayingBtn.textContent = '▶'; segPlayingBtn = null; }
+      // Clear the stop marker on every pause — unlike the detached
+      // segAudio object, this element exposes native controls, and a
+      // stale _stopAt would re-pause any user-initiated playback past
+      // the last segment's end, making the controls appear broken.
+      v._stopAt = null;
     });
     v.addEventListener('error', () => toast('Video failed to load', 'error'));
     v._wired = true;
