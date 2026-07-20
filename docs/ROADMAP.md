@@ -31,12 +31,11 @@ file isn't touched in the same session, that's a bug — fix it before moving on
 
 ## In Progress
 
-- (none currently)
+- **pyannote.audio voice-ID embedding backend** (priority: needed asap — [issue #38](https://github.com/tito13kfm/whisperdeck/issues/38)) — named in `services/voice_id.py`'s backend-label mapping but `_detect_backend()` never returns it; the code comment says to skip it until an embedding extractor is wired up. speechbrain and librosa MFCC are the only real backends today.
 
 ## Parked (not designed yet)
 
 - **Windows ML / native app pivot** — DirectML could unlock real AMD GPU use; needs ONNX conversion or a native-app rewrite, not a quick win.
-- **pyannote.audio voice-ID embedding backend** — named in `services/voice_id.py`'s backend-label mapping but `_detect_backend()` never returns it; the code comment says to skip it until an embedding extractor is wired up. speechbrain and librosa MFCC are the only real backends today.
 - **Full-text search across transcripts** — cross-transcript content search endpoint + UI. Currently only title/filename list-filter and single-transcript in-page match exist.
 - **Admin user-management UI** — `GET /api/admin/users`, `POST /api/admin/promote`, `/api/admin/demote` are fully implemented and documented, but there's no UI anywhere in `rack.js` for them. An admin today can only list/promote/demote via raw API calls.
 
