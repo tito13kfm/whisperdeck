@@ -57,3 +57,24 @@ async def _stub_transcribe(db, user_id, **kwargs):
     db.add(t)
     db.commit()
     return t
+
+
+def test_transcript_stub_persists_video_path(db_session):
+    from services.transcription import TranscriptionService
+    svc = TranscriptionService()
+    t = svc.create_transcript_stub(
+        db_session, user_id=1, filename="f.mp4", provider_name="groq", model="",
+        language="en", audio_path="/tmp/f_16k.mp3", diarize_requested=False,
+        video_path="/tmp/f.mp4",
+    )
+    assert t.video_path == "/tmp/f.mp4"
+
+
+def test_transcript_stub_video_path_defaults_none(db_session):
+    from services.transcription import TranscriptionService
+    svc = TranscriptionService()
+    t = svc.create_transcript_stub(
+        db_session, user_id=1, filename="f.mp3", provider_name="groq", model="",
+        language="en", audio_path="/tmp/f_16k.mp3", diarize_requested=False,
+    )
+    assert t.video_path is None
