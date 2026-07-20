@@ -56,18 +56,18 @@ from services.security import (
 # ── App Setup ──────────────────────────────────────────────────────────────
 
 BASE_DIR = Path(__file__).parent.resolve()
-# Support the correctly-spelled WHISPERDESK_DATA_DIR, with a fallback to the
-# legacy typo'd WHISPERDECK_DATA_DIR for backward compatibility with existing
+# Support the correctly-spelled WHISPERDECK_DATA_DIR, with a fallback to the
+# legacy typo'd WHISPERDESK_DATA_DIR for backward compatibility with existing
 # deploy scripts and the portable .bat launcher.  A deprecation warning is
 # printed when only the old name is set so operators can migrate.
-if os.environ.get("WHISPERDESK_DATA_DIR"):
-    DATA_DIR = Path(os.environ["WHISPERDESK_DATA_DIR"])
-elif os.environ.get("WHISPERDECK_DATA_DIR"):
-    print(
-        "[deprecation] WHISPERDECK_DATA_DIR is deprecated — "
-        "rename to WHISPERDESK_DATA_DIR (note: DESK, not DECK)"
-    )
+if os.environ.get("WHISPERDECK_DATA_DIR"):
     DATA_DIR = Path(os.environ["WHISPERDECK_DATA_DIR"])
+elif os.environ.get("WHISPERDESK_DATA_DIR"):
+    print(
+        "[deprecation] WHISPERDESK_DATA_DIR is deprecated — "
+        "rename to WHISPERDECK_DATA_DIR (note: DECK, not DESK)"
+    )
+    DATA_DIR = Path(os.environ["WHISPERDESK_DATA_DIR"])
 else:
     DATA_DIR = BASE_DIR / "data"
 UPLOAD_DIR = DATA_DIR / "uploads"
@@ -110,10 +110,10 @@ try:
             "\n" + "!" * 72 + "\n"
             "  WARNING: The database exists but contains zero user accounts.\n"
             f"  Path: {DB_PATH}\n"
-            "  If you recently reinstalled or changed WHISPERDESK_DATA_DIR,\n"
+            "  If you recently reinstalled or changed WHISPERDECK_DATA_DIR,\n"
             "  your operator accounts and transcripts may be in a different\n"
             "  location. Register a new account to start fresh, or point\n"
-            "  WHISPERDESK_DATA_DIR at the correct data directory.\n" +
+            "  WHISPERDECK_DATA_DIR at the correct data directory.\n" +
             "!" * 72 + "\n"
         )
 finally:
@@ -595,6 +595,8 @@ async def list_provider_models(name: str, db: Session = Depends(get_db), current
     except Exception as e:
         # Return defaults on failure
         default_map = {
+            "builtin": ["tiny", "tiny.en", "base", "base.en", "small", "small.en", "medium", "medium.en", "large-v1", "large-v2", "large-v3", "large-v3-turbo"],
+            "moonshine": ["tiny", "tiny-streaming", "base", "small-streaming", "medium-streaming"],
             "groq": ["whisper-large-v3-flash", "whisper-large-v3", "whisper-large-v3-turbo", "distil-whisper-large-v3"],
             "openai": ["whisper-1"],
             "replicate": ["varunp2k/whisper-large-v3-turbo", "openai/whisper"],
@@ -1713,7 +1715,7 @@ if static_dir.exists():
 if __name__ == "__main__":
     import uvicorn
     print("=" * 46)
-    print("         WhisperDeck v0.7")
+    print("         WhisperDeck v0.8")
     print("  Transcribe - Diarize - Summarize - Identify")
     print("=" * 46)
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 9781)), reload=False)
