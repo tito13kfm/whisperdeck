@@ -85,18 +85,11 @@ class DiarizationService:
         For real accuracy, install pyannote.audio.
         """
         if not segments:
-            # Try to get duration from the file
-            try:
-                import soundfile as sf
-                info = sf.info(audio_path)
-                total_duration = info.duration
-            except Exception:
-                total_duration = 0
-
-            # Create pseudo-segments from silence detection
-            return DiarizationResult(
-                segments=[], speaker_count=0, method="heuristic"
-            )
+            segments = self._pseudo_segments_from_silence(audio_path)
+            if not segments:
+                return DiarizationResult(
+                    segments=[], speaker_count=0, method="heuristic"
+                )
 
         # Sort segments by start time
         sorted_segs = sorted([dict(s) for s in segments], key=lambda s: s.get("start", 0))
@@ -127,6 +120,56 @@ class DiarizationService:
             speaker_count=len(speaker_set),
             method="heuristic",
         )
+
+    @staticmethod
+    def _pseudo_segments_from_silence(
+        audio_path: str,
+        frame_ms: float = 30.0,
+        silence_gap_s: float = 0.5,
+        energy_ratio: float = 0.15,
+    ) -> list[dict]:
+        """Chunk raw audio into pseudo-segments via simple energy-based voice
+        activity detection, for callers (the standalone /api/diarize
+        endpoint) that have no transcript segments to hand the pause-gap
+        heuristic above. Frames below `energy_ratio` of peak RMS are
+        silence; a run of silence >= silence_gap_s splits a segment."""
+        import numpy as np
+        import soundfile as sf
+
+        try:
+            audio, sr = sf.read(audio_path, always_2d=False)
+        except Exception:
+            return []
+        if audio.ndim > 1:
+            audio = audio.mean(axis=1)
+        if len(audio) == 0:
+            return []
+
+        frame_len = max(int(sr * frame_ms / 1000), 1)
+        n_frames = len(audio) // frame_len
+        if n_frames == 0:
+            return [{"start": 0.0, "end": len(audio) / sr, "text": ""}]
+
+        frames = audio[: n_frames * frame_len].reshape(n_frames, frame_len)
+        energy = np.sqrt(np.mean(frames.astype(np.float64) ** 2, axis=1))
+        threshold = max(float(energy.max()) * energy_ratio, 1e-9)
+        frame_s = frame_len / sr
+        voiced_times = [i * frame_s for i, e in enumerate(energy) if e > threshold]
+
+        if not voiced_times:
+            return []
+
+        pseudo_segments = []
+        seg_start = voiced_times[0]
+        prev = voiced_times[0]
+        for t in voiced_times[1:]:
+            if t - prev >= silence_gap_s:
+                pseudo_segments.append({"start": seg_start, "end": prev + frame_s, "text": ""})
+                seg_start = t
+            prev = t
+        pseudo_segments.append({"start": seg_start, "end": prev + frame_s, "text": ""})
+
+        return pseudo_segments
 
     async def diarize_pyannote(
         self,
