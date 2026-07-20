@@ -22,7 +22,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 from sqlalchemy.orm import Session
 
-from database import init_db, backfill_user_id, Transcript, Summary, VoiceProfile, VoiceClip, ProviderConfig, User, LlmJob, utcnow_naive
+from database import init_db, backfill_user_id, Transcript, Summary, VoiceProfile, VoiceClip, ProviderConfig, User, LlmJob, TranscriptionJob, utcnow_naive
 from services.auth import get_or_create_fallback_user, create_user, authenticate_user
 from services.settings import get_user_settings, update_user_settings
 from services.transcription import TranscriptionService
@@ -690,9 +690,134 @@ async def delete_transcript(transcript_id: int, db: Session = Depends(get_db), c
     ).first()
     if not t:
         raise HTTPException(status_code=404, detail="Transcript not found")
+    for path in (t.audio_path, t.video_path):
+        if path and os.path.exists(path):
+            try:
+                os.remove(path)
+            except OSError:
+                pass
     db.delete(t)
     db.commit()
     return {"ok": True}
+
+
+def _resolve_under_upload_dir(path_str: str) -> Optional[str]:
+    """Path-traversal guard: resolve to a real absolute path and confirm
+    it's inside UPLOAD_DIR before any filesystem operation touches it.
+    Returns None if the path escapes UPLOAD_DIR (including via symlink,
+    `..` traversal, or an unrelated absolute path)."""
+    try:
+        real = os.path.realpath(path_str)
+        upload_real = os.path.realpath(str(UPLOAD_DIR))
+        if os.path.commonpath([real, upload_real]) != upload_real:
+            return None
+        return real
+    except (OSError, ValueError, TypeError):
+        return None
+
+
+@app.get("/api/files")
+async def list_files(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    in_flight_paths = {
+        os.path.realpath(j.audio_path)
+        for j in db.query(TranscriptionJob).filter(TranscriptionJob.status.in_(["pending", "running"])).all()
+        if j.audio_path
+    }
+    linked_by_path = {}
+    for t in db.query(Transcript).filter(Transcript.user_id == current_user.id).all():
+        for field in ("audio_path", "video_path"):
+            p = getattr(t, field)
+            if p and os.path.exists(p):
+                linked_by_path[os.path.realpath(p)] = (t, field)
+    # Any transcript row (any user) that references a path excludes it from
+    # "orphaned" even if it belongs to another user — it's just excluded
+    # from this response entirely in that case (not shown as linked OR orphaned).
+    all_referenced_paths = set(linked_by_path.keys())
+    for t in db.query(Transcript).filter(Transcript.user_id != current_user.id).all():
+        for field in ("audio_path", "video_path"):
+            p = getattr(t, field)
+            if p:
+                all_referenced_paths.add(os.path.realpath(p))
+
+    linked, orphaned = [], []
+    total_linked, total_orphaned = 0, 0
+    for name in os.listdir(UPLOAD_DIR):
+        full = os.path.join(str(UPLOAD_DIR), name)
+        if not os.path.isfile(full):
+            continue  # confirmed: chunk_audio writes chunks flat into UPLOAD_DIR, no subdirectory
+        real = os.path.realpath(full)
+        size = os.path.getsize(full)
+        mtime = datetime.datetime.fromtimestamp(os.path.getmtime(full), datetime.UTC).isoformat()
+        if real in linked_by_path:
+            t, field = linked_by_path[real]
+            linked.append({"transcript_id": t.id, "transcript_title": t.title, "field": field,
+                            "path": full, "size_bytes": size, "modified_at": mtime})
+            total_linked += size
+        elif real in in_flight_paths or real in all_referenced_paths:
+            continue  # in-flight chunk, or belongs to another user — excluded entirely
+        else:
+            orphaned.append({"path": full, "size_bytes": size, "modified_at": mtime})
+            total_orphaned += size
+    return {"linked": linked, "orphaned": orphaned,
+            "total_linked_bytes": total_linked, "total_orphaned_bytes": total_orphaned}
+
+
+@app.post("/api/files/delete")
+async def delete_files(data: dict = Body(...), db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    paths = data.get("paths") or []
+    if not isinstance(paths, list):
+        raise HTTPException(status_code=400, detail="paths must be a list of strings")
+    # Validate every path up front — a traversal attempt anywhere in the
+    # batch aborts the whole request with no side effects, rather than
+    # partially deleting earlier entries before hitting the bad one.
+    resolved = []
+    for raw_path in paths:
+        if not isinstance(raw_path, str):
+            raise HTTPException(status_code=400, detail="paths must be a list of strings")
+        real = _resolve_under_upload_dir(raw_path)
+        if real is None:
+            raise HTTPException(status_code=400, detail=f"Path not allowed: {raw_path}")
+        resolved.append((raw_path, real))
+
+    in_flight_paths = {
+        os.path.realpath(j.audio_path)
+        for j in db.query(TranscriptionJob).filter(TranscriptionJob.status.in_(["pending", "running"])).all()
+        if j.audio_path
+    }
+    deleted, skipped = [], []
+    freed_bytes = 0
+    for raw_path, real in resolved:
+        if real in in_flight_paths:
+            skipped.append({"path": raw_path, "reason": "in_use"})
+            continue
+        owner_match = None
+        foreign_match = False
+        for t in db.query(Transcript).filter(
+            (Transcript.audio_path == raw_path) | (Transcript.video_path == raw_path)
+            | (Transcript.audio_path == real) | (Transcript.video_path == real)
+        ).all():
+            if t.user_id == current_user.id:
+                owner_match = t
+            else:
+                foreign_match = True
+        if foreign_match and not owner_match:
+            skipped.append({"path": raw_path, "reason": "forbidden"})
+            continue
+        try:
+            size = os.path.getsize(real)  # captured before removal — gone from disk afterward
+            os.remove(real)
+        except OSError:
+            skipped.append({"path": raw_path, "reason": "remove_failed"})
+            continue
+        if owner_match:
+            if owner_match.audio_path in (raw_path, real):
+                owner_match.audio_path = None
+            if owner_match.video_path in (raw_path, real):
+                owner_match.video_path = None
+            db.commit()
+        deleted.append(raw_path)
+        freed_bytes += size
+    return {"deleted": deleted, "skipped": skipped, "freed_bytes": freed_bytes}
 
 
 @app.patch("/api/transcripts/{transcript_id}")
