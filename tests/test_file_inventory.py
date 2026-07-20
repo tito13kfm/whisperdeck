@@ -187,3 +187,88 @@ def test_delete_transcript_removes_its_media_files(client, db_session, tmp_path)
     assert r.status_code == 200
     assert not audio.exists()
     assert not video.exists()
+
+
+def test_delete_transcript_keeps_media_file_referenced_by_sibling_transcript(client, db_session, tmp_path):
+    """Retranscribe carries audio_path/video_path forward verbatim, so two
+    transcripts from the same user routinely end up pointing at the same
+    physical file. Deleting one of them via DELETE /api/transcripts/{id}
+    must not remove a file the sibling still depends on for playback."""
+    from database import Transcript as _T
+    shared_audio = tmp_path / "shared.mp3"
+    shared_audio.write_bytes(b"shared")
+    user = db_session.query(User).filter(User.username == "testuser").first()
+    original = _T(user_id=user.id, title="original", filename="t.mp3", status="completed",
+                  full_text="x", audio_path=str(shared_audio))
+    retranscribed = _T(user_id=user.id, title="retranscribed", filename="t.mp3", status="completed",
+                        full_text="y", audio_path=str(shared_audio))
+    db_session.add_all([original, retranscribed])
+    db_session.commit()
+    retranscribed_id = retranscribed.id
+    original_id = original.id
+
+    r = client.delete(f"/api/transcripts/{retranscribed_id}")
+    assert r.status_code == 200
+
+    db_session.expire_all()
+    assert db_session.query(_T).filter(_T.id == retranscribed_id).first() is None
+    assert shared_audio.exists()
+    survivor = db_session.query(_T).filter(_T.id == original_id).first()
+    assert survivor is not None
+    assert survivor.audio_path == str(shared_audio)
+
+
+def test_delete_files_shared_same_user_path_skips_and_preserves_both_transcripts(client, db_session, tmp_path, monkeypatch):
+    """Same setup as a retranscribe chain, but going through the manual
+    Files-page delete endpoint instead of the transcript-delete button."""
+    import app as app_module
+    monkeypatch.setattr(app_module, "UPLOAD_DIR", tmp_path)
+    shared_file = tmp_path / "shared.mp3"
+    shared_file.write_bytes(b"shared")
+
+    user = db_session.query(User).filter(User.username == "testuser").first()
+    original = Transcript(user_id=user.id, title="original", filename="t.mp3", status="completed",
+                          full_text="x", audio_path=str(shared_file))
+    retranscribed = Transcript(user_id=user.id, title="retranscribed", filename="t.mp3", status="completed",
+                               full_text="y", audio_path=str(shared_file))
+    db_session.add_all([original, retranscribed])
+    db_session.commit()
+
+    r = client.post("/api/files/delete", json={"paths": [str(shared_file)]})
+    assert r.status_code == 200
+    body = r.json()
+    assert any(s["path"] == str(shared_file) and s["reason"] == "shared" for s in body["skipped"])
+    assert str(shared_file) not in body["deleted"]
+    assert shared_file.exists()
+
+    db_session.expire_all()
+    original2 = db_session.query(Transcript).filter(Transcript.id == original.id).first()
+    retranscribed2 = db_session.query(Transcript).filter(Transcript.id == retranscribed.id).first()
+    assert original2.audio_path == str(shared_file)
+    assert retranscribed2.audio_path == str(shared_file)
+
+
+def test_list_files_shows_one_linked_entry_per_transcript_for_shared_path(client, db_session, tmp_path, monkeypatch):
+    """Two of the same user's own transcripts sharing a path (retranscribe
+    chain) must both appear in the inventory as linked, so the Files page
+    makes the sharing visible instead of hiding one dependent transcript."""
+    import app as app_module
+    monkeypatch.setattr(app_module, "UPLOAD_DIR", tmp_path)
+    shared_file = tmp_path / "shared.mp3"
+    shared_file.write_bytes(b"shared")
+
+    user = db_session.query(User).filter(User.username == "testuser").first()
+    original = Transcript(user_id=user.id, title="original", filename="t.mp3", status="completed",
+                          full_text="x", audio_path=str(shared_file))
+    retranscribed = Transcript(user_id=user.id, title="retranscribed", filename="t.mp3", status="completed",
+                               full_text="y", audio_path=str(shared_file))
+    db_session.add_all([original, retranscribed])
+    db_session.commit()
+
+    r = client.get("/api/files")
+    assert r.status_code == 200
+    body = r.json()
+    matching = [f for f in body["linked"] if f["path"] == str(shared_file)]
+    assert len(matching) == 2
+    transcript_ids = {f["transcript_id"] for f in matching}
+    assert transcript_ids == {original.id, retranscribed.id}

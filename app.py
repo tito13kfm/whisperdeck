@@ -692,6 +692,15 @@ async def delete_transcript(transcript_id: int, db: Session = Depends(get_db), c
         raise HTTPException(status_code=404, detail="Transcript not found")
     for path in (t.audio_path, t.video_path):
         if path and os.path.exists(path):
+            # Retranscribe carries video_path/audio_path forward verbatim, so
+            # sibling transcripts (same or different user) can reference the
+            # exact same file. Removing it here would break their playback.
+            still_referenced = db.query(Transcript).filter(
+                Transcript.id != t.id,
+                (Transcript.audio_path == path) | (Transcript.video_path == path)
+            ).first() is not None
+            if still_referenced:
+                continue
             try:
                 os.remove(path)
             except OSError:
@@ -728,7 +737,7 @@ async def list_files(db: Session = Depends(get_db), current_user: User = Depends
         for field in ("audio_path", "video_path"):
             p = getattr(t, field)
             if p and os.path.exists(p):
-                linked_by_path[os.path.realpath(p)] = (t, field)
+                linked_by_path.setdefault(os.path.realpath(p), []).append((t, field))
     # Any transcript row (any user) that references a path excludes it from
     # "orphaned" even if it belongs to another user — it's just excluded
     # from this response entirely in that case (not shown as linked OR orphaned).
@@ -749,10 +758,14 @@ async def list_files(db: Session = Depends(get_db), current_user: User = Depends
         size = os.path.getsize(full)
         mtime = datetime.datetime.fromtimestamp(os.path.getmtime(full), datetime.UTC).isoformat()
         if real in linked_by_path:
-            t, field = linked_by_path[real]
-            linked.append({"transcript_id": t.id, "transcript_title": t.title, "field": field,
-                            "path": full, "size_bytes": size, "modified_at": mtime})
-            total_linked += size
+            # A shared path (e.g. a retranscribe chain) has multiple entries
+            # here — emit one linked row per referencing transcript so the
+            # dependency is visible, at the cost of counting the file's size
+            # once per reference in total_linked_bytes.
+            for t, field in linked_by_path[real]:
+                linked.append({"transcript_id": t.id, "transcript_title": t.title, "field": field,
+                                "path": full, "size_bytes": size, "modified_at": mtime})
+                total_linked += size
         elif real in in_flight_paths or real in all_referenced_paths:
             continue  # in-flight chunk, or belongs to another user — excluded entirely
         else:
@@ -790,22 +803,25 @@ async def delete_files(data: dict = Body(...), db: Session = Depends(get_db), cu
         if real in in_flight_paths:
             skipped.append({"path": raw_path, "reason": "in_use"})
             continue
-        owner_match = None
-        foreign_match = False
-        for t in db.query(Transcript).filter(
+        matches = db.query(Transcript).filter(
             (Transcript.audio_path == raw_path) | (Transcript.video_path == raw_path)
             | (Transcript.audio_path == real) | (Transcript.video_path == real)
-        ).all():
-            if t.user_id == current_user.id:
-                owner_match = t
-            else:
-                foreign_match = True
-        if foreign_match and owner_match:
+        ).all()
+        if len(matches) > 1:
+            # 2+ transcripts reference this file — a same-user retranscribe
+            # chain, a cross-user collision, or both. Either way, deleting
+            # would silently break playback for at least one other
+            # transcript, so skip regardless of who owns which row.
             skipped.append({"path": raw_path, "reason": "shared"})
             continue
-        if foreign_match:
-            skipped.append({"path": raw_path, "reason": "not_found_or_forbidden"})
-            continue
+        owner_match = None
+        if len(matches) == 1:
+            m = matches[0]
+            if m.user_id == current_user.id:
+                owner_match = m
+            else:
+                skipped.append({"path": raw_path, "reason": "not_found_or_forbidden"})
+                continue
         try:
             size = os.path.getsize(real)  # captured before removal — gone from disk afterward
             os.remove(real)
