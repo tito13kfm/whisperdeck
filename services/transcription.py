@@ -28,6 +28,7 @@ class TranscriptionService:
         diarize_requested: bool,
         title: Optional[str] = None,
         num_speakers: Optional[int] = None,
+        video_path: Optional[str] = None,
     ) -> Transcript:
         """Create a Transcript row in 'processing' status without calling a
         provider — used by the chunked upload path, which enqueues chunk
@@ -48,6 +49,7 @@ class TranscriptionService:
             audio_path=audio_path,
             diarize_requested=diarize_requested,
             num_speakers=num_speakers,
+            video_path=video_path,
         )
         db.add(transcript)
         db.commit()
@@ -64,6 +66,7 @@ class TranscriptionService:
         language: str = "en",
         model: Optional[str] = None,
         temperature: float = 0.0,
+        video_path: Optional[str] = None,
         **kwargs,
     ) -> Transcript:
         """Transcribe an audio file and persist the result."""
@@ -83,6 +86,7 @@ class TranscriptionService:
             language=language,
             status="processing",
             audio_path=audio_path,
+            video_path=video_path,
         )
         db.add(transcript)
         db.commit()

@@ -33,7 +33,7 @@ from services.settings import get_user_settings, update_user_settings
 from services.transcription import TranscriptionService
 from services.diarization import DiarizationService
 from services.voice_id import voice_id_service
-from services.audio_prep import transcode_for_upload, AudioPrepError, chunk_audio, get_audio_duration, extract_clips_concat
+from services.audio_prep import transcode_for_upload, AudioPrepError, chunk_audio, get_audio_duration, extract_clips_concat, has_video_stream
 from services.queue import (
     create_chunk_jobs, retry_failed_chunks, queue_worker_loop, compute_queue_status,
     cancel_transcript_jobs, resume_cancelled_chunks, reset_stuck_transcription_jobs,
@@ -253,6 +253,7 @@ def _serialize_transcript(db: Session, t: Transcript) -> dict:
         # Gates the post-hoc re-transcribe/re-diarize buttons: needs the
         # stored source file, not just a path that once existed.
         "has_audio": bool(t.audio_path and os.path.exists(t.audio_path)),
+        "has_video": bool(t.video_path and os.path.exists(t.video_path)),
         "job_progress": job_progress,
         "processed_size_bytes": t.processed_size_bytes,
         "queue_status": compute_queue_status(db, t),
@@ -647,6 +648,21 @@ async def _run_transcription_pipeline(
     # produces webm/opus), in which case local providers need the ffmpeg
     # pass too or soundfile fails with "Format not recognised".
     local_readable_exts = {".wav", ".flac", ".ogg", ".mp3", ".aiff", ".aif"}
+
+    # Capture the raw upload's path/extension before the needs_transcode
+    # branch below reassigns save_path to a transcoded (audio-only) output.
+    # A retranscribe inherits its parent's video_path without re-probing —
+    # the stored audio_path already went through this decision once.
+    raw_path = save_path
+    if source_transcript_id is not None:
+        parent = db.query(Transcript).filter(
+            Transcript.id == source_transcript_id, Transcript.user_id == current_user.id
+        ).first()
+        video_path = parent.video_path if parent else None
+    else:
+        playable = raw_path.suffix.lower() in _VIDEO_MIME
+        video_path = str(raw_path) if playable and has_video_stream(str(raw_path)) else None
+
     try:
         raw_duration = get_audio_duration(str(save_path))
     except Exception:
@@ -727,6 +743,7 @@ async def _run_transcription_pipeline(
             diarize_requested=diarize,
             title=title or filename,
             num_speakers=num_speakers,
+            video_path=video_path,
         )
         # Real processed size, not the raw upload size — the sum of all
         # chunk files, since that's what actually gets sent to the provider.
@@ -750,6 +767,7 @@ async def _run_transcription_pipeline(
             language=language,
             model=model or provider_config.get("default_model"),
             temperature=temperature,
+            video_path=video_path,
         )
         transcript.processed_size_bytes = file_size
         transcript.source_transcript_id = source_transcript_id
@@ -970,6 +988,15 @@ _AUDIO_MIME = {
     ".flac": "audio/flac", ".webm": "audio/webm", ".m4a": "audio/mp4",
 }
 
+# Deliberately restricted to containers a browser <video> tag can actually
+# play. .mkv/.avi/most .mov are NOT included: retaining them as "video"
+# would reproduce the exact "sort of works" problem this feature exists to
+# fix (file exists, route serves it, but the browser shows a black player
+# with no error, since it can't decode the container).
+_VIDEO_MIME = {
+    ".mp4": "video/mp4", ".webm": "video/webm",
+}
+
 
 @app.get("/api/transcripts/{transcript_id}/audio")
 async def get_transcript_audio(transcript_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
@@ -984,6 +1011,22 @@ async def get_transcript_audio(transcript_id: int, db: Session = Depends(get_db)
         raise HTTPException(status_code=404, detail="No stored audio for this transcript")
     ext = os.path.splitext(t.audio_path)[1].lower()
     return FileResponse(t.audio_path, media_type=_AUDIO_MIME.get(ext, "audio/mpeg"))
+
+
+@app.get("/api/transcripts/{transcript_id}/video")
+async def get_transcript_video(transcript_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    """Serve the stored original video — the detail screen's per-line play
+    buttons load this once and seek to each segment's start time, same
+    pattern as get_transcript_audio."""
+    t = db.query(Transcript).filter(
+        Transcript.id == transcript_id, Transcript.user_id == current_user.id
+    ).first()
+    if not t:
+        raise HTTPException(status_code=404, detail="Transcript not found")
+    if not (t.video_path and os.path.exists(t.video_path)):
+        raise HTTPException(status_code=404, detail="No stored video for this transcript")
+    ext = os.path.splitext(t.video_path)[1].lower()
+    return FileResponse(t.video_path, media_type=_VIDEO_MIME.get(ext, "video/mp4"))
 
 
 @app.post("/api/transcripts/{transcript_id}/speakers/rename")

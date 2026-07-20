@@ -1819,6 +1819,8 @@ function resetSegAudio() {
   segAudioTid = null;
   segPlayingBtn = null;
   seedClips = {};
+  const v = $('seg-video');
+  if (v) v.pause();
 }
 
 async function loadTranscriptDetail(id, opts = {}) {
@@ -1885,7 +1887,7 @@ function segmentsHtml(t) {
     const checkbox = selectMode
       ? `<input type="checkbox" data-seg-select="${i}" ${selectedSegments.has(i) ? 'checked' : ''} style="margin-top:4px;flex-shrink:0">`
       : '';
-    const controls = !t.has_audio ? '' : `
+    const controls = !(t.has_audio || t.has_video) ? '' : `
       <div style="display:flex;flex-direction:column;gap:4px;flex-shrink:0">
         <button data-seg-play data-start="${sg.start}" data-end="${sg.end}" title="Play this line from the recording" style="${segBtn};color:var(--label-dim)">▶</button>
         ${sg.speaker ? `<button data-seg-seed data-speaker="${escapeHtml(sg.speaker)}" data-start="${sg.start}" data-end="${sg.end}" title="${seeded ? 'Flagged as a voice seed — click to unflag' : 'Flag this line as a voice seed for enrollment'}" style="${segBtn};color:${seeded ? 'var(--nixie)' : 'var(--label-dim)'};${seeded ? 'border-color:var(--nixie);text-shadow:0 0 5px rgba(255,138,61,0.6)' : ''}">◈</button>` : ''}
@@ -1934,6 +1936,53 @@ function detailBodyClick(e) {
 function segPlay(btn) {
   const t = detailData;
   const start = parseFloat(btn.dataset.start), end = parseFloat(btn.dataset.end);
+  if (t.has_video) return segPlayVideo(btn, t, start, end);
+  return segPlayAudio(btn, t, start, end);
+}
+
+function segPlayVideo(btn, t, start, end) {
+  const v = $('seg-video');
+  if (!v) return;
+  // Wiring is keyed off the node itself (v._wired) — the node is rebuilt
+  // on every renderDetail() call (rename, job-poll-tick, tab switch,
+  // select-mode toggle — anything that re-renders the whole detail page),
+  // so a transcript-id-based guard would silently no-op after a
+  // mid-playback re-render (new node, no listeners, but the guard
+  // variable still says "already set up").
+  // v._wired resets to undefined on a fresh node automatically (it's a
+  // new object), so this both survives a re-render AND avoids stacking
+  // duplicate listeners across repeated clicks on the SAME node between
+  // re-renders — src is already correct from the template (Step 2), so
+  // first-wire doesn't need to touch it.
+  if (!v._wired) {
+    v.addEventListener('timeupdate', () => {
+      if (v._stopAt != null && v.currentTime >= v._stopAt) v.pause();
+    });
+    v.addEventListener('pause', () => {
+      if (segPlayingBtn) { segPlayingBtn.textContent = '▶'; segPlayingBtn = null; }
+      // Clear the stop marker on every pause — unlike the detached
+      // segAudio object, this element exposes native controls, and a
+      // stale _stopAt would re-pause any user-initiated playback past
+      // the last segment's end, making the controls appear broken.
+      v._stopAt = null;
+    });
+    v.addEventListener('error', () => toast('Video failed to load', 'error'));
+    v._wired = true;
+  }
+  if (segPlayingBtn === btn && !v.paused) { v.pause(); return; }
+  if (segPlayingBtn) segPlayingBtn.textContent = '▶';
+  const seekAndPlay = () => {
+    v._stopAt = end;
+    v.currentTime = start;
+    v.play().catch(err => toast(err.message, 'error'));
+  };
+  if (v.readyState >= 1) seekAndPlay();
+  else v.addEventListener('loadedmetadata', seekAndPlay, { once: true });
+  segPlayingBtn = btn;
+  btn.textContent = '■';
+}
+
+function segPlayAudio(btn, t, start, end) {
   if (!segAudio || segAudioTid !== t.id) {
     if (segAudio) segAudio.pause();
     segAudio = new Audio('/api/transcripts/' + t.id + '/audio');
@@ -2395,6 +2444,14 @@ function renderDetail() {
     extraActs.push('<button class="btn" style="font-size:12px;padding:7px 14px;border-color:var(--inset-edge)" data-dact="retry">Retry failed sections</button>');
   if (t.status === 'cancelled')
     extraActs.push('<button class="btn" style="font-size:12px;padding:7px 14px;border-color:var(--inset-edge)" data-dact="resume">Resume</button>');
+  // src lives in the template attribute (not set imperatively after the
+  // fact) because this whole node is destroyed and rebuilt on every
+  // renderDetail() call (rename, job-poll-tick, tab switch, select-mode
+  // toggle) — a freshly-rebuilt node must be immediately pointed at the
+  // right URL with no follow-up JS.
+  const videoHtml = t.has_video
+    ? `<video id="seg-video" controls src="/api/transcripts/${t.id}/video" style="display:block;width:calc(100% - 72px);max-height:260px;background:#000;border:1px solid var(--inset-edge);border-radius:4px;margin:0 36px 12px"></video>`
+    : '';
 
   root.innerHTML = `
     <div class="page-head page-head--with-actions">
@@ -2427,6 +2484,7 @@ function renderDetail() {
         <div style="font-size:12.5px"><div style="font-family:var(--f-mono);font-size:10px;text-transform:uppercase;letter-spacing:0.08em;color:var(--label-dim);margin-bottom:3px">Segments</div>${(t.segments || []).length}</div>
       </div>
     </div>
+    ${videoHtml}
     <div style="display:flex;gap:6px;align-items:flex-end;flex-wrap:wrap;margin-bottom:14px;padding:0 36px">
       ${detailTabsHtml()}
       <button id="enroll-marked-btn" class="btn" style="margin-left:auto;font-size:11px;padding:6px 12px;border-color:var(--inset-edge)" ${markedSpeakers().length ? '' : 'disabled title="Flag a line with the ◈ button first"'}>Enroll marked clips</button>
