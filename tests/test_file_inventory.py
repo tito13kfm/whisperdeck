@@ -122,8 +122,41 @@ def test_delete_skips_other_users_linked_file(client, db_session, tmp_path, monk
     r = client.post("/api/files/delete", json={"paths": [str(other_file)]})
     assert r.status_code == 200
     body = r.json()
-    assert any(s["path"] == str(other_file) and s["reason"] == "forbidden" for s in body["skipped"])
+    assert any(s["path"] == str(other_file) and s["reason"] == "not_found_or_forbidden" for s in body["skipped"])
     assert other_file.exists()
+
+
+def test_delete_shared_path_skips_and_preserves_both_transcripts(client, db_session, tmp_path, monkeypatch):
+    """Two transcripts (different users) point at the same audio_path — an
+    organic collision (e.g. same-second uploads with a default filename).
+    Deleting as one owner must not blow away the file out from under the
+    other user's transcript: skip as ambiguous rather than deleting."""
+    import app as app_module
+    monkeypatch.setattr(app_module, "UPLOAD_DIR", tmp_path)
+    other = _other_user(db_session)
+    shared_file = tmp_path / "shared.mp3"
+    shared_file.write_bytes(b"shared")
+
+    user = db_session.query(User).filter(User.username == "testuser").first()
+    mine = Transcript(user_id=user.id, title="mine", filename="t.mp3", status="completed",
+                       full_text="x", audio_path=str(shared_file))
+    theirs = Transcript(user_id=other.id, title="theirs", filename="t.mp3", status="completed",
+                         full_text="y", audio_path=str(shared_file))
+    db_session.add_all([mine, theirs])
+    db_session.commit()
+
+    r = client.post("/api/files/delete", json={"paths": [str(shared_file)]})
+    assert r.status_code == 200
+    body = r.json()
+    assert any(s["path"] == str(shared_file) and s["reason"] == "shared" for s in body["skipped"])
+    assert str(shared_file) not in body["deleted"]
+    assert shared_file.exists()
+
+    db_session.expire_all()
+    mine2 = db_session.query(Transcript).filter(Transcript.id == mine.id).first()
+    theirs2 = db_session.query(Transcript).filter(Transcript.id == theirs.id).first()
+    assert mine2.audio_path == str(shared_file)
+    assert theirs2.audio_path == str(shared_file)
 
 
 def test_delete_orphan_removes_outright(client, db_session, tmp_path, monkeypatch):

@@ -800,8 +800,11 @@ async def delete_files(data: dict = Body(...), db: Session = Depends(get_db), cu
                 owner_match = t
             else:
                 foreign_match = True
-        if foreign_match and not owner_match:
-            skipped.append({"path": raw_path, "reason": "forbidden"})
+        if foreign_match and owner_match:
+            skipped.append({"path": raw_path, "reason": "shared"})
+            continue
+        if foreign_match:
+            skipped.append({"path": raw_path, "reason": "not_found_or_forbidden"})
             continue
         try:
             size = os.path.getsize(real)  # captured before removal — gone from disk afterward
