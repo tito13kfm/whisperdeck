@@ -111,7 +111,7 @@ Run the two suites separately:
 .venv\Scripts\python.exe -m pytest -m "not e2e"          # everything else
 ```
 
-How the harness works: the `live_server` fixture in `tests/e2e/conftest.py` starts a real uvicorn in a background thread so the browser hits a real socket, and `tests/conftest.py` isolates each test's data (redirects `WHISPERDESK_DATA_DIR` to a tempdir, resets the rate limiter). `tests/e2e/test_browser_smoke.py` is a working template covering the login form and app shell; copy it for new flows.
+How the harness works: the `live_server` fixture in `tests/e2e/conftest.py` starts a real uvicorn in a background thread so the browser hits a real socket, and `tests/conftest.py` isolates each test's data (redirects `WHISPERDECK_DATA_DIR` to a tempdir, resets the rate limiter). `tests/e2e/test_browser_smoke.py` is a working template covering the login form and app shell; copy it for new flows.
 
 ## 8. If you get locked out
 
@@ -121,4 +121,4 @@ An admin can mint a one-time password-reset token from the UI for any user. If t
 .venv\Scripts\python.exe scripts\reset_password.py --username <name> --new-password <pass>
 ```
 
-Pass `--data-dir` (or set `WHISPERDESK_DATA_DIR`) if your data lives somewhere other than `./data`.
+Pass `--data-dir` (or set `WHISPERDECK_DATA_DIR`) if your data lives somewhere other than `./data`.

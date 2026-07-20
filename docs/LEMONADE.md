@@ -2,7 +2,7 @@
 
 A local OpenAI-compatible inference server running on this machine. This
 note captures the API surface, model list, and gotchas discovered while
-integrating WhisperDesk with it for screenshot/demo data generation.
+integrating WhisperDeck with it for screenshot/demo data generation.
 This information is also kept in the Serena memory `lemonade-server` if
 that tool is available; this file is a redundant, plain-text copy.
 
@@ -58,11 +58,11 @@ that tool is available; this file is a redundant, plain-text copy.
 
 - `LMX-Omni-5.5B-Lite` (9.3GB) — collection combining LLM + SD + Whisper + Kokoro
 
-## WhisperDesk Integration
+## WhisperDeck Integration
 
-- Use the `Local / Custom` provider in WhisperDesk settings.
+- Use the `Local / Custom` provider in WhisperDeck settings.
 - `api_url`: `http://localhost:13305/v1`
-- `api_key`: any **non-empty** string. WhisperDesk sends
+- `api_key`: any **non-empty** string. WhisperDeck sends
   `Authorization: Bearer <key>` unconditionally; an empty key produces
   `Illegal header value b'Bearer '` errors before the request is sent.
   Lemonade ignores the header, so any non-empty placeholder works

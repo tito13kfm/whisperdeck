@@ -21,8 +21,8 @@ It's multi-user (register/login, per-user transcripts, settings, and API keys), 
 ```cmd
 winget install Gyan.FFmpeg
 
-git clone https://github.com/tito13kfm/whisperdesk.git
-cd whisperdesk
+git clone https://github.com/tito13kfm/whisperdeck.git
+cd whisperdeck
 
 py -3.13 -m venv .venv
 .venv\Scripts\python.exe -m pip install --upgrade pip
@@ -86,7 +86,7 @@ You can re-diarize an existing transcript at any time; it runs as a `rediarize` 
 
 Enroll a roster of known speakers, each with one or more voice clips, and WhisperDeck relabels matching speakers across a transcript via a `voice_match` job. You can also enroll a speaker directly from a transcript segment you've already identified by ear.
 
-Embedding backends are auto-detected in priority order: **speechbrain** (most accurate, `pip install speechbrain torchaudio`), then **pyannote.audio** (comes with the diarization install), then **librosa MFCC** (always available, basic).
+Embedding backends are auto-detected in priority order: **speechbrain** (most accurate, `pip install speechbrain torchaudio`), then **librosa MFCC** (always available, basic). A pyannote.audio-based embedding backend is planned but not yet wired up (see [docs/ROADMAP.md](docs/ROADMAP.md)).
 
 ![Voice roster — enrolled speaker profiles with their voice-clip samples, ready for voice-match across new transcripts](screenshots/07-voice-roster.png)
 
@@ -147,7 +147,7 @@ All optional. The app runs with none of them set.
 | Variable | Purpose | Default |
 |----------|---------|---------|
 | `PORT` | Port to bind | `9781` |
-| `WHISPERDESK_DATA_DIR` | Where the SQLite DB, uploads, and session secret live (`WHISPERDECK_DATA_DIR` also accepted) | `./data` |
+| `WHISPERDECK_DATA_DIR` | Where the SQLite DB, uploads, and session secret live (`WHISPERDESK_DATA_DIR` also accepted) | `./data` |
 | `HUGGINGFACE_TOKEN` | pyannote model access, needed for ML diarization | unset |
 | `FFMPEG_DIR` | Directory containing ffmpeg, if it's not on PATH | use PATH |
 | `WHISPER_CACHE_DIR` | faster-whisper model cache | `~/.cache/whisper` |
@@ -158,7 +158,7 @@ There is no `DATABASE_URL`: storage is always local SQLite under the data direct
 
 Paste them in the web UI under **Settings → Providers**. Prefixes are validated on input: Groq `gsk_`, OpenAI `sk-`, Replicate `r8_`, OpenRouter `sk-or-`.
 
-![Service panel — per-provider API keys, model pickers, and the WhisperDesk faceplate / phosphor theme controls](screenshots/08-service-panel.png)
+![Service panel — per-provider API keys, model pickers, and the WhisperDeck faceplate / phosphor theme controls](screenshots/08-service-panel.png)
 
 ---
 
@@ -272,7 +272,7 @@ The feature roadmap and known accepted gaps live in [docs/ROADMAP.md](docs/ROADM
 
 ## License
 
-[Hippocratic License 3.0](LICENSE.md), base terms with no additional modules. Permissive like MIT for intellectual property, plus a condition that the software not be used to violate fundamental human rights (see [firstdonoharm.dev](https://firstdonoharm.dev/)). It is not OSI-approved because it restricts fields of use, and some organizations' legal teams won't touch it; know that before depending on it commercially.
+[Hippocratic License 3.0](LICENSE.md), base terms with no additional modules. Permissive like MIT for intellectual property, plus a condition that the software not be used to violate fundamental human rights (see [firstdonoharm.dev](https://firstdonoharm.dev/)). It isn't OSI-approved, since it restricts fields of use — if you're depending on this commercially, check with your legal team first, some won't approve software under a use-restricted license.
 
 ## Acknowledgments
 
