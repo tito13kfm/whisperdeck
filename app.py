@@ -175,6 +175,7 @@ def _serialize_transcript(db: Session, t: Transcript) -> dict:
         # Gates the post-hoc re-transcribe/re-diarize buttons: needs the
         # stored source file, not just a path that once existed.
         "has_audio": bool(t.audio_path and os.path.exists(t.audio_path)),
+        "has_video": bool(t.video_path and os.path.exists(t.video_path)),
         "job_progress": job_progress,
         "processed_size_bytes": t.processed_size_bytes,
         "queue_status": compute_queue_status(db, t),
@@ -817,6 +818,22 @@ async def get_transcript_audio(transcript_id: int, db: Session = Depends(get_db)
         raise HTTPException(status_code=404, detail="No stored audio for this transcript")
     ext = os.path.splitext(t.audio_path)[1].lower()
     return FileResponse(t.audio_path, media_type=_AUDIO_MIME.get(ext, "audio/mpeg"))
+
+
+@app.get("/api/transcripts/{transcript_id}/video")
+async def get_transcript_video(transcript_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    """Serve the stored original video — the detail screen's per-line play
+    buttons load this once and seek to each segment's start time, same
+    pattern as get_transcript_audio."""
+    t = db.query(Transcript).filter(
+        Transcript.id == transcript_id, Transcript.user_id == current_user.id
+    ).first()
+    if not t:
+        raise HTTPException(status_code=404, detail="Transcript not found")
+    if not (t.video_path and os.path.exists(t.video_path)):
+        raise HTTPException(status_code=404, detail="No stored video for this transcript")
+    ext = os.path.splitext(t.video_path)[1].lower()
+    return FileResponse(t.video_path, media_type=_VIDEO_MIME.get(ext, "video/mp4"))
 
 
 @app.post("/api/transcripts/{transcript_id}/speakers/rename")
