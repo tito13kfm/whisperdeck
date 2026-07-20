@@ -173,8 +173,8 @@ def test_new_settings_defaults_present(db_session):
     db_session.add(user)
     db_session.commit()
     settings = get_user_settings(db_session, user.id)
-    assert settings["correction_provider"] == "groq"
-    assert settings["summary_provider"] == "groq"
+    assert settings["correction_provider"] == "local_llm"
+    assert settings["summary_provider"] == "local_llm"
     assert settings["correction_model"] and settings["summary_model"]
 
 

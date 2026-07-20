@@ -7,13 +7,16 @@ from services.diarization import DiarizationService
 from services.queue import _finalize_if_done
 
 
-def _setup_completed_chunks(db_session, auto_correct=True, with_groq_key=True):
+def _setup_completed_chunks(db_session, auto_correct=True, with_groq_key=True, correction_provider=None):
     user = User(username="alice", password_hash="x", password_salt="y")
     db_session.add(user)
     db_session.commit()
 
-    if not auto_correct:
-        user.settings = {"auto_correct": False}
+    if not auto_correct or correction_provider:
+        settings = {"auto_correct": auto_correct}
+        if correction_provider:
+            settings["correction_provider"] = correction_provider
+        user.settings = settings
         db_session.commit()
 
     if with_groq_key:
@@ -40,7 +43,7 @@ def _setup_completed_chunks(db_session, auto_correct=True, with_groq_key=True):
 async def test_finalize_enqueues_correction_job_when_enabled(db_session):
     from database import LlmJob
 
-    transcript = _setup_completed_chunks(db_session)
+    transcript = _setup_completed_chunks(db_session, with_groq_key=False)
     await _finalize_if_done(db_session, transcript.id, DiarizationService())
 
     db_session.refresh(transcript)
@@ -49,7 +52,7 @@ async def test_finalize_enqueues_correction_job_when_enabled(db_session):
     assert job is not None
     assert job.kind == "correction"
     assert job.status == "pending"
-    assert job.provider == "groq"
+    assert job.provider == "local_llm"
 
 
 @pytest.mark.asyncio
@@ -69,7 +72,7 @@ async def test_finalize_records_skip_when_provider_key_missing(db_session):
     and the transcript's corrected tab can explain itself."""
     from database import LlmJob
 
-    transcript = _setup_completed_chunks(db_session, with_groq_key=False)
+    transcript = _setup_completed_chunks(db_session, with_groq_key=False, correction_provider="groq")
     await _finalize_if_done(db_session, transcript.id, DiarizationService())
 
     job = db_session.query(LlmJob).filter(LlmJob.transcript_id == transcript.id).first()

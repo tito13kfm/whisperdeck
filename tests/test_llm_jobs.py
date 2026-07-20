@@ -426,6 +426,10 @@ def test_runs_endpoint_includes_dismissed_jobs(client):
 def test_runs_endpoint_404s_for_another_users_transcript(client):
     transcript_id = _upload(client).json()["id"]
     client.post("/api/logout")
+    # Logout clears the whole session, invalidating the CSRF token issued to
+    # it — fetch a fresh one before the next mutation (mirrors rack.js's
+    # logout() -> refreshCsrfToken()).
+    client.headers["X-CSRF-Token"] = client.get("/api/csrf-token").json()["token"]
     client.post("/api/register", json={"username": "other-runs-user", "password": "testpass123"})
 
     r = client.get(f"/api/transcripts/{transcript_id}/runs/correction")

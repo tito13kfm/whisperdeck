@@ -19,10 +19,13 @@ DEFAULT_SETTINGS = {
     # Defaults for LLM-backed passes. Sensible even with no keys saved —
     # runs that need a missing key skip with a recorded reason instead of
     # failing. Keys themselves always come from the ProviderConfig pool.
-    "correction_provider": "groq",
-    "correction_model": "llama-3.3-70b-versatile",
-    "summary_provider": "groq",
-    "summary_model": "llama-3.3-70b-versatile",
+    # gpt-oss-20b-mxfp4-GGUF is the fastest local LLM (GPU via ROCM,
+    # 12.1 GB, 131K ctx). Falls back to Qwen3.5-4B-MTP-GGUF (3.66 GB,
+    # 262K ctx) if VRAM is tight.
+    "correction_provider": "local_llm",
+    "correction_model": "gpt-oss-20b-mxfp4-GGUF",
+    "summary_provider": "local_llm",
+    "summary_model": "gpt-oss-20b-mxfp4-GGUF",
 }
 
 # Providers that work without an API key (local inference / user-hosted URL).
@@ -31,6 +34,24 @@ DEFAULT_SETTINGS = {
 # — the two often run on different local servers (e.g. a Whisper server on
 # 8080 alongside Ollama on 11434), so they can't share one saved URL.
 KEYLESS_PROVIDERS = ("local", "local_llm", "builtin", "moonshine")
+
+
+def _decrypt_key_if_needed(encrypted: str, session_secret: str = "") -> str:
+    """Decrypt an API key if it looks encrypted (base64-encoded salt+token).
+    Falls back to returning the value as-is for plaintext keys that predate
+    encryption support."""
+    if not encrypted or not session_secret:
+        return encrypted
+    # Encrypted keys are always longer than 64 chars and start with a
+    # base64 character. Plaintext keys are short (gsk_..., sk-..., r8_...).
+    if len(encrypted) < 64:
+        return encrypted
+    try:
+        from services.security import decrypt_api_key
+        return decrypt_api_key(encrypted, session_secret)
+    except Exception:
+        # Not encrypted or wrong secret — return as-is
+        return encrypted
 
 
 def resolve_provider_key(db, user_id: int, provider: str) -> tuple[str, dict]:
@@ -44,8 +65,17 @@ def resolve_provider_key(db, user_id: int, provider: str) -> tuple[str, dict]:
     )
     if not cfg:
         return "", {}
-    return cfg.api_key or "", {
-        "api_key": cfg.api_key or "",
+    # Import SESSION_SECRET at call time to avoid circular imports
+    import os
+    from pathlib import Path
+    _base = Path(__file__).parent.parent.resolve()
+    _data = Path(os.environ.get("WHISPERDECK_DATA_DIR") or os.environ.get("WHISPERDESK_DATA_DIR") or str(_base / "data"))
+    _secret_path = _data / ".session_secret"
+    _secret = _secret_path.read_text().strip() if _secret_path.exists() else ""
+    raw_key = cfg.api_key or ""
+    decrypted = _decrypt_key_if_needed(raw_key, _secret)
+    return decrypted, {
+        "api_key": decrypted,
         "api_url": cfg.api_url or "",
         "default_model": cfg.default_model or "",
     }

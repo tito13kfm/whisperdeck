@@ -1,0 +1,11 @@
+{
+  "model": "DeepSeek-Qwen3-8B-GGUF",
+  "messages": [
+    {"role": "user", "content": "Say hello in one word."}
+  ],
+  "max_tokens": 100,
+  "temperature": 0.1,
+  "chat_template_kwargs": {
+    "enable_thinking": "false"
+  }
+}

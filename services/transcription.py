@@ -227,7 +227,7 @@ Return ONLY valid JSON, no markdown, no code fences."""
                 {"role": "user", "content": prompt},
             ],
             "temperature": 0.3,
-            "max_tokens": 8192,
+            "max_tokens": 16384,
         }
         # Forces the model to emit well-formed JSON instead of prose that
         # merely resembles JSON. Sent unconditionally, including to local
@@ -253,7 +253,8 @@ Return ONLY valid JSON, no markdown, no code fences."""
             raise ProviderError(f"Summarization API error ({resp.status_code}): {resp.text}")
 
         choice = resp.json()["choices"][0]
-        content = choice["message"]["content"]
+        msg = choice["message"]
+        content = msg.get("reasoning_content") or msg.get("content") or ""
         if choice.get("finish_reason") == "length":
             raise ProviderError(
                 "Summary generation was cut off (model hit its token/context "

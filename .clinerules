@@ -1,0 +1,23 @@
+# Cline Workspace Rules
+
+## Serena MCP Server Activation
+
+Before starting any task that involves code exploration, editing, or analysis, the following steps MUST be taken in order:
+
+1. **Activate the project** by calling `activate_project` with the project name (e.g. `"whisperdesk"`) on the `github.com/oraios/serena` MCP server. This must be done first — `search_for_pattern` and other tools will fail with "No active project" otherwise.
+2. **Activate Serena instructions** by calling the `initial_instructions` tool on the `github.com/oraios/serena` MCP server.
+3. **Read and process the Serena instructions** to ensure all semantic coding tools are properly loaded and available.
+
+This ensures that Serena's symbolic tools (`find_symbol`, `get_symbols_overview`, `find_referencing_symbols`, etc.) and editing tools (`replace_symbol_body`, `replace_content`, etc.) are available for efficient, token-aware code operations.
+
+### When to use Serena tools
+- **Symbolic exploration**: Use `find_symbol`, `get_symbols_overview`, `find_referencing_symbols` instead of reading entire files
+- **Symbol-level editing**: Use `replace_symbol_body`, `insert_after_symbol`, `insert_before_symbol` for whole method/class/function changes
+- **Targeted edits**: Use `replace_content` (regex-based) for precise line-level changes within larger symbols
+- **Pattern search**: Use `search_for_pattern` for flexible regex searches across the codebase
+- **Memory**: Use `write_memory`/`read_memory` to persist and retrieve project knowledge
+
+### When NOT to use Serena tools
+- For non-code files (markdown, config, etc.) — use standard read/write tools
+- For initial project scaffolding or creating new files — use `write_to_file`
+- For simple file reads where you already know the exact path — use `read_file`

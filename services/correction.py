@@ -54,7 +54,7 @@ async def _chat_completion(
             {"role": "user", "content": prompt},
         ],
         "temperature": 0.2,
-        "max_tokens": 8192,
+        "max_tokens": 16384,
     }
     if json_mode and provider_name in _JSON_MODE_PROVIDERS:
         request_body["response_format"] = {"type": "json_object"}
@@ -73,7 +73,11 @@ async def _chat_completion(
     if response.status_code != 200:
         raise RuntimeError(f"LLM API error ({response.status_code}): {response.text}")
 
-    return response.json()["choices"][0]["message"]["content"]
+    msg = response.json()["choices"][0]["message"]
+    # Reasoning/MTP models (e.g. Qwen3.5) put their output in
+    # reasoning_content instead of content. Fall back when content
+    # is empty so correction/summary work with those models too.
+    return msg.get("reasoning_content") or msg.get("content") or ""
 
 
 def _transcript_lines(transcript) -> list[str]:
