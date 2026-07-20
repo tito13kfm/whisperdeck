@@ -1548,7 +1548,7 @@ async function loadTranscripts() {
       <h1 class="t-title">Tape library</h1>
       <div class="page-status page-status--ok">${ledDot(GREEN, true, 9)}${list.length} channels · ${active} active</div>
     </div>
-    <div style="display:flex;gap:10px;margin-bottom:14px;padding:0 4px">
+    <div class="unit" style="border-radius:3px;display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px;padding:12px 34px">
       <input id="bank-search" class="inp" type="text" placeholder="Search title or filename…" value="${escapeHtml(S.bankQuery || '')}" style="font-size:12px;padding:8px 10px 8px 16px;flex:1;max-width:320px">
       <select id="bank-sort" class="inp" style="font-size:12px;padding:8px 10px">
         <option value="date-desc" ${(!S.bankSort || S.bankSort === 'date-desc') ? 'selected' : ''}>Newest first</option>
