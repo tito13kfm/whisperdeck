@@ -20,10 +20,15 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse, FileResponse, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.sessions import SessionMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
 from sqlalchemy.orm import Session
 
 from database import init_db, backfill_user_id, Transcript, Summary, VoiceProfile, VoiceClip, ProviderConfig, User, LlmJob, utcnow_naive
-from services.auth import get_or_create_fallback_user, create_user, authenticate_user
+from services.auth import (
+    get_or_create_fallback_user, create_user, authenticate_user,
+    list_usernames, generate_reset_token, reset_password,
+    set_admin_status, get_all_users,
+)
 from services.settings import get_user_settings, update_user_settings
 from services.transcription import TranscriptionService
 from services.diarization import DiarizationService
@@ -43,11 +48,28 @@ from services.llm_jobs import (
     dismiss_llm_job, clear_finished_llm_jobs,
 )
 from backends import list_providers, get_provider, LOCAL_PROVIDERS
+from services.security import (
+    generate_csrf_token, validate_csrf_token,
+    rate_limiter, encrypt_api_key, decrypt_api_key,
+)
 
 # ── App Setup ──────────────────────────────────────────────────────────────
 
 BASE_DIR = Path(__file__).parent.resolve()
-DATA_DIR = Path(os.environ["WHISPERDECK_DATA_DIR"]) if os.environ.get("WHISPERDECK_DATA_DIR") else BASE_DIR / "data"
+# Support the correctly-spelled WHISPERDECK_DATA_DIR, with a fallback to the
+# legacy typo'd WHISPERDESK_DATA_DIR for backward compatibility with existing
+# deploy scripts and the portable .bat launcher.  A deprecation warning is
+# printed when only the old name is set so operators can migrate.
+if os.environ.get("WHISPERDECK_DATA_DIR"):
+    DATA_DIR = Path(os.environ["WHISPERDECK_DATA_DIR"])
+elif os.environ.get("WHISPERDESK_DATA_DIR"):
+    print(
+        "[deprecation] WHISPERDESK_DATA_DIR is deprecated — "
+        "rename to WHISPERDECK_DATA_DIR (note: DECK, not DESK)"
+    )
+    DATA_DIR = Path(os.environ["WHISPERDESK_DATA_DIR"])
+else:
+    DATA_DIR = BASE_DIR / "data"
 UPLOAD_DIR = DATA_DIR / "uploads"
 TRANSCRIPT_DIR = DATA_DIR / "transcripts"
 VOICES_DIR = DATA_DIR / "voices"
@@ -68,7 +90,34 @@ else:
     SESSION_SECRET = secrets.token_hex(32)
     SESSION_SECRET_PATH.write_text(SESSION_SECRET)
 
+# Capture whether the DB file already exists *before* init_db(), which calls
+# Base.metadata.create_all() and creates the file on a fresh install.  The
+# data-safety warning should only fire when a pre-existing DB has zero users
+# (misconfiguration / wrong DATA_DIR), not on a genuine first run.
+_db_preexisted = DB_PATH.exists()
 engine, SessionLocal, migrated_tables = init_db(str(DB_PATH))
+
+# ── Data-safety guard: warn loudly if a pre-existing database has zero users.
+#    This catches a fresh clone, a misconfigured DATA_DIR, or a database that
+#    was silently replaced — all cases where the operator's transcripts may be
+#    in a different (still-existing) database file the app isn't pointing at.
+#    Skipped on a genuine first install (DB didn't exist before init_db).
+_startup_db = SessionLocal()
+try:
+    _user_count = _startup_db.query(User).count()
+    if _user_count == 0 and _db_preexisted:
+        print(
+            "\n" + "!" * 72 + "\n"
+            "  WARNING: The database exists but contains zero user accounts.\n"
+            f"  Path: {DB_PATH}\n"
+            "  If you recently reinstalled or changed WHISPERDECK_DATA_DIR,\n"
+            "  your operator accounts and transcripts may be in a different\n"
+            "  location. Register a new account to start fresh, or point\n"
+            "  WHISPERDECK_DATA_DIR at the correct data directory.\n" +
+            "!" * 72 + "\n"
+        )
+finally:
+    _startup_db.close()
 
 if migrated_tables:
     _migration_db = SessionLocal()
@@ -102,7 +151,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="WhisperDeck",
-    version="0.6.0",
+    version="0.8.0",
     description="Modern meeting transcription & voice intelligence",
     lifespan=lifespan,
 )
@@ -117,7 +166,36 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-app.add_middleware(SessionMiddleware, secret_key=SESSION_SECRET)
+
+# CSRF-safe methods never mutate state, so they're exempt; every other
+# /api/* request must carry a token matching the one issued by
+# GET /api/csrf-token for its session — including /api/login and
+# /api/register, since the SPA always fetches a token (anonymous session)
+# before ever showing the login form (see rack.js checkAuth()).
+_CSRF_SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
+
+
+async def enforce_csrf(request: Request, call_next):
+    if request.method not in _CSRF_SAFE_METHODS and request.url.path.startswith("/api/"):
+        csrf = request.headers.get("x-csrf-token") or ""
+        if not validate_csrf_token(request.session, csrf):
+            return JSONResponse(status_code=403, content={"detail": "Invalid or missing CSRF token"})
+    return await call_next(request)
+
+
+# Starlette's add_middleware() prepends to the stack, so the *last* middleware
+# added here runs *first* on each request — enforce_csrf must therefore be
+# registered before SessionMiddleware so that, at request time, Session runs
+# first (populating request.session) and enforce_csrf runs second (reading
+# it). Registering these two in the other order raises "SessionMiddleware
+# must be installed to access request.session" even though it is.
+app.add_middleware(BaseHTTPMiddleware, dispatch=enforce_csrf)
+# CSRF posture (issue #36, supersedes the SameSite-only posture from #32):
+# every session-cookie-authenticated mutation validates X-CSRF-Token via
+# enforce_csrf above, independent of browser SameSite behavior. Pin lax
+# explicitly anyway so a Starlette default change can't silently weaken the
+# defense-in-depth layer.
+app.add_middleware(SessionMiddleware, secret_key=SESSION_SECRET, same_site="lax")
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────
@@ -205,8 +283,22 @@ def _serialize_summary(s: Summary) -> dict:
 
 # ── Auth ──────────────────────────────────────────────────────────────────
 
+@app.get("/api/csrf-token")
+async def csrf_token(request: Request):
+    """Return a fresh CSRF token — the frontend reads this once and submits
+    it as X-CSRF-Token on every mutation request. A new token is generated
+    each call; the old one remains valid until a new one replaces it."""
+    token = generate_csrf_token(request.session)
+    return {"token": token}
+
+
 @app.post("/api/register")
 async def register(request: Request, data: dict = Body(...), db: Session = Depends(get_db)):
+    client_ip = request.client.host if request.client else None
+    # Skip rate limiting for TestClient (no real client IP) so tests don't
+    # share a single bucket across the whole suite.
+    if client_ip and not rate_limiter.check(f"register:{client_ip}", max_requests=5, window_seconds=300):
+        raise HTTPException(status_code=429, detail="Too many registration attempts — try again later")
     username = (data.get("username") or "").strip()
     password = data.get("password") or ""
     if not username or not password:
@@ -220,6 +312,9 @@ async def register(request: Request, data: dict = Body(...), db: Session = Depen
 
 @app.post("/api/login")
 async def login(request: Request, data: dict = Body(...), db: Session = Depends(get_db)):
+    client_ip = request.client.host if request.client else None
+    if client_ip and not rate_limiter.check(f"login:{client_ip}", max_requests=10, window_seconds=60):
+        raise HTTPException(status_code=429, detail="Too many login attempts — try again later")
     username = (data.get("username") or "").strip()
     password = data.get("password") or ""
     user = authenticate_user(db, username, password)
@@ -237,7 +332,97 @@ async def logout(request: Request):
 
 @app.get("/api/me")
 async def me(current_user: User = Depends(get_current_user)):
-    return {"username": current_user.username}
+    return {"username": current_user.username, "is_admin": bool(current_user.is_admin)}
+
+
+# ── Account Recovery ──────────────────────────────────────────────────────
+
+
+@app.post("/api/forgot-username")
+async def forgot_username(request: Request, db: Session = Depends(get_db)):
+    """Self-service: return every registered username so the user can
+    identify their own account. Rate-limited to prevent enumeration per
+    client IP, but usernames aren't secrets in a self-hosted app."""
+    client_ip = request.client.host if request.client else None
+    if client_ip and not rate_limiter.check(f"forgot-username:{client_ip}", max_requests=5, window_seconds=300):
+        raise HTTPException(status_code=429, detail="Too many requests — try again later")
+    return {"usernames": list_usernames(db)}
+
+
+@app.post("/api/forgot-password")
+async def forgot_password(request: Request, data: dict = Body(...), db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    """Admin-only: generate a one-time reset token for any user.
+    The token is returned directly (no email) — the admin shares it with
+    the affected user out-of-band."""
+    if not current_user.is_admin:
+        raise HTTPException(status_code=403, detail="Only administrators can generate password reset tokens")
+    client_ip = request.client.host if request.client else None
+    if client_ip and not rate_limiter.check(f"forgot-password:{client_ip}", max_requests=10, window_seconds=60):
+        raise HTTPException(status_code=429, detail="Too many attempts — try again later")
+    target_username = (data.get("username") or "").strip()
+    if not target_username:
+        raise HTTPException(status_code=400, detail="username is required")
+    token = generate_reset_token(db, current_user, target_username)
+    if token is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    expires_at = db.query(User).filter(User.username == target_username).first().reset_token_expires_at
+    return {"reset_token": token, "expires_at": expires_at.isoformat() if expires_at else None}
+
+
+@app.post("/api/reset-password")
+async def reset_password_route(request: Request, data: dict = Body(...), db: Session = Depends(get_db)):
+    """Reset a password using a valid one-time token. Auto-logs in on success."""
+    client_ip = request.client.host if request.client else None
+    if client_ip and not rate_limiter.check(f"reset-password:{client_ip}", max_requests=5, window_seconds=300):
+        raise HTTPException(status_code=429, detail="Too many attempts — try again later")
+    token = (data.get("token") or "").strip()
+    new_password = data.get("new_password") or ""
+    if not token or not new_password:
+        raise HTTPException(status_code=400, detail="token and new_password are required")
+    user = reset_password(db, token, new_password)
+    if not user:
+        raise HTTPException(status_code=400, detail="Invalid or expired reset token")
+    request.session["user_id"] = user.id
+    return {"ok": True, "username": user.username}
+
+
+# ── Admin User Management ─────────────────────────────────────────────────
+
+
+@app.get("/api/admin/users")
+async def admin_users(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    """Admin-only: list all users with admin status."""
+    if not current_user.is_admin:
+        raise HTTPException(status_code=403, detail="Administrator access required")
+    return get_all_users(db)
+
+
+@app.post("/api/admin/promote")
+async def admin_promote(data: dict = Body(...), db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    """Admin-only: grant admin status to another user."""
+    if not current_user.is_admin:
+        raise HTTPException(status_code=403, detail="Administrator access required")
+    target_username = (data.get("username") or "").strip()
+    if not target_username:
+        raise HTTPException(status_code=400, detail="username is required")
+    target = set_admin_status(db, current_user, target_username, is_admin=True)
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found")
+    return {"ok": True, "username": target.username, "is_admin": bool(target.is_admin)}
+
+
+@app.post("/api/admin/demote")
+async def admin_demote(data: dict = Body(...), db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    """Admin-only: revoke admin status from another user (cannot self-demote)."""
+    if not current_user.is_admin:
+        raise HTTPException(status_code=403, detail="Administrator access required")
+    target_username = (data.get("username") or "").strip()
+    if not target_username:
+        raise HTTPException(status_code=400, detail="username is required")
+    target = set_admin_status(db, current_user, target_username, is_admin=False)
+    if not target:
+        raise HTTPException(status_code=400, detail="Cannot demote yourself or user not found")
+    return {"ok": True, "username": target.username, "is_admin": bool(target.is_admin)}
 
 
 # ── Settings ──────────────────────────────────────────────────────────────
@@ -292,7 +477,7 @@ async def health():
     return {
         "ok": True,
         "app": "WhisperDeck",
-        "version": "0.6.0",
+        "version": "0.8.0",
         "diarization_backend": diarization_service._check_pyannote(),
         "voice_id_backend": voice_id_service._backend,
     }
@@ -359,8 +544,11 @@ async def update_provider_config(name: str, data: dict = Body(...), db: Session 
         cfg = ProviderConfig(name=name, user_id=current_user.id)
         db.add(cfg)
 
-    if "api_key" in data and data["api_key"] and not data["api_key"].startswith("••••"):
-        cfg.api_key = data["api_key"]
+    if "api_key" in data:
+        if data["api_key"] and not data["api_key"].startswith("••••"):
+            cfg.api_key = encrypt_api_key(data["api_key"], SESSION_SECRET)
+        elif not data["api_key"]:
+            cfg.api_key = ""
     if "api_url" in data:
         cfg.api_url = data["api_url"]
     if "default_model" in data:
@@ -408,6 +596,8 @@ async def list_provider_models(name: str, db: Session = Depends(get_db), current
     except Exception as e:
         # Return defaults on failure
         default_map = {
+            "builtin": ["tiny", "tiny.en", "base", "base.en", "small", "small.en", "medium", "medium.en", "large-v1", "large-v2", "large-v3", "large-v3-turbo"],
+            "moonshine": ["tiny", "tiny-streaming", "base", "small-streaming", "medium-streaming"],
             "groq": ["whisper-large-v3-flash", "whisper-large-v3", "whisper-large-v3-turbo", "distil-whisper-large-v3"],
             "openai": ["whisper-1"],
             "replicate": ["varunp2k/whisper-large-v3-turbo", "openai/whisper"],
@@ -493,16 +683,19 @@ async def _run_transcription_pipeline(
         except AudioPrepError as e:
             raise HTTPException(status_code=500, detail=str(e))
 
-    # Get provider config
+    # Get provider config — decrypts API key transparently
+    from services.settings import _decrypt_key_if_needed
     prov_cfg = db.query(ProviderConfig).filter(
         ProviderConfig.user_id == current_user.id,
         ProviderConfig.name == provider,
     ).first()
     provider_config = {}
     if prov_cfg:
+        raw_key = prov_cfg.api_key or ""
+        decrypted_key = _decrypt_key_if_needed(raw_key, SESSION_SECRET)
         provider_config = {
-            "api_key": prov_cfg.api_key,
-            "api_url": prov_cfg.api_url,
+            "api_key": decrypted_key,
+            "api_url": prov_cfg.api_url or "",
             "default_model": prov_cfg.default_model or "",
         }
 
@@ -1565,7 +1758,7 @@ if static_dir.exists():
 if __name__ == "__main__":
     import uvicorn
     print("=" * 46)
-    print("         WhisperDeck v0.6")
+    print("         WhisperDeck v0.8")
     print("  Transcribe - Diarize - Summarize - Identify")
     print("=" * 46)
-    uvicorn.run("app:app", host="0.0.0.0", port=int(os.environ.get("PORT", 9781)), reload=False)
+    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 9781)), reload=False)

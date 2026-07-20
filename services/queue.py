@@ -606,8 +606,17 @@ async def _process_transcript_jobs(db, transcript_id: int, jobs: list, diarizati
         .filter(ProviderConfig.user_id == transcript.user_id, ProviderConfig.name == transcript.provider)
         .first()
     )
+    raw_key = prov_cfg.api_key if prov_cfg else ""
+    # Decrypt the API key transparently if it was encrypted on save
+    from services.settings import _decrypt_key_if_needed
+    from pathlib import Path
+    import os as os_module
+    _queue_data = Path(os_module.environ.get("WHISPERDECK_DATA_DIR") or os_module.environ.get("WHISPERDESK_DATA_DIR") or str(Path(__file__).parent.parent / "data"))
+    _queue_secret_path = _queue_data / ".session_secret"
+    _queue_secret = _queue_secret_path.read_text().strip() if _queue_secret_path.exists() else ""
+    decrypted_key = _decrypt_key_if_needed(raw_key, _queue_secret)
     provider_config = {
-        "api_key": prov_cfg.api_key if prov_cfg else "",
+        "api_key": decrypted_key,
         "api_url": prov_cfg.api_url if prov_cfg else "",
         "default_model": (prov_cfg.default_model if prov_cfg else "") or transcript.model,
     }

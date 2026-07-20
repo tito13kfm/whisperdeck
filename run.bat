@@ -3,7 +3,7 @@ REM WhisperDeck — Launcher for Windows
 cd /d "%~dp0"
 
 echo ==============================================
-echo          WhisperDeck v0.6
+echo          WhisperDeck v0.7
 echo   Transcribe - Diarize - Summarize - Identify
 echo ==============================================
 echo.

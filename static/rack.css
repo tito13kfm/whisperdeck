@@ -189,7 +189,7 @@ button.unit:hover { border-color: var(--dash); }
 .rail-btn.active .led { background: var(--amber); box-shadow: 0 0 5px var(--amber); }
 .rail-btn.active .lbl { color: var(--label); }
 .rail-foot { margin-top: auto; display: flex; flex-direction: column; gap: 7px; padding: 0 8px; }
-.rail-foot .row { display: flex; justify-content: space-between; font-family: var(--f-mono); font-size: 9.5px; color: var(--label-dim); text-transform: uppercase; letter-spacing: 0.08em; }
+.rail-foot .row { display: flex; justify-content: space-between; font-family: var(--f-mono); font-size: 10.5px; color: var(--label-dim); text-transform: uppercase; letter-spacing: 0.08em; }
 
 .main-col { flex: 1; min-width: 0; display: flex; justify-content: center; }
 .content {
@@ -442,10 +442,97 @@ textarea.inp { resize: vertical; }
   cursor: pointer;
 }
 .btn:hover:not(:disabled) { background: var(--hover); }
+.btn:focus-visible { outline: none; box-shadow: 0 0 0 2px var(--amber); }
 .btn:disabled { opacity: 0.45; cursor: default; }
 .btn--red { border-color: var(--red); color: var(--red); }
 .btn--red:hover { background: rgba(224, 85, 74, 0.12); }
 .btn--amber { background: var(--amber); border-color: var(--amber); color: var(--amber-ink); }
+.btn--amber:hover:not(:disabled) { background: #f0b94a; border-color: #f0b94a; }
+/* size + style variants (use on top of .btn) */
+.btn--sm { font-size: 12px; padding: 6px 12px; }
+.btn--xs { font-size: 11px; padding: 5px 10px; }
+.btn--ghost { background: transparent; border-color: var(--inset-edge); }
+.btn--ghost:hover:not(:disabled) { background: var(--hover); }
+.btn--ghost-red { background: none; border-color: var(--red); color: var(--red); }
+.btn--ghost-red:hover:not(:disabled) { background: rgba(224, 85, 74, 0.12); }
+.btn--file-pick {
+  font-family: var(--f-mono);
+  font-size: 11px;
+  background: var(--panel-lo);
+  border: 1px dashed var(--dash);
+  color: var(--label-dim);
+  padding: 12px;
+  border-radius: 2px;
+  cursor: pointer;
+  text-align: center;
+  width: 100%;
+}
+.btn--file-pick:hover:not(:disabled) { background: var(--hover); color: var(--label); }
+
+/* ── modal primitives (use inside .modal) ── */
+.modal-title {
+  font-family: var(--f-cond);
+  font-weight: 700;
+  font-size: 16px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin: 0 0 12px;
+  color: var(--label);
+}
+.modal-body { font-size: 13.5px; line-height: 1.55; color: var(--body); margin: 0 0 8px; }
+.modal-text { font-size: 13px; line-height: 1.55; color: var(--body); margin: 0 0 14px; }
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.modal-stack { display: flex; flex-direction: column; gap: 10px; margin: 0 0 16px; }
+.modal-hint {
+  font-family: var(--f-mono);
+  font-size: 10px;
+  color: var(--label-dim);
+  margin: 0 0 18px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.modal-callout {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--amber);
+  margin: 0 0 16px;
+}
+
+/* ── page-head + page-status variants ── */
+.page-head { padding: 0 38px; }  /* align with the unit's interior (16 padding + 22 ear seam) */
+.page-head--with-actions { gap: 14px; flex-wrap: wrap; align-items: center; }
+.page-status--ok { color: var(--green); }
+.page-status--busy { color: var(--amber); }
+
+/* ── status badge (rendered in detail header, bank row, queue row, dashboard recents) ── */
+.status-badge { font-family: var(--f-mono); font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em; }
+.status-badge--done { color: var(--green); }
+.status-badge--failed { color: var(--red); }
+.status-badge--partial { color: var(--amber); }
+.status-badge--cancelled { color: var(--amber); opacity: 0.7; }
+.status-badge--running,
+.status-badge--working,
+.status-badge--waiting { color: var(--amber); }
+.status-badge--queued { color: var(--label-dim); }
+.status-badge--default { color: var(--label-dim); }
+
+/* ── LED + bargraph cell variants (so callers can use a CSS custom property for color) ── */
+.led-dot--on { background: var(--led-color, var(--led-off)); box-shadow: 0 0 5px var(--led-color, transparent); }
+.bargraph > span.on { background: var(--on-color, var(--led-off)); box-shadow: 0 0 4px var(--on-color, transparent); }
+
+/* ── small piano key (used in detail tabs) ── */
+.key--sm { width: 110px; height: 30px; font-size: 12px; }
+.key--sm.active { background: var(--key-metal); border-top-color: var(--key-top); color: var(--key-ink); }
+.key--sm.inactive { background: var(--key-disabled); color: var(--key-ink-disabled); cursor: default; }
+
+/* ── auth LED (login): standby glow so the system reads as 'on, waiting' ── */
+#auth-led { background: var(--amber); box-shadow: 0 0 5px var(--amber); opacity: 0.55; transition: opacity 0.18s, background 0.18s, box-shadow 0.18s; }
+#auth-led.ok { background: var(--green); box-shadow: 0 0 7px var(--green); opacity: 1; }
 
 /* ── deck window ── */
 .deck-window {
@@ -526,6 +613,43 @@ textarea.inp { resize: vertical; }
   color: var(--label-dim);
   text-transform: uppercase;
   letter-spacing: 0.08em;
+}
+
+/* ── auth recovery links (login page) ── */
+.auth-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--panel-lo);
+  border: 1px solid var(--inset-edge);
+  border-radius: 2px;
+  color: var(--label-dim);
+  font-family: var(--f-mono);
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  padding: 6px 10px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: color 0.15s, border-color 0.15s, background 0.15s;
+}
+.auth-link::before {
+  content: '';
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--label-faint);
+  flex-shrink: 0;
+  transition: background 0.15s, box-shadow 0.15s;
+}
+.auth-link:hover {
+  color: var(--amber);
+  border-color: rgba(224, 168, 62, 0.4);
+  background: var(--hover);
+}
+.auth-link:hover::before {
+  background: var(--amber);
+  box-shadow: 0 0 4px var(--amber);
 }
 
 /* motion preferences: stop decorative animation, keep informational state */

@@ -1,4 +1,4 @@
-# WhisperDesk Roadmap
+# WhisperDeck Roadmap
 
 **Keep this current.** Update this file whenever a plan lands (move it to Done)
 or a new idea gets parked (add it to Parked). If a plan gets merged and this
@@ -6,22 +6,41 @@ file isn't touched in the same session, that's a bug — fix it before moving on
 
 ## Done
 
-- Per-user auth (`docs/superpowers/specs/2026-06-30-per-user-auth-design.md`)
-- Audio chunking + queue (`docs/superpowers/specs/2026-07-01-audio-chunking-and-queue-design.md`)
-- Transcription UX: cancel/resume, queue status, HF token consolidation, unified model selection (`docs/superpowers/specs/2026-07-01-transcription-ux-improvements-design.md`)
+- Per-user auth (`docs/superpowers/plans/2026-06-30-per-user-auth.md`)
+- Audio chunking + queue (`docs/superpowers/plans/2026-07-01-audio-chunking-and-queue.md`)
+- Transcription UX: cancel/resume, queue status, HF token consolidation, unified model selection (`docs/superpowers/plans/2026-07-01-transcription-ux-improvements.md`)
 - Diarization torchcodec bypass (pyannote reads via soundfile, not torchaudio)
+- Moonshine as default local provider (`docs/superpowers/plans/2026-07-02-moonshine-local-provider.md`)
+- Hotword glossary + LLM correction pass (`docs/superpowers/plans/2026-07-02-hotword-glossary-and-correction-pass.md`)
+- Hotword correction UI (`docs/superpowers/plans/2026-07-03-hotword-correction-ui.md`)
+- Voice clip roster / voice identification (`docs/superpowers/plans/2026-07-04-voice-clip-roster.md`)
+- Portable build / release packaging (`docs/superpowers/plans/2026-07-04-portable-build.md`)
+- E2E browser-driven UX audit (`docs/superpowers/plans/2026-07-04-e2e-ux-audit.md`)
+- E2E test app / regression testing (`docs/superpowers/plans/2026-07-04-e2e-test-app.md`)
+- E2E browser-driven followup handoff (`docs/superpowers/plans/2026-07-04-e2e-browser-driven-followup-handoff.md`)
+- Audit fixes (`docs/superpowers/plans/2026-07-05-audit-fixes.md`)
+- Queue clear / dismiss (`docs/superpowers/plans/2026-07-05-queue-clear.md`)
+- Run history: export metadata (`docs/superpowers/plans/2026-07-06-run-history-phase1-export-metadata.md`)
+- Run history: correction diff (`docs/superpowers/plans/2026-07-06-run-history-phase2-correction-diff.md`)
+- Run history: transcription versions (`docs/superpowers/plans/2026-07-06-run-history-phase3-transcription-versions.md`)
+- Run history: summary / re-diarize diff (`docs/superpowers/plans/2026-07-06-run-history-phase4-summary-rediarize-diff.md`)
+- Queue audit: cross-transcript parallelism (`docs/superpowers/plans/2026-07-07-queue-audit-cross-transcript-parallelism.md`)
+- Queue audit: enqueue dedupe constraint (`docs/superpowers/plans/2026-07-07-queue-audit-enqueue-dedupe-constraint.md`)
+- Queue audit: LLM job auto-retry (`docs/superpowers/plans/2026-07-07-queue-audit-llmjob-auto-retry.md`)
+- Queue audit: split concurrent job pools (`docs/superpowers/plans/2026-07-07-queue-audit-split-concurrent-job-pools.md`)
 
 ## In Progress
 
-- Cheap/quick pre-transcription pass that optimizes the prompt per-meeting (working name: "whisper-tiny pre-pass" or an alternative cheap approach) — brainstorming started 2026-07-02.
+- **pyannote.audio voice-ID embedding backend** (priority: needed asap — [issue #38](https://github.com/tito13kfm/whisperdeck/issues/38)) — named in `services/voice_id.py`'s backend-label mapping but `_detect_backend()` never returns it; the code comment says to skip it until an embedding extractor is wired up. speechbrain and librosa MFCC are the only real backends today.
 
 ## Parked (not designed yet)
 
-- **Moonshine local-provider swap** (HIGH PRIORITY) — swap the weak built-in faster-whisper-tiny provider for Moonshine; English-only fits actual usage.
-- **LLM transcript correction pass** — hotword-aware LLM pass to fix likely-mistranscribed words post-transcription.
 - **Windows ML / native app pivot** — DirectML could unlock real AMD GPU use; needs ONNX conversion or a native-app rewrite, not a quick win.
+- **Full-text search across transcripts** — cross-transcript content search endpoint + UI. Currently only title/filename list-filter and single-transcript in-page match exist.
+- **Admin user-management UI** — `GET /api/admin/users`, `POST /api/admin/promote`, `/api/admin/demote` are fully implemented and documented, but there's no UI anywhere in `rack.js` for them. An admin today can only list/promote/demote via raw API calls.
 
 ## Known accepted gaps
 
 - Cancel/resume: a few-Python-instructions race window between the diarization-await re-check and the final commit in `_finalize_if_done` is inert under the current single-process deployment (no `await` point in the gap). Needs a guarded `UPDATE ... WHERE status != 'cancelled'` if the app ever goes multi-worker.
 - Detail page for an in-progress transcript doesn't live-poll (only the dashboard recents badge does). Spec called for both; only the dashboard got built. Not blocking, not fixed.
+- Theme/phosphor/motion faceplate preferences (`rack.js`) are `localStorage`-only, not synced through the existing per-user `/api/settings`, so they don't follow a user across browsers/devices.

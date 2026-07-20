@@ -4,166 +4,24 @@ Observations captured during task-oriented work. Each entry identifies a
 potential skill improvement or new skill opportunity.
 
 **Status key:** OPEN = not yet actioned | ACTIONED = skill updated/created |
-DECLINED = user decided not to pursue
+DECLINED = user decided not to pursue | ESCALATED = needs a user decision;
+stays in the active log (never archived) until resolved to ACTIONED or DECLINED
 
 ---
 
-## 2026-07-01/02
+## 2026-07-10
 
-### Observation 1: Asserted repo identity from metadata proximity, not content
+### Observation 14: HEAD-based blob staging cleanly splits your hunks from foreign uncommitted work in the same file
 
-**Date:** 2026-07-02
-**Session context:** Setting up a missing git remote for whisperdesk after discovering no remote was configured locally.
-**Skill:** verification-before-completion (and, by extension, systematic-debugging's evidence-before-claim habit)
-**Type:** internal
-**Phase/Area:** Claim verification before acting/asserting
-
-**Issue:** Searched the user's GitHub account for a whisperdesk remote, found none by that name, but found `tito13kfm/whisperx-cpu` — created the day before, pushed minutes before the session started. Declared "Found it" and began fetching it as if it were this project's remote, based purely on owner + naming similarity + push-time proximity. Never checked the repo's actual contents before asserting the match. The user had to interrupt twice ("NO", then an angry correction) before the mistake was caught. On inspection, `whisperx-cpu` is a completely unrelated project (tkinter batch GUI, WhisperX CLI wrapper, live capture) with no overlap with whisperdesk (FastAPI web app). The fetch itself was harmless (read-only, just updated FETCH_HEAD), but the confident false claim wasted the user's attention and trust.
-
-**Suggested improvement:** Before asserting "X is the same project/thing as Y" based on metadata (name similarity, owner, timestamp proximity, file size), verify identity from content: read the repo description, check the language/file list, or open a representative file, and only then state the match as fact. If content can't be cheaply checked, present the candidate as a question ("found a repo pushed around the right time called X — is this it?") rather than a declarative "found it."
-
-**Principle:** Metadata proximity (same owner, same rough timestamp, plausible name) is a lead, not evidence. This is the same failure shape as the user's existing CLAUDE.md rule "A claim states location/existence, not content/cause" — but one level earlier: here the claim was "these two things are the same," made without checking either thing's content. Any time an agent is about to assert two artifacts are the same/related/interchangeable (repos, files, configs, database rows), it must check a content-level signal, not just an identity/metadata-level signal, before stating it as settled.
-
----
-
-### Observation 2: Plan text itself contained a Critical spec defect
-
-**Date:** 2026-07-02
-**Session context:** Subagent-driven-development execution of the transcription-ux-improvements plan, Task 3 (cancel/resume transcription jobs).
-**Skill:** subagent-driven-development, writing-plans
-**Type:** internal
-**Phase/Area:** Task review / plan-mandated findings handling
-
-**Issue:** The plan's own prescribed code for `cancel_transcript_jobs` only marked `status == "pending"` jobs as cancelled. If every job for a transcript was already `running` at cancel time (a common, not-exotic case — happens for the entire provider round-trip window on any transcript within the concurrency cap), cancellation silently no-opped and the transcript finalized normally once those jobs completed — defeating the plan's headline cancel feature. The implementer copied the plan's code verbatim (correctly, per its brief) and the defect only surfaced at task review. This is exactly the scenario the existing CLAUDE.md rule "Plan tasks must be diff-self-consistent" and the subagent-driven-development skill's "plan-mandated finding" rule anticipate, and both fired correctly here — the reviewer reported the finding without softening it, and the controller surfaced it to the user as a decision rather than silently patching or silently accepting.
-
-**Suggested improvement:** No skill change needed — the existing "plan-mandated finding → surface to human, don't silently override or silently comply" rule (subagent-driven-development's Red Flags section, and CLAUDE.md's plan-review guidance) worked exactly as designed. Recording this as a confirmation, not a correction: the pattern is validated, keep doing it. Worth noting for writing-plans: race-condition/timing bugs in state-machine designs (cancel/resume, retry, finalize) are a recurring defect class worth an explicit self-check in that skill ("does this status transition hold regardless of the order in-flight results arrive?").
-
-**Principle:** A plan being reviewed/approved before implementation does not make its code correct — treat plan-provided code with the same scrutiny as implementer-written code, especially for concurrency/ordering-sensitive logic (state machines, race conditions), because a plan author reasoning about one code path at a time is exactly the setup where a "just one more case" gap slips through.
-
----
-
-### Observation 3: Plan scoped a UI edit to one of two sibling render blocks, only whole-branch review caught the divergence
-
-**Date:** 2026-07-02
-**Session context:** Final whole-branch review of the transcription-ux-improvements plan, whisperdesk. Task 5 added a `cancelled`-aware status badge to the dashboard's "recent transcripts" list per its brief. The final reviewer found that the main Transcripts list page — a separate render block in the same file, showing the same underlying data — was never touched, so a cancelled transcript displays there as red "Failed", directly contradicting the cancel/resume feature in the page a user would actually browse to find and resume it.
-**Skill:** writing-plans, subagent-driven-development (final whole-branch review step)
-**Type:** internal
-**Phase/Area:** Plan scoping / final review checklist
-
-**Issue:** The plan's Task 5 brief said "add a queue-status-aware badge to the dashboard's recent-transcripts list" — accurate to what it said, but the codebase has two sibling views rendering the same transcript data (dashboard recents, full transcripts list) that need to visually agree. The per-task implementer and per-task reviewer both correctly built exactly what the brief scoped; nothing wrong happened at the task level. Only the whole-branch reviewer, explicitly instructed to check cross-task/cross-view consistency, caught the mirror-block divergence — this is a repeat, at UI-render-block granularity, of the CLAUDE.md "mirror / round-trip paths" instinct (#1/#12/#13), which until now had only been applied to backend data paths (export/view, serialize/deserialize).
-
-**Suggested improvement:** When a plan task adds status/UI handling for a new state (a new enum value, a new terminal status) to one view of shared data, its brief should explicitly say "and every other view of the same data" or name the sibling views by location, rather than naming one location and leaving the mirror implicit. For the final whole-branch review dispatch prompt (subagent-driven-development's final review step), add an explicit instruction to grep for all render sites of the same underlying entity when a new state value is introduced anywhere in the branch, not just the sites the plan's tasks named.
-
-**Principle:** The "mirror / round-trip paths" code-review instinct extends past backend data-transform pairs into UI: any codebase with more than one render path over the same entity (list view vs. detail view vs. dashboard-recents vs. list-page) is a mirror-pair risk the moment a new state value is introduced, and a plan that scopes a state-handling change to only the location it was written against will silently miss the others unless something explicitly checks for siblings.
-
----
-
-### Observation 4: "Discard this work" menu option offered after a clean final review, read as an insult
-
-**Date:** 2026-07-02
-**Session context:** finishing-a-development-branch's Step 4 menu, presented after the transcription-ux-improvements branch had already passed a final whole-branch review with a "ready to merge: yes" verdict and one round of fix-and-reverify.
-**Skill:** finishing-a-development-branch
-**Type:** internal
-**Phase/Area:** Step 4 (Present Options)
-
-**Issue:** The skill's Step 4 always presents the same fixed 4-option menu ("Merge / PR / Keep as-is / Discard") regardless of how the branch's review went. Presenting "Discard this work" verbatim right after a clean final review (no unresolved Critical/Important findings, explicit "ready to merge") reads as if the agent is suggesting the work might not be worth keeping — the user reacted with visible offense ("why would discarding be reasonable... when would I ever use that?"). The option itself is legitimate for other situations (approach turned out wrong, requirement changed mid-build, experiment didn't pan out) — the problem is presenting it with equal weight in a context where nothing in the session suggested it was live.
-
-**Suggested improvement:** In finishing-a-development-branch's Step 4, when the branch has a recorded clean/approved final review (no Critical/Important open findings) and no other signal in-session that the work is in question, drop "Discard" from the presented menu (or fold it under "Other" implicitly, per the harness's own AskUserQuestion convention of not listing every option verbatim). Reserve the explicit "Discard this work" line for when the session's own context gives it a reason to be there — a reverted decision, a failed experiment, or the user asking to abandon something.
-
-**Principle:** A fixed menu template that includes an option irrelevant to the specific outcome just produced isn't neutral — it reads as a signal (uncertainty about the work's worth) even when none was intended. Match the options actually offered to the state the session has already established, not just to the general shape of "development branch is done."
-
----
-
-### Observation 5: Plan test used fake byte payload against a route with a real pre-processing step, not just the mocked one
-
-**Date:** 2026-07-03
-**Session context:** Executing Task 6 of the hotword-glossary-and-correction-pass plan (whisperdesk), wiring `context_doc` extraction into `POST /api/transcribe`.
-**Skill:** writing-plans, test-driven-development
-**Type:** internal
-**Phase/Area:** Task test authoring (plan-supplied test code)
-
-**Issue:** The plan's own Task 6 test code posted `io.BytesIO(b"fake audio bytes")` and only patched `app.transcription_service.transcribe`, with a note claiming "a real audio file isn't needed since the provider call itself is stubbed out before it would inspect the file." That's wrong for this route: `transcribe_audio` calls `transcode_for_upload` (real ffmpeg subprocess) on non-local providers *before* reaching the transcribe call, and ffmpeg fails loudly on garbage bytes, producing a 500 that looked at first like the feature just wasn't wired up (test failed both before and after the real fix was applied, for the same superficial "assert 500 == 200"). Root cause was only visible by manually invoking the route outside pytest to read the actual error detail.
-
-**Suggested improvement:** When a plan pre-writes test code for a route that has more than one side-effecting step before the code path under test, the plan should either (a) name every pre-processing call that needs mocking, not just the one adjacent to the change, or (b) instruct the implementer to run the route manually once and inspect real response bodies before trusting a bare 200/404 status-code assertion to diagnose failures. Add a step to TDD's "run test to verify it fails" instruction: if the failure isn't the expected one (e.g. plan says "404 route not found" but you get 500), stop and read the actual response body/traceback before assuming the fix is incomplete.
-
-**Principle:** A red test in TDD is only informative if you've verified it's red for the *expected* reason. A 500 dressed up as a not-yet-implemented failure wastes an entire fix-and-recheck cycle; the fix (mocking `transcode_for_upload` too) had nothing to do with the actual feature code, which was already correct.
-
-### Observation 6: Verification scaffolding injected via browser evaluate instead of temp file mutation
-
-**Date:** 2026-07-03
-**Session context:** Signal Rack redesign, Phase 1 component-kit gate (whisperdesk).
-**Skill:** verification-before-completion (also relevant to the CLAUDE.md "verification gates that temporarily modify a file" rule)
-**Type:** internal
-**Phase/Area:** Verification gate design
-
-**Issue:** The plan called for a "temporary kitchen-sink test region" to visually verify the new component CSS kit. Instead of temporarily editing index.html or rack.js (which would require a careful inverse-mutation restore per the existing CLAUDE.md rule), the scaffolding was injected at runtime via Playwright browser_evaluate (innerHTML into an empty page container), screenshotted, and discarded by navigation. Zero file mutation, zero restore step, zero git churn.
-
-**Suggested improvement:** When a verification gate needs throwaway UI scaffolding and a live browser session exists, prefer runtime injection (browser_evaluate / DevTools) over temporarily mutating source files. The existing "restore with the inverse of that one mutation" rule stays for cases with no runtime injection path.
-
-**Principle:** The safest temporary mutation is one that never touches disk. Prefer verification channels whose cleanup is implicit (page reload) over ones requiring an explicit restore step that can be forgotten or done wrong.
-
-**Status:** OPEN
-
-### Observation 7: Seeded fake in-progress rows got consumed by the live job dispatcher
-
-**Date:** 2026-07-03
-**Session context:** Signal Rack redesign, dashboard/channel-bank verification (whisperdesk). Seeded transcripts with pending TranscriptionJob rows to render queued/running states; the app's background dispatcher picked up the pending jobs, hit their fake audio paths, and failed them within seconds, flipping the seeded rows to FAILED mid-verification.
-
-**Skill:** verify (also relevant to run)
-**Type:** internal
-**Phase/Area:** Test-data seeding against a live backend
-
-**Issue:** UI state verification needed rows in queued/running states. Seeding those states directly into the DB of a RUNNING app is unstable: any state a background worker polls for (pending jobs, running jobs with dead owners) is live inventory, not static fixture data. Terminal states (completed/failed/cancelled) seed fine; in-flight states get eaten.
-
-**Suggested improvement:** When seeding display fixtures against a live backend, either (a) seed only terminal states and verify transient states with a real job later, or (b) stop the worker/dispatcher first. Decide per state: "does anything poll for this state?"
-
-**Principle:** A live system's queue states are commands, not data. Seeding them schedules work; the honest fixture set is exactly the states no daemon claims.
-
-**Status:** OPEN
-
-### Observation 8: New input source shipped without cross-checking every consumer of its output format
-
-**Date:** 2026-07-03
-**Session context:** Signal Rack redesign, live-capture feature (whisperdesk). Browser capture produces webm/opus; the transcribe route's ffmpeg normalize pass ran only for hosted providers, so local providers (soundfile-backed) failed with "Format not recognised". Only surfaced when the user's real stereo capture was actually transcribed.
-
-**Skill:** verify, writing-plans
-**Type:** internal
-**Phase/Area:** Feature planning / end-to-end verification scope
-
-**Issue:** The capture feature was verified as capture → blob → tape-load, and transcription was verified with a wav file — but the JOIN of the two paths (capture's webm INTO transcription) was never exercised until the live user test. The plan treated "loads the deck like a browsed file" as sufficient equivalence; the file formats differ, and a format-sensitive branch (LOCAL_PROVIDERS skip-transcode) sat between them.
-
-**Suggested improvement:** When a feature introduces a new producer of an existing consumer's input (new file source, new message emitter), the E2E check must run the producer's actual output through each consumer variant — especially past any branch that switches on properties of that input (extension, size, provider type). "Same shape as existing input" is a claim to verify, not assume.
-
-**Principle:** Producer-consumer joins fail on properties invisible at either end alone. Test the join with the producer's real artifact, not a stand-in that predates the feature.
-
-**Status:** OPEN
-
-### Observation 9: Grep output showed phantom backslashes in JS string literals; Read disproved before acting
-**Status:** OPEN
-
-**Date:** 2026-07-04
-**Session context:** Planning post-hoc reprocess features for WhisperDeck; exploring rack.js with Grep
-**Skill:** verification-before-completion (also systematic-debugging's evidence-before-claim)
+**Status:** ACTIONED — Applied to CLAUDE.md "Verification gates that temporarily modify a file" section as (wd#14) (scheduled review 2026-07-13)
+**Date:** 2026-07-10
+**Session context:** PR 3 of the code-review fixes needed two README edits while the working tree README carried 31 uncommitted lines of someone else's in-progress screenshot work. Interactive `git add -p` is unavailable in the harness, and stash was ruled out (prior incident leaked uncommitted content).
+**Skill:** verification-before-completion, superpowers:finishing-a-development-branch
 **Type:** open-source
-**Phase/Area:** Exploration / reading tool output
+**Phase/Area:** Committing when the working tree contains unrelated uncommitted changes to the same file
 
-**Issue:** Grep (ripgrep-backed tool) context output rendered several rack.js lines as api('\api\transcripts\' + ...) — backslash path separators inside JS string literals, which would be a real bug ('\t' is a tab escape). Other lines in the same output showed normal '/api/...'. A direct Read of the same lines showed the file bytes were correct forward slashes; the backslashes were a display artifact of the tool output, not file content. Acting on the grep view alone would have spawned a bogus bug hunt or a 'fix' that churned correct code.
+**Issue:** Needed to commit only my hunks of a co-modified file without touching the other work. Solution that worked cleanly: (1) apply my edits to the working-tree file so both change sets coexist there, (2) extract the HEAD version to a temp file (byte-exact via bash redirect), (3) apply the same edits to the temp copy, (4) `git hash-object -w --path=<file>` (the --path applies clean filters, keeping line-ending conversion correct) then `git update-index --cacheinfo 100644,<hash>,<file>`, (5) plain `git commit` of the staged index. Result verified: committed diff contained exactly my hunks; post-merge worktree diff was exactly the foreign 31 lines.
 
-**Suggested improvement:** Add a rule to verification-before-completion: when search-tool output shows something surprising inside quoted string content (escapes, separators, encoding oddities), confirm with a direct file Read of those exact lines before concluding anything — grep-style renderers can mangle quoting/escapes in context lines.
+**Suggested improvement:** Candidate rule for the CLAUDE.md git-workflow area or the finishing-a-development-branch skill: when a file you must change carries foreign uncommitted modifications, never stash, never commit the whole file; edit both the worktree AND a HEAD-derived temp copy, stage the temp copy via hash-object --path + update-index --cacheinfo, and verify both directions after commit (staged diff = only your hunks; worktree diff = only the foreign hunks).
 
-**Principle:** Search output is a lossy view of a file; only a byte-faithful Read is evidence. Verify surprising content at the source before treating it as a defect.
-
-### Observation 10: Compound UI action — failure in step B suppressed feedback for already-committed step A
-**Status:** OPEN
-
-**Date:** 2026-07-04
-**Session context:** WhisperDeck speaker-naming feature; rename-then-enroll flow in the transcript detail screen
-**Skill:** verify (also frontend-design / any UI-flow skill)
-**Type:** open-source
-**Phase/Area:** Verification of multi-step UI flows
-
-**Issue:** The rename-speaker flow chained two server calls in one try block: rename (committed server-side) then voice enrollment (failed on this machine's broken embedding backend). The catch swallowed the post-action view refresh, so the UI kept showing the OLD speaker labels even though the rename had landed. Unit tests passed (each endpoint correct in isolation); only driving the compound flow live with step B forced to fail exposed it.
-
-**Suggested improvement:** Add to the verify skill's checklist: for any UI action that chains multiple mutations, exercise the flow with each later step forced to fail and assert the UI still reflects every earlier step that committed. Structure code so refresh/feedback for step A does not live inside step B's failure path.
-
-**Principle:** In a compound action, each committed step's user feedback must be independent of later steps' outcomes — one shared try/catch around sequential mutations silently converts a partial success into an apparent no-op.
+**Principle:** The index is writable independently of the working tree. Any "commit only part of a co-modified file" problem decomposes into building the desired blob out-of-tree and pointing the index at it, which is deterministic and reviewable, unlike interactive hunk selection, and never puts the other party's work at risk the way stash or checkout does.
