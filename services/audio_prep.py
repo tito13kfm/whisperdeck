@@ -98,18 +98,34 @@ def get_audio_duration(audio_path: str) -> float:
 
 
 def has_video_stream(path: str) -> bool:
-    """True if the file has at least one video stream — used to decide
-    whether to retain the original upload for playback, independent of
-    file extension (a misnamed or audio-only .mp4 must report False)."""
+    """True if the file has at least one real (non-cover-art) video
+    stream — used to decide whether to retain the original upload for
+    playback, independent of file extension (a misnamed or audio-only
+    .mp4 must report False).
+
+    Embedded cover art (ID3 APIC frames, voice-memo/podcast thumbnails)
+    shows up to ffprobe as a video stream too, but flagged with the
+    attached_pic disposition — those must NOT count as video, or a plain
+    audio file with album art would trigger the video-playback UI for a
+    static thumbnail. Querying stream_disposition=attached_pic alongside
+    codec_type distinguishes the two: each video stream is reported as
+    one CSV row "video,0" (real video) or "video,1" (attached pic)."""
     try:
         result = subprocess.run(
             [_ffprobe_bin(), "-v", "error", "-select_streams", "v",
-             "-show_entries", "stream=codec_type", "-of", "csv=p=0", path],
+             "-show_entries", "stream=codec_type:stream_disposition=attached_pic",
+             "-of", "csv=p=0", path],
             capture_output=True, text=True,
         )
     except (OSError, subprocess.SubprocessError):
         return False
-    return result.returncode == 0 and bool(result.stdout.strip())
+    if result.returncode != 0:
+        return False
+    for line in result.stdout.strip().splitlines():
+        fields = line.split(",")
+        if len(fields) >= 2 and fields[0] == "video" and fields[1] != "1":
+            return True
+    return False
 
 
 _SILENCE_END_RE = re.compile(r"silence_end:\s*([\d.]+)\s*\|\s*silence_duration:\s*([\d.]+)")

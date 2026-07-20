@@ -52,5 +52,39 @@ def test_misnamed_audio_only_mp4_has_no_video_stream(tmp_path):
     assert has_video_stream(str(audio)) is False
 
 
+def _make_audio_with_cover_art(path):
+    """An audio file with an embedded cover-art image, as produced by
+    podcast exports, voice-memo apps, and many music files — ffprobe
+    reports the cover art as a video stream (attached_pic disposition),
+    which must not count as "has video" for playback-UI purposes."""
+    base = path.parent / f"{path.stem}_base.mp3"
+    cover = path.parent / f"{path.stem}_cover.jpg"
+    subprocess.run(
+        ["ffmpeg", "-y", "-f", "lavfi", "-i", "anullsrc=r=8000:cl=mono", "-t", "1",
+         "-c:a", "libmp3lame", str(base)],
+        check=True, capture_output=True,
+    )
+    subprocess.run(
+        ["ffmpeg", "-y", "-f", "lavfi", "-i", "color=c=blue:s=64x64:d=1",
+         "-frames:v", "1", "-update", "1", str(cover)],
+        check=True, capture_output=True,
+    )
+    subprocess.run(
+        ["ffmpeg", "-y", "-i", str(base), "-i", str(cover),
+         "-map", "0:a", "-map", "1:v", "-c:a", "copy", "-c:v", "mjpeg",
+         "-disposition:v", "attached_pic", str(path)],
+        check=True, capture_output=True,
+    )
+
+
+def test_embedded_cover_art_is_not_a_video_stream(tmp_path):
+    """Cover art must not be mistaken for a real video stream — otherwise
+    a plain audio file with album art would trigger the video-playback UI
+    for what's actually just a static thumbnail."""
+    audio = tmp_path / "podcast_with_art.mp3"
+    _make_audio_with_cover_art(audio)
+    assert has_video_stream(str(audio)) is False
+
+
 def test_missing_file_returns_false_not_raise(tmp_path):
     assert has_video_stream(str(tmp_path / "nope.mp4")) is False
