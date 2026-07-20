@@ -1818,9 +1818,11 @@ function segPlayVideo(btn, t, start, end) {
   const v = $('seg-video');
   if (!v) return;
   // Wiring is keyed off the node itself (v._wired) — the node is rebuilt
-  // on every renderDetail() (rename/job-poll), so a transcript-id-based
-  // guard would silently no-op after a mid-playback re-render (new node,
-  // no listeners, but the guard variable still says "already set up").
+  // on every renderDetail() call (rename, job-poll-tick, tab switch,
+  // select-mode toggle — anything that re-renders the whole detail page),
+  // so a transcript-id-based guard would silently no-op after a
+  // mid-playback re-render (new node, no listeners, but the guard
+  // variable still says "already set up").
   // v._wired resets to undefined on a fresh node automatically (it's a
   // new object), so this both survives a re-render AND avoids stacking
   // duplicate listeners across repeated clicks on the SAME node between
@@ -2313,8 +2315,9 @@ function renderDetail() {
     extraActs.push('<button class="btn" style="font-size:12px;padding:7px 14px;border-color:var(--inset-edge)" data-dact="resume">Resume</button>');
   // src lives in the template attribute (not set imperatively after the
   // fact) because this whole node is destroyed and rebuilt on every
-  // renderDetail() call (rename/job-poll-tick) — a freshly-rebuilt
-  // node must be immediately pointed at the right URL with no follow-up JS.
+  // renderDetail() call (rename, job-poll-tick, tab switch, select-mode
+  // toggle) — a freshly-rebuilt node must be immediately pointed at the
+  // right URL with no follow-up JS.
   const videoHtml = t.has_video
     ? `<video id="seg-video" controls src="/api/transcripts/${t.id}/video" style="display:block;width:calc(100% - 72px);max-height:260px;background:#000;border:1px solid var(--inset-edge);border-radius:4px;margin:0 36px 12px"></video>`
     : '';
