@@ -325,7 +325,7 @@ function statusView(t) {
 }
 
 /* ══════════════════ navigation ══════════════════ */
-const PAGES = ['dashboard', 'transcribe', 'transcripts', 'queue', 'detail', 'voices', 'settings'];
+const PAGES = ['dashboard', 'transcribe', 'transcripts', 'queue', 'detail', 'voices', 'files', 'settings'];
 
 function navigate(page, data) {
   if (!PAGES.includes(page)) page = 'dashboard';
@@ -343,6 +343,7 @@ function navigate(page, data) {
     queue: loadQueue,
     detail: () => loadTranscriptDetail(S.detailId),
     voices: loadVoices,
+    files: renderFilesPage,
     settings: loadSettingsPage,
   };
   (loaders[page] || (() => {}))();
@@ -1862,6 +1863,8 @@ function resetSegAudio() {
   segAudioTid = null;
   segPlayingBtn = null;
   seedClips = {};
+  const v = $('seg-video');
+  if (v) v.pause();
 }
 
 async function loadTranscriptDetail(id, opts = {}) {
@@ -1928,7 +1931,7 @@ function segmentsHtml(t) {
     const checkbox = selectMode
       ? `<input type="checkbox" data-seg-select="${i}" ${selectedSegments.has(i) ? 'checked' : ''} style="margin-top:4px;flex-shrink:0">`
       : '';
-    const controls = !t.has_audio ? '' : `
+    const controls = !(t.has_audio || t.has_video) ? '' : `
       <div style="display:flex;flex-direction:column;gap:4px;flex-shrink:0">
         <button data-seg-play data-start="${sg.start}" data-end="${sg.end}" title="Play this line from the recording" style="${segBtn};color:var(--label-dim)">▶</button>
         ${sg.speaker ? `<button data-seg-seed data-speaker="${escapeHtml(sg.speaker)}" data-start="${sg.start}" data-end="${sg.end}" title="${seeded ? 'Flagged as a voice seed — click to unflag' : 'Flag this line as a voice seed for enrollment'}" style="${segBtn};color:${seeded ? 'var(--nixie)' : 'var(--label-dim)'};${seeded ? 'border-color:var(--nixie);text-shadow:0 0 5px rgba(255,138,61,0.6)' : ''}">◈</button>` : ''}
@@ -1977,6 +1980,53 @@ function detailBodyClick(e) {
 function segPlay(btn) {
   const t = detailData;
   const start = parseFloat(btn.dataset.start), end = parseFloat(btn.dataset.end);
+  if (t.has_video) return segPlayVideo(btn, t, start, end);
+  return segPlayAudio(btn, t, start, end);
+}
+
+function segPlayVideo(btn, t, start, end) {
+  const v = $('seg-video');
+  if (!v) return;
+  // Wiring is keyed off the node itself (v._wired) — the node is rebuilt
+  // on every renderDetail() call (rename, job-poll-tick, tab switch,
+  // select-mode toggle — anything that re-renders the whole detail page),
+  // so a transcript-id-based guard would silently no-op after a
+  // mid-playback re-render (new node, no listeners, but the guard
+  // variable still says "already set up").
+  // v._wired resets to undefined on a fresh node automatically (it's a
+  // new object), so this both survives a re-render AND avoids stacking
+  // duplicate listeners across repeated clicks on the SAME node between
+  // re-renders — src is already correct from the template (Step 2), so
+  // first-wire doesn't need to touch it.
+  if (!v._wired) {
+    v.addEventListener('timeupdate', () => {
+      if (v._stopAt != null && v.currentTime >= v._stopAt) v.pause();
+    });
+    v.addEventListener('pause', () => {
+      if (segPlayingBtn) { segPlayingBtn.textContent = '▶'; segPlayingBtn = null; }
+      // Clear the stop marker on every pause — unlike the detached
+      // segAudio object, this element exposes native controls, and a
+      // stale _stopAt would re-pause any user-initiated playback past
+      // the last segment's end, making the controls appear broken.
+      v._stopAt = null;
+    });
+    v.addEventListener('error', () => toast('Video failed to load', 'error'));
+    v._wired = true;
+  }
+  if (segPlayingBtn === btn && !v.paused) { v.pause(); return; }
+  if (segPlayingBtn) segPlayingBtn.textContent = '▶';
+  const seekAndPlay = () => {
+    v._stopAt = end;
+    v.currentTime = start;
+    v.play().catch(err => toast(err.message, 'error'));
+  };
+  if (v.readyState >= 1) seekAndPlay();
+  else v.addEventListener('loadedmetadata', seekAndPlay, { once: true });
+  segPlayingBtn = btn;
+  btn.textContent = '■';
+}
+
+function segPlayAudio(btn, t, start, end) {
   if (!segAudio || segAudioTid !== t.id) {
     if (segAudio) segAudio.pause();
     segAudio = new Audio('/api/transcripts/' + t.id + '/audio');
@@ -2438,6 +2488,14 @@ function renderDetail() {
     extraActs.push('<button class="btn" style="font-size:12px;padding:7px 14px;border-color:var(--inset-edge)" data-dact="retry">Retry failed sections</button>');
   if (t.status === 'cancelled')
     extraActs.push('<button class="btn" style="font-size:12px;padding:7px 14px;border-color:var(--inset-edge)" data-dact="resume">Resume</button>');
+  // src lives in the template attribute (not set imperatively after the
+  // fact) because this whole node is destroyed and rebuilt on every
+  // renderDetail() call (rename, job-poll-tick, tab switch, select-mode
+  // toggle) — a freshly-rebuilt node must be immediately pointed at the
+  // right URL with no follow-up JS.
+  const videoHtml = t.has_video
+    ? `<video id="seg-video" controls src="/api/transcripts/${t.id}/video" style="display:block;width:calc(100% - 72px);max-height:260px;background:#000;border:1px solid var(--inset-edge);border-radius:4px;margin:0 36px 12px"></video>`
+    : '';
 
   root.innerHTML = `
     <div class="page-head page-head--with-actions">
@@ -2470,6 +2528,7 @@ function renderDetail() {
         <div style="font-size:12.5px"><div style="font-family:var(--f-mono);font-size:10px;text-transform:uppercase;letter-spacing:0.08em;color:var(--label-dim);margin-bottom:3px">Segments</div>${(t.segments || []).length}</div>
       </div>
     </div>
+    ${videoHtml}
     <div style="display:flex;gap:6px;align-items:flex-end;flex-wrap:wrap;margin-bottom:14px;padding:0 36px">
       ${detailTabsHtml()}
       <button id="enroll-marked-btn" class="btn" style="margin-left:auto;font-size:11px;padding:6px 12px;border-color:var(--inset-edge)" ${markedSpeakers().length ? '' : 'disabled title="Flag a line with the ◈ button first"'}>Enroll marked clips</button>
@@ -3086,6 +3145,95 @@ async function runIdentify() {
       box.innerHTML = '<span style="font-size:13px;color:' + AMBER + ';font-weight:600">No match above ' + identifyThreshold + '%</span>' +
         '<span style="font-family:var(--f-mono);font-size:11px;color:var(--label-dim)">' + (r.total_profiles || 0) + ' profiles checked</span>';
     }
+  } catch (e) { toast(e.message, 'error'); }
+}
+
+/* ══════════════════ files: linked / orphaned inventory ══════════════════ */
+async function renderFilesPage() {
+  const root = $('page-files');
+  let data;
+  try { data = await api('/api/files'); } catch (e) { toast(e.message, 'error'); return; }
+
+  const fmtBytes = (n) => {
+    if (n >= 1e9) return (n / 1e9).toFixed(2) + ' GB';
+    if (n >= 1e6) return (n / 1e6).toFixed(1) + ' MB';
+    return (n / 1e3).toFixed(0) + ' KB';
+  };
+
+  const fileRow = (f, group) => `
+    <div style="display:flex;align-items:center;gap:12px;padding:9px 22px 9px 34px;border-bottom:1px solid var(--seg-edge)">
+      <input type="checkbox" data-file-select="${group}" data-path="${escapeHtml(f.path)}" style="flex-shrink:0">
+      <div style="flex:1;min-width:0">
+        <div style="font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${
+          f.transcript_title
+            ? escapeHtml(f.transcript_title) + ' <span style="color:var(--label-dim)">(' + escapeHtml(f.field === 'video_path' ? 'video' : 'audio') + ')</span>'
+            : escapeHtml(f.path.split(/[\\/]/).pop())
+        }</div>
+        <div style="font-family:var(--f-mono);font-size:10.5px;color:var(--label-dim);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(f.path)}</div>
+      </div>
+      <div style="font-family:var(--f-mono);font-size:11px;color:var(--label-dim);flex-shrink:0">${fmtBytes(f.size_bytes)}</div>
+      <div style="font-family:var(--f-mono);font-size:10px;color:var(--label-faint);flex-shrink:0;width:90px;text-align:right">${f.modified_at ? timeAgo(f.modified_at) : ''}</div>
+    </div>`;
+
+  const section = (title, group, files, totalBytes) => `
+    <div style="margin-top:22px">
+      <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;margin:0 36px 8px 36px">
+        <div class="t-cap" style="font-size:10.5px;letter-spacing:0.14em">${escapeHtml(title)} — ${fmtBytes(totalBytes)} · ${files.length} file${files.length !== 1 ? 's' : ''}</div>
+        <div style="display:flex;gap:8px">
+          <button class="btn" data-files-select-all="${group}" style="font-size:11px;padding:5px 12px;border-color:var(--inset-edge)" ${files.length ? '' : 'disabled'}>Select all</button>
+          <button class="btn btn--red" id="files-delete-${group}" data-files-delete="${group}" style="font-size:11px;padding:5px 12px" ${files.length ? '' : 'disabled'}>Delete selected (0)</button>
+        </div>
+      </div>
+      ${files.length
+        ? `<div class="unit unit--svc" style="padding:0">${files.map(f => fileRow(f, group)).join('')}</div>`
+        : `<div class="empty-unit">No ${escapeHtml(title.toLowerCase())} files</div>`}
+    </div>`;
+
+  root.innerHTML = `
+    <div class="page-head">
+      <h1 class="t-title">Files</h1>
+      <div class="page-status" style="color:${GREEN}">${ledDot(GREEN, true, 9)}${fmtBytes(data.total_linked_bytes + data.total_orphaned_bytes)} on disk</div>
+    </div>
+    <div style="font-family:var(--f-mono);font-size:10.5px;color:var(--label-dim);letter-spacing:0.06em;margin:0 36px 4px">Linked files back an existing transcript. Orphaned files aren't referenced by any transcript — safe to remove once you no longer need them.</div>
+    ${section('Linked', 'linked', data.linked, data.total_linked_bytes)}
+    ${section('Orphaned', 'orphaned', data.orphaned, data.total_orphaned_bytes)}`;
+
+  $('nav-badge-files').textContent = String(data.orphaned.length).padStart(2, '0');
+
+  const updateDeleteCount = (group) => {
+    const n = root.querySelectorAll('[data-file-select="' + group + '"]:checked').length;
+    const btn = $('files-delete-' + group);
+    if (btn) btn.textContent = 'Delete selected (' + n + ')';
+  };
+  ['linked', 'orphaned'].forEach(updateDeleteCount);
+
+  root.querySelectorAll('[data-file-select]').forEach(cb =>
+    cb.addEventListener('change', () => updateDeleteCount(cb.dataset.fileSelect)));
+
+  root.querySelectorAll('[data-files-select-all]').forEach(btn => btn.addEventListener('click', () => {
+    const group = btn.dataset.filesSelectAll;
+    const boxes = [...root.querySelectorAll('[data-file-select="' + group + '"]')];
+    const allChecked = boxes.length > 0 && boxes.every(b => b.checked);
+    boxes.forEach(b => { b.checked = !allChecked; });
+    updateDeleteCount(group);
+  }));
+
+  root.querySelectorAll('[data-files-delete]').forEach(btn =>
+    btn.addEventListener('click', () => deleteSelectedFiles(btn.dataset.filesDelete)));
+}
+
+async function deleteSelectedFiles(group) {
+  const paths = [...document.querySelectorAll('[data-file-select="' + group + '"]:checked')].map(el => el.dataset.path);
+  if (!paths.length) { toast('No files selected', 'error'); return; }
+  if (!(await styledConfirm('Delete ' + paths.length + ' file(s)? This cannot be undone.'))) return;
+  try {
+    const r = await api('/api/files/delete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ paths }),
+    });
+    toast('Deleted ' + r.deleted.length + ', skipped ' + r.skipped.length, r.skipped.length ? 'info' : 'ok');
+    renderFilesPage();
   } catch (e) { toast(e.message, 'error'); }
 }
 /* ══════════════════ rear service panel ══════════════════ */

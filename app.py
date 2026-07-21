@@ -23,7 +23,7 @@ from starlette.middleware.sessions import SessionMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from sqlalchemy.orm import Session
 
-from database import init_db, backfill_user_id, Transcript, Summary, VoiceProfile, VoiceClip, ProviderConfig, User, LlmJob, utcnow_naive
+from database import init_db, backfill_user_id, Transcript, Summary, VoiceProfile, VoiceClip, ProviderConfig, User, LlmJob, TranscriptionJob, utcnow_naive
 from services.auth import (
     get_or_create_fallback_user, create_user, authenticate_user,
     list_usernames, generate_reset_token, reset_password,
@@ -33,7 +33,7 @@ from services.settings import get_user_settings, update_user_settings
 from services.transcription import TranscriptionService
 from services.diarization import DiarizationService
 from services.voice_id import voice_id_service
-from services.audio_prep import transcode_for_upload, AudioPrepError, chunk_audio, get_audio_duration, extract_clips_concat
+from services.audio_prep import transcode_for_upload, AudioPrepError, chunk_audio, get_audio_duration, extract_clips_concat, has_video_stream
 from services.queue import (
     create_chunk_jobs, retry_failed_chunks, queue_worker_loop, compute_queue_status,
     cancel_transcript_jobs, resume_cancelled_chunks, reset_stuck_transcription_jobs,
@@ -253,6 +253,7 @@ def _serialize_transcript(db: Session, t: Transcript) -> dict:
         # Gates the post-hoc re-transcribe/re-diarize buttons: needs the
         # stored source file, not just a path that once existed.
         "has_audio": bool(t.audio_path and os.path.exists(t.audio_path)),
+        "has_video": bool(t.video_path and os.path.exists(t.video_path)),
         "job_progress": job_progress,
         "processed_size_bytes": t.processed_size_bytes,
         "queue_status": compute_queue_status(db, t),
@@ -647,6 +648,21 @@ async def _run_transcription_pipeline(
     # produces webm/opus), in which case local providers need the ffmpeg
     # pass too or soundfile fails with "Format not recognised".
     local_readable_exts = {".wav", ".flac", ".ogg", ".mp3", ".aiff", ".aif"}
+
+    # Capture the raw upload's path/extension before the needs_transcode
+    # branch below reassigns save_path to a transcoded (audio-only) output.
+    # A retranscribe inherits its parent's video_path without re-probing —
+    # the stored audio_path already went through this decision once.
+    raw_path = save_path
+    if source_transcript_id is not None:
+        parent = db.query(Transcript).filter(
+            Transcript.id == source_transcript_id, Transcript.user_id == current_user.id
+        ).first()
+        video_path = parent.video_path if parent else None
+    else:
+        playable = raw_path.suffix.lower() in _VIDEO_MIME
+        video_path = str(raw_path) if playable and has_video_stream(str(raw_path)) else None
+
     try:
         raw_duration = get_audio_duration(str(save_path))
     except Exception:
@@ -727,6 +743,7 @@ async def _run_transcription_pipeline(
             diarize_requested=diarize,
             title=title or filename,
             num_speakers=num_speakers,
+            video_path=video_path,
         )
         # Real processed size, not the raw upload size — the sum of all
         # chunk files, since that's what actually gets sent to the provider.
@@ -750,6 +767,7 @@ async def _run_transcription_pipeline(
             language=language,
             model=model or provider_config.get("default_model"),
             temperature=temperature,
+            video_path=video_path,
         )
         transcript.processed_size_bytes = file_size
         transcript.source_transcript_id = source_transcript_id
@@ -858,6 +876,50 @@ async def get_transcript(transcript_id: int, db: Session = Depends(get_db), curr
     return _serialize_transcript(db, t)
 
 
+# Job states whose chunk files are still needed: pending/running are
+# actively in flight, failed chunks get auto-retried after a backoff window
+# (and manually via "Retry failed sections"), and cancelled chunks are
+# resumable. Only completed jobs' files are truly dead.
+_LIVE_JOB_STATUSES = ("pending", "running", "failed", "cancelled")
+
+
+def _live_job_paths(db: Session) -> set:
+    return {
+        os.path.realpath(j.audio_path)
+        for j in db.query(TranscriptionJob).filter(TranscriptionJob.status.in_(_LIVE_JOB_STATUSES)).all()
+        if j.audio_path
+    }
+
+
+def _transcript_refs_by_realpath(db: Session) -> dict:
+    """Map realpath -> [(transcript, field)] over every user's transcripts.
+    Reference checks compare resolved paths, not raw strings — a textual
+    variant of the same file (redundant separators, '.' or '..' segments)
+    stored in the DB would slip past a string-equality check and let the
+    file be deleted out from under the transcript that references it."""
+    refs = {}
+    for t in db.query(Transcript).all():
+        for field in ("audio_path", "video_path"):
+            p = getattr(t, field)
+            if p:
+                refs.setdefault(os.path.realpath(p), []).append((t, field))
+    return refs
+
+
+def _transcript_pipeline_can_resume(db: Session, t: Transcript) -> bool:
+    """True if this transcript can (re-)enter the transcription pipeline —
+    still processing, or holding any retryable/resumable chunk job. Its
+    audio_path (the pre-chunk source file) is read again at finalize for
+    chunked-path diarization, so deleting the file for such a transcript
+    would silently drop speaker labels on the eventual retry/resume."""
+    if t.status == "processing":
+        return True
+    return db.query(TranscriptionJob).filter(
+        TranscriptionJob.transcript_id == t.id,
+        TranscriptionJob.status.in_(_LIVE_JOB_STATUSES),
+    ).first() is not None
+
+
 @app.delete("/api/transcripts/{transcript_id}")
 async def delete_transcript(transcript_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     t = db.query(Transcript).filter(
@@ -865,9 +927,140 @@ async def delete_transcript(transcript_id: int, db: Session = Depends(get_db), c
     ).first()
     if not t:
         raise HTTPException(status_code=404, detail="Transcript not found")
+    refs = _transcript_refs_by_realpath(db)
+    for path in (t.audio_path, t.video_path):
+        if path and os.path.exists(path):
+            # Retranscribe carries video_path/audio_path forward verbatim, so
+            # sibling transcripts (same or different user) can reference the
+            # exact same file. Removing it here would break their playback.
+            real = os.path.realpath(path)
+            still_referenced = any(other.id != t.id for other, _ in refs.get(real, []))
+            if still_referenced:
+                continue
+            try:
+                os.remove(path)
+            except OSError:
+                pass
     db.delete(t)
     db.commit()
     return {"ok": True}
+
+
+def _resolve_under_upload_dir(path_str: str) -> Optional[str]:
+    """Path-traversal guard: resolve to a real absolute path and confirm
+    it's inside UPLOAD_DIR before any filesystem operation touches it.
+    Returns None if the path escapes UPLOAD_DIR (including via symlink,
+    `..` traversal, or an unrelated absolute path)."""
+    try:
+        real = os.path.realpath(path_str)
+        upload_real = os.path.realpath(str(UPLOAD_DIR))
+        # Strictly inside — UPLOAD_DIR itself is not a deletable target.
+        if real == upload_real or os.path.commonpath([real, upload_real]) != upload_real:
+            return None
+        return real
+    except (OSError, ValueError, TypeError):
+        return None
+
+
+@app.get("/api/files")
+async def list_files(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    live_job_paths = _live_job_paths(db)
+    refs = _transcript_refs_by_realpath(db)
+
+    linked, orphaned = [], []
+    total_linked, total_orphaned = 0, 0
+    for name in os.listdir(UPLOAD_DIR):
+        full = os.path.join(str(UPLOAD_DIR), name)
+        if not os.path.isfile(full):
+            continue  # confirmed: chunk_audio writes chunks flat into UPLOAD_DIR, no subdirectory
+        real = os.path.realpath(full)
+        try:
+            size = os.path.getsize(full)
+            # Naive-UTC isoformat (no +00:00 suffix), matching created_at and
+            # the rest of the app (utcnow_naive) — the frontend's timeAgo()
+            # appends 'Z' itself and produces Invalid Date on "...+00:00Z".
+            mtime = datetime.datetime.fromtimestamp(os.path.getmtime(full), datetime.UTC).replace(tzinfo=None).isoformat()
+        except OSError:
+            continue  # vanished between listdir and stat (job cleanup, concurrent delete)
+        own_refs = [(t, f) for t, f in refs.get(real, []) if t.user_id == current_user.id]
+        if own_refs:
+            # A shared path (e.g. a retranscribe chain) has multiple entries
+            # here — emit one linked row per referencing transcript so the
+            # dependency is visible, at the cost of counting the file's size
+            # once per reference in total_linked_bytes.
+            for t, field in own_refs:
+                linked.append({"transcript_id": t.id, "transcript_title": t.title, "field": field,
+                                "path": full, "size_bytes": size, "modified_at": mtime})
+                total_linked += size
+        elif real in live_job_paths or real in refs:
+            # Live chunk (pending/running/failed/cancelled job), or referenced
+            # only by another user's transcript — excluded from the response
+            # entirely (shown as neither linked nor orphaned).
+            continue
+        else:
+            orphaned.append({"path": full, "size_bytes": size, "modified_at": mtime})
+            total_orphaned += size
+    return {"linked": linked, "orphaned": orphaned,
+            "total_linked_bytes": total_linked, "total_orphaned_bytes": total_orphaned}
+
+
+@app.post("/api/files/delete")
+async def delete_files(data: dict = Body(...), db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    paths = data.get("paths") or []
+    if not isinstance(paths, list):
+        raise HTTPException(status_code=400, detail="paths must be a list of strings")
+    # Validate every path up front — a traversal attempt anywhere in the
+    # batch aborts the whole request with no side effects, rather than
+    # partially deleting earlier entries before hitting the bad one.
+    resolved = []
+    for raw_path in paths:
+        if not isinstance(raw_path, str):
+            raise HTTPException(status_code=400, detail="paths must be a list of strings")
+        real = _resolve_under_upload_dir(raw_path)
+        if real is None:
+            raise HTTPException(status_code=400, detail=f"Path not allowed: {raw_path}")
+        resolved.append((raw_path, real))
+
+    live_job_paths = _live_job_paths(db)
+    refs = _transcript_refs_by_realpath(db)
+    deleted, skipped = [], []
+    freed_bytes = 0
+    for raw_path, real in resolved:
+        if real in live_job_paths:
+            skipped.append({"path": raw_path, "reason": "in_use"})
+            continue
+        entries = refs.get(real, [])
+        if len({t.id for t, _ in entries}) > 1:
+            # 2+ transcripts reference this file — a same-user retranscribe
+            # chain, a cross-user collision, or both. Either way, deleting
+            # would silently break playback for at least one other
+            # transcript, so skip regardless of who owns which row.
+            skipped.append({"path": raw_path, "reason": "shared"})
+            continue
+        if entries:
+            m = entries[0][0]
+            if m.user_id != current_user.id:
+                skipped.append({"path": raw_path, "reason": "not_found_or_forbidden"})
+                continue
+            if _transcript_pipeline_can_resume(db, m):
+                skipped.append({"path": raw_path, "reason": "in_use"})
+                continue
+        try:
+            size = os.path.getsize(real)  # captured before removal — gone from disk afterward
+            os.remove(real)
+        except OSError:
+            skipped.append({"path": raw_path, "reason": "remove_failed"})
+            continue
+        # entries all belong to one transcript here — null every field of
+        # its that pointed at this file (audio_path and video_path can in
+        # principle both reference the same path).
+        for t, field in entries:
+            setattr(t, field, None)
+        if entries:
+            db.commit()
+        deleted.append(raw_path)
+        freed_bytes += size
+    return {"deleted": deleted, "skipped": skipped, "freed_bytes": freed_bytes}
 
 
 @app.patch("/api/transcripts/{transcript_id}")
@@ -970,6 +1163,15 @@ _AUDIO_MIME = {
     ".flac": "audio/flac", ".webm": "audio/webm", ".m4a": "audio/mp4",
 }
 
+# Deliberately restricted to containers a browser <video> tag can actually
+# play. .mkv/.avi/most .mov are NOT included: retaining them as "video"
+# would reproduce the exact "sort of works" problem this feature exists to
+# fix (file exists, route serves it, but the browser shows a black player
+# with no error, since it can't decode the container).
+_VIDEO_MIME = {
+    ".mp4": "video/mp4", ".webm": "video/webm",
+}
+
 
 @app.get("/api/transcripts/{transcript_id}/audio")
 async def get_transcript_audio(transcript_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
@@ -984,6 +1186,22 @@ async def get_transcript_audio(transcript_id: int, db: Session = Depends(get_db)
         raise HTTPException(status_code=404, detail="No stored audio for this transcript")
     ext = os.path.splitext(t.audio_path)[1].lower()
     return FileResponse(t.audio_path, media_type=_AUDIO_MIME.get(ext, "audio/mpeg"))
+
+
+@app.get("/api/transcripts/{transcript_id}/video")
+async def get_transcript_video(transcript_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    """Serve the stored original video — the detail screen's per-line play
+    buttons load this once and seek to each segment's start time, same
+    pattern as get_transcript_audio."""
+    t = db.query(Transcript).filter(
+        Transcript.id == transcript_id, Transcript.user_id == current_user.id
+    ).first()
+    if not t:
+        raise HTTPException(status_code=404, detail="Transcript not found")
+    if not (t.video_path and os.path.exists(t.video_path)):
+        raise HTTPException(status_code=404, detail="No stored video for this transcript")
+    ext = os.path.splitext(t.video_path)[1].lower()
+    return FileResponse(t.video_path, media_type=_VIDEO_MIME.get(ext, "video/mp4"))
 
 
 @app.post("/api/transcripts/{transcript_id}/speakers/rename")
