@@ -5,7 +5,11 @@ model files from Moonshine's CDN on first use of a given model size and
 caches them (moonshine_voice manages its own cache dir, overridable via the
 MOONSHINE_VOICE_CACHE env var).
 
-Default model: base (58M params, 10.07% WER, English-only).
+Default model: medium-streaming (245M params, 6.65% WER, English-only).
+Beats Whisper Large v3 in accuracy while running locally.
+NOTE: loads ~980MB into RAM and uses the process-wide local_provider_lock
+(serializes all local inference). On low-RAM machines (<8GB) or for very
+long recordings, consider the smaller base (58M, ~10% WER) model instead.
 """
 import time
 import asyncio
@@ -35,7 +39,7 @@ class MoonshineProvider(BaseProvider):
 
     def __init__(self, config: dict):
         super().__init__(config)
-        self.model_name = config.get("default_model") or "base"
+        self.model_name = config.get("default_model") or "medium-streaming"
         self._transcriber = None
         self._resolved_model_name = None
 

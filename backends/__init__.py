@@ -2,10 +2,12 @@
 
 Supports configurable backends:
   - Built-in (Whisper Tiny) — local, no API key needed
-  - Groq (whisper-large-v3-turbo)
+  - Moonshine — local, SOTA on-device ASR (beats Whisper Large v3)
+  - Groq (whisper-large-v3-flash)
   - OpenAI (whisper-1)
   - Replicate (whisper-large-v3-turbo)
-  - OpenRouter (unified API)
+  - OpenRouter (unified API, including Deepgram Nova-3)
+  - AssemblyAI (universal-3-pro)
   - Local / Custom (Whisper.cpp / Ollama / OpenAI-compatible)
 """
 
@@ -15,6 +17,7 @@ from .openai import OpenAIProvider
 from .replicate import ReplicateProvider
 from .local import LocalProvider
 from .openrouter import OpenRouterProvider
+from .assemblyai import AssemblyAIProvider
 from .builtin import BuiltinProvider
 from .moonshine import MoonshineProvider
 
@@ -26,6 +29,7 @@ PROVIDER_REGISTRY = {
     "replicate": ReplicateProvider,
     "local": LocalProvider,
     "openrouter": OpenRouterProvider,
+    "assemblyai": AssemblyAIProvider,
 }
 
 
@@ -56,8 +60,8 @@ def list_providers() -> list[dict]:
         {
             "id": "moonshine",
             "name": "Moonshine",
-            "description": "Local · no API key · lightweight on-device ASR",
-            "default_model": "base",
+            "description": "Local · no API key · SOTA on-device ASR (6.65% WER, beats Whisper Large v3)",
+            "default_model": "medium-streaming",
             "needs_key": False,
             "key_prefix": "",
             "zero_setup": True,
@@ -89,10 +93,18 @@ def list_providers() -> list[dict]:
         {
             "id": "openrouter",
             "name": "OpenRouter",
-            "description": "Unified API — OpenAI/Groq/Deepgram Whisper models",
+            "description": "Unified API — OpenAI/Groq/Deepgram Whisper + Nova-3 models",
             "default_model": "openai/whisper-1",
             "needs_key": True,
             "key_prefix": "sk-or-",
+        },
+        {
+            "id": "assemblyai",
+            "name": "AssemblyAI",
+            "description": "universal-3-pro · $0.21/hr · async polling · 45+ languages",
+            "default_model": "universal-3-pro",
+            "needs_key": True,
+            "key_prefix": "",
         },
         {
             "id": "local",
@@ -108,6 +120,7 @@ def list_providers() -> list[dict]:
 __all__ = [
     "BaseProvider", "ProviderError",
     "GroqProvider", "OpenAIProvider", "ReplicateProvider", "LocalProvider", "OpenRouterProvider",
+    "AssemblyAIProvider",
     "BuiltinProvider", "MoonshineProvider",
     "get_provider", "list_providers", "PROVIDER_REGISTRY",
 ]

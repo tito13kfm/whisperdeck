@@ -1,7 +1,7 @@
-"""OpenRouter provider — access Whisper models via OpenRouter's unified API.
+"""OpenRouter provider — access Whisper, Nova-3, and other STT models via OpenRouter.
 
 OpenRouter provides OpenAI-compatible endpoints for many models including
-openai/whisper-1 and community-hosted Whisper variants.
+openai/whisper-1, deepgram/nova-3, and community-hosted Whisper variants.
 """
 import time
 import httpx
@@ -113,8 +113,8 @@ class OpenRouterProvider(BaseProvider):
                     models = []
                     for m in data.get("data", []):
                         mid = m.get("id", "")
-                        # Filter to likely transcription models (Whisper variants)
-                        if "whisper" in mid.lower() or "transcribe" in mid.lower():
+                        # Filter to likely transcription models
+                        if any(kw in mid.lower() for kw in ["whisper", "transcribe", "nova", "deepgram"]):
                             models.append(mid)
                     # Also include common known models
                     known = self._default_models()
@@ -129,6 +129,7 @@ class OpenRouterProvider(BaseProvider):
     def _default_models(self) -> list[str]:
         return [
             "openai/whisper-1",
+            "deepgram/nova-3",
             "deepgram/whisper-large-v3-turbo",
             "groq/whisper-large-v3-turbo",
         ]
