@@ -33,6 +33,7 @@ const S = {
   langIdx: 0,
   diarize: true,
   autoCorrect: false,
+  mode: 'meeting',            // meeting | dictation — dictation skips diarization, unlocks reformat actions on the detail page
   // live capture
   capturing: false,
   stereoLive: false,
@@ -984,6 +985,10 @@ async function renderTranscribe() {
           </button>
         </div>
         <div style="display:flex;justify-content:center;gap:44px;order:1">
+          <button class="ctl" id="ctl-mode" title="Meeting: multi-speaker minutes. Dictation: general voice notes — no speakers, offers to reformat into a note/email/coding prompt afterward.">
+            <span class="tog" id="tog-mode"><span class="tog-plate"><span class="tog-track"><span class="tog-paddle"></span></span></span></span>
+            <span class="stack"><span class="name">Mode</span>${vfd('', 'vfd-mode')}</span>
+          </button>
           <button class="ctl" id="ctl-diarize" title="Identify who spoke when (diarization)">
             <span class="tog" id="tog-diarize"><span class="tog-plate"><span class="tog-track"><span class="tog-paddle"></span></span></span></span>
             <span class="stack"><span class="name">Speakers</span>${vfd('', 'vfd-diarize')}</span>
@@ -1082,8 +1087,17 @@ function wireTranscribe() {
     S.langIdx = (S.langIdx + 1) % LANGUAGES.length;
     syncTranscribe();
   });
-  $('ctl-diarize').addEventListener('click', () => {
+  $('ctl-mode').addEventListener('click', () => {
     if (S.running) return;
+    // Don't touch S.diarize here: startJob() already forces diarize=false
+    // for dictation at submit time, and syncTranscribe() already renders
+    // the Speakers control locked to N/A in dictation mode — mutating the
+    // stored preference would silently clobber it on the next meeting job.
+    S.mode = S.mode === 'meeting' ? 'dictation' : 'meeting';
+    syncTranscribe();
+  });
+  $('ctl-diarize').addEventListener('click', () => {
+    if (S.running || S.mode === 'dictation') return;
     S.diarize = !S.diarize;
     syncTranscribe();
   });
@@ -1232,9 +1246,12 @@ function syncTranscribe() {
   setVfd('vfd-provider', prov.name);
   setVfd('vfd-model', curModel());
   setVfd('vfd-lang', LANGUAGES[S.langIdx]);
-  $('tog-diarize').classList.toggle('on', S.diarize);
+  $('tog-mode').classList.toggle('on', S.mode === 'dictation');
+  setVfd('vfd-mode', S.mode === 'dictation' ? 'DICTATION' : 'MEETING');
+  $('ctl-diarize').classList.toggle('locked', S.running || S.mode === 'dictation');
+  $('tog-diarize').classList.toggle('on', S.diarize && S.mode !== 'dictation');
   $('tog-autocorrect').classList.toggle('on', S.autoCorrect);
-  setVfd('vfd-diarize', S.diarize ? 'ON' : 'OFF');
+  setVfd('vfd-diarize', S.mode === 'dictation' ? 'N/A' : (S.diarize ? 'ON' : 'OFF'));
   setVfd('vfd-autocorrect', S.autoCorrect ? 'ON' : 'OFF');
 
   // instruments monitor + nav badge
@@ -1303,7 +1320,8 @@ async function startJob() {
   const lang = LANGUAGES[S.langIdx];
   form.append('language', lang === 'Auto-detect' ? 'auto' : lang.toLowerCase().slice(0, 2));
   form.append('temperature', ($('tx-temp') && $('tx-temp').value) || '0');
-  form.append('diarize', S.diarize ? 'true' : 'false');
+  form.append('diarize', S.mode === 'dictation' ? 'false' : (S.diarize ? 'true' : 'false'));
+  form.append('kind', S.mode);
   const n = $('tx-speakers') && $('tx-speakers').value.trim();
   if (n) form.append('num_speakers', n);
   const title = $('tx-title') && $('tx-title').value.trim();
@@ -1751,7 +1769,10 @@ function jobActions(j) {
   return acts.join('');
 }
 
-const KIND_LABELS = { transcription: 'TRANSCRIBE', correction: 'CORRECT', summary: 'SUMMARIZE', rediarize: 'DIARIZE' };
+const KIND_LABELS = {
+  transcription: 'TRANSCRIBE', correction: 'CORRECT', summary: 'SUMMARIZE', rediarize: 'DIARIZE',
+  format_markdown: 'MD NOTE', format_email: 'EMAIL DRAFT', format_coding_prompt: 'CODE PROMPT', classify_intent: 'CLASSIFY',
+};
 
 async function loadQueue() {
   const root = $('page-queue');
@@ -1875,13 +1896,20 @@ async function loadTranscriptDetail(id, opts = {}) {
   } catch (e) { toast(e.message, 'error'); return; }
   if (prevId !== null && prevId !== detailData.id) resetSegAudio();
   if (!opts.preserveQuery) S.query = '';
+  // S.detailTab is a global that survives navigation between transcripts —
+  // if it's pointed at the Format tab (dictation-only) and the newly-opened
+  // transcript is a meeting, fall back rather than leave a stale tab
+  // selection that renderDetailBody would otherwise still act on.
+  if (S.detailTab === 'format' && detailData.kind !== 'dictation') S.detailTab = 'transcript';
   renderDetail();
   scheduleDetailPoll();
 }
 
 function _jobFingerprint(t) {
   const f = (j) => j ? j.status + ':' + (j.progress ? j.progress.done : 0) : '-';
-  return f(t.correction_job) + '|' + f(t.summary_job) + '|' + f(t.voice_match_job);
+  return f(t.correction_job) + '|' + f(t.summary_job) + '|' + f(t.voice_match_job) + '|' +
+    f(t.format_markdown_job) + '|' + f(t.format_email_job) + '|' + f(t.format_coding_prompt_job) + '|' +
+    f(t.classify_intent_job);
 }
 
 // While an LLM job is active for the open transcript, refresh quietly and
@@ -1889,7 +1917,9 @@ function _jobFingerprint(t) {
 function scheduleDetailPoll() {
   clearTimeout(detailPollTimer);
   const t = detailData;
-  if (!t || !(llmJobActive(t.correction_job) || llmJobActive(t.summary_job) || llmJobActive(t.voice_match_job))) return;
+  if (!t || !(llmJobActive(t.correction_job) || llmJobActive(t.summary_job) || llmJobActive(t.voice_match_job) ||
+    llmJobActive(t.format_markdown_job) || llmJobActive(t.format_email_job) || llmJobActive(t.format_coding_prompt_job) ||
+    llmJobActive(t.classify_intent_job))) return;
   const fp = _jobFingerprint(t), id = t.id;
   detailPollTimer = setTimeout(async () => {
     if (S.page !== 'detail' || !detailData || detailData.id !== id) return;
@@ -1904,7 +1934,9 @@ function scheduleDetailPoll() {
 }
 
 function detailTabsHtml() {
-  return ['transcript', 'corrected', 'summary'].map(tb => {
+  const tabs = ['transcript', 'corrected', 'summary'];
+  if (detailData && detailData.kind === 'dictation') tabs.push('format');
+  return tabs.map(tb => {
     const on = S.detailTab === tb;
     return `
     <button data-tab="${tb}" style="display:flex;flex-direction:column;align-items:center;gap:5px;background:none;border:none;cursor:pointer;padding:0">
@@ -2395,6 +2427,13 @@ async function handleExportClick(kind, copy) {
       header = `[summarized with ${s.provider || 'unknown'}/${s.model || 'unknown'}]`;
     }
     catch (e) { toast('Could not load summary to export: ' + e.message, 'error'); return; }
+  } else if (kind === 'format_markdown' || kind === 'format_email' || kind === 'format_coding_prompt') {
+    try {
+      const runs = (await api('/api/transcripts/' + t.id + '/runs/' + kind)).runs;
+      const latest = runs.find(r => r.status === 'completed');
+      text = (latest && latest.result && latest.result.text) || '';
+      header = latest ? `[reformatted with ${latest.provider || 'unknown'}/${latest.model || 'unknown'}]` : '';
+    } catch (e) { toast('Could not load result to export: ' + e.message, 'error'); return; }
   }
   if (!text.trim()) { toast('Nothing to export yet', 'info'); return; }
   const fullText = header + '\n\n' + text;
@@ -2447,6 +2486,53 @@ function correctedHtml(t) {
   }
   return '<div class="empty-unit">Correction pass not run yet — use Re-run correction above' +
     (t.correction_model ? '' : ' (auto-correct was off for this job)') + '</div>';
+}
+
+// Dictation-only: reformat the transcript into other useful shapes.
+const FORMAT_TARGETS = [
+  { key: 'markdown', kind: 'format_markdown', label: 'Markdown note', hint: 'markdown' },
+  { key: 'email', kind: 'format_email', label: 'Email draft', hint: 'email' },
+  { key: 'coding_prompt', kind: 'format_coding_prompt', label: 'Claude Code prompt', hint: 'coding_prompt' },
+];
+
+async function formatHtml(t) {
+  const cards = await Promise.all(FORMAT_TARGETS.map(async (target) => {
+    const job = t[target.kind + '_job'];
+    const suggested = t.classify_intent_hint === target.hint;
+    const badge = suggested
+      ? `<span style="margin-left:8px;font-size:9px;padding:2px 7px;border-radius:9px;background:${GREEN};color:#04140C;text-transform:uppercase;letter-spacing:0.05em;font-family:var(--f-mono)">Suggested</span>`
+      : '';
+    const genBtn = `<button class="btn" data-dact="format-${target.key}" style="font-size:11px;padding:6px 12px;border-color:var(--inset-edge)" ${llmJobActive(job) ? 'disabled title="Already queued"' : ''}>${job && job.status === 'completed' ? 'Regenerate' : 'Generate'}</button>`;
+
+    let body;
+    if (llmJobActive(job)) {
+      body = jobRunningUnit(job, target.label);
+    } else if (job && job.status === 'failed') {
+      body = '<div style="padding:14px 0;font-size:13px;color:var(--red)">' + escapeHtml(job.error || 'unknown error') + '</div>';
+    } else if (job && job.status === 'completed') {
+      try {
+        const runs = (await api('/api/transcripts/' + t.id + '/runs/' + target.kind)).runs;
+        const latest = runs.find(r => r.status === 'completed');
+        const text = (latest && latest.result && latest.result.text) || '';
+        body = text
+          ? exportToolbarHtml(target.kind) + '<div style="padding:0 0 6px;font-size:13.5px;line-height:1.6;color:var(--body);white-space:pre-wrap">' + escapeHtml(text) + '</div>'
+          : '<div style="padding:14px 0;font-size:13px;color:var(--label-dim)">No result recorded.</div>';
+      } catch (e) {
+        body = '<div style="padding:14px 0;font-size:13px;color:var(--red)">Could not load result: ' + escapeHtml(e.message) + '</div>';
+      }
+    } else {
+      body = '<div style="padding:14px 0;font-size:13px;color:var(--label-dim)">Not generated yet.</div>';
+    }
+
+    return `<div class="unit" style="padding:16px 32px;margin-bottom:10px">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
+        <div style="font-family:var(--f-cond);font-weight:600;font-size:13px;text-transform:uppercase;letter-spacing:0.05em;color:${AMBER}">${escapeHtml(target.label)}${badge}</div>
+        ${genBtn}
+      </div>
+      ${body}
+    </div>`;
+  }));
+  return cards.join('');
 }
 
 async function summaryHtml(t) {
@@ -2504,9 +2590,10 @@ function renderDetail() {
         ${extraActs.join('')}
         <button class="btn" style="font-size:12px;padding:7px 14px;border-color:var(--inset-edge)" data-dact="retranscribe" ${t.has_audio ? '' : 'disabled title="No stored audio for this transcript"'}>Re-transcribe</button>
         <button class="btn" style="font-size:12px;padding:7px 14px;border-color:var(--inset-edge)" data-dact="compare-versions">Compare versions</button>
+        ${t.kind === 'dictation' ? '' : `
         <button class="btn" style="font-size:12px;padding:7px 14px;border-color:var(--inset-edge)" data-dact="rediarize" ${t.has_audio ? '' : 'disabled title="No stored audio for this transcript"'}>Re-diarize</button>
         <button class="btn" style="font-size:12px;padding:7px 14px;border-color:var(--inset-edge)" data-dact="rediarize-history">Rediarize history</button>
-        <button class="btn" style="font-size:12px;padding:7px 14px;border-color:var(--inset-edge)" data-dact="voicematch" ${!t.has_audio ? 'disabled title="No stored audio for this transcript"' : (llmJobActive(t.voice_match_job) ? 'disabled title="Voice match job already queued"' : '')}>Match against voice roster</button>
+        <button class="btn" style="font-size:12px;padding:7px 14px;border-color:var(--inset-edge)" data-dact="voicematch" ${!t.has_audio ? 'disabled title="No stored audio for this transcript"' : (llmJobActive(t.voice_match_job) ? 'disabled title="Voice match job already queued"' : '')}>Match against voice roster</button>`}
         <button class="btn" style="font-size:12px;padding:7px 14px;border-color:var(--inset-edge)" data-dact="context">Add context</button>
         <button class="btn" style="font-size:12px;padding:7px 14px;border-color:var(--inset-edge)" data-dact="summarize" ${llmJobActive(t.summary_job) ? 'disabled title="Summary job already queued"' : ''}>Summarize</button>
         <button class="btn" style="font-size:12px;padding:7px 14px;border-color:var(--inset-edge)" data-dact="summary-history">Summary history</button>
@@ -2570,7 +2657,7 @@ async function renderDetailBody() {
   if (S.detailTab === 'transcript') {
     const vm = llmJobActive(t.voice_match_job) ? jobRunningUnit(t.voice_match_job, 'Voice match') : '';
     let nudge = '';
-    if (!vm && t.has_audio && hasUnlabeledSpeakers(t)) {
+    if (!vm && t.kind !== 'dictation' && t.has_audio && hasUnlabeledSpeakers(t)) {
       try {
         const voices = await api('/api/voices');
         if (voices.length) {
@@ -2584,6 +2671,16 @@ async function renderDetailBody() {
     body.querySelectorAll('[data-dact]').forEach(b => b.addEventListener('click', () => detailAction(b.dataset.dact, b)));
   } else if (S.detailTab === 'corrected') {
     body.innerHTML = (t.corrected_text ? exportToolbarHtml('corrected') : '') + correctedHtml(t);
+  } else if (S.detailTab === 'format' && t.kind === 'dictation') {
+    body.innerHTML = '<div class="empty-unit">Loading…</div>';
+    body.innerHTML = await formatHtml(t);
+    body.querySelectorAll('[data-dact]').forEach(b => b.addEventListener('click', () => detailAction(b.dataset.dact, b)));
+  } else if (S.detailTab === 'format') {
+    // Stale S.detailTab from a previously-open dictation transcript, left
+    // over on a meeting transcript — loadTranscriptDetail resets this on
+    // navigation, but render defensively here too rather than show live
+    // Generate buttons for a feature this transcript doesn't support.
+    body.innerHTML = '<div class="empty-unit">Not available for meeting transcripts</div>';
   } else {
     body.innerHTML = '<div class="empty-unit">Loading summary…</div>';
     body.innerHTML = (t.has_summary ? exportToolbarHtml('summary') : '') + await summaryHtml(t);
@@ -2593,7 +2690,7 @@ async function renderDetailBody() {
 async function detailAction(act, btn) {
   const t = detailData;
   if (!t) return;
-  const opts = act === 'summarize' ? { spinner: true } : {};
+  const opts = (act === 'summarize' || act.startsWith('format-')) ? { spinner: true } : {};
   return withBusy(btn, async () => {
   try {
     if (act === 'delete') {
@@ -2624,6 +2721,20 @@ async function detailAction(act, btn) {
       await api('/api/transcripts/' + t.id + '/summarize', { method: 'POST', body: fd });
       toast('Summary queued — progress shows on the Summary tab and the Queue screen', 'info');
       S.detailTab = 'summary';
+      refreshQueueBadge();
+      await loadTranscriptDetail(t.id);
+      return;
+    }
+    if (act.startsWith('format-')) {
+      const target = act.slice('format-'.length); // markdown | email | coding_prompt
+      let settings = {};
+      try { settings = await api('/api/settings'); } catch { /* backend defaults apply */ }
+      const fd = new FormData();
+      fd.append('provider', settings.format_provider || 'local_llm');
+      fd.append('model', settings.format_model || '');
+      await api('/api/transcripts/' + t.id + '/format/' + target, { method: 'POST', body: fd });
+      toast('Generating — progress shows on this tab and the Queue screen', 'info');
+      S.detailTab = 'format';
       refreshQueueBadge();
       await loadTranscriptDetail(t.id);
       return;
@@ -3157,10 +3268,8 @@ async function renderFilesPage() {
   const fmtBytes = (n) => {
     if (n >= 1e9) return (n / 1e9).toFixed(2) + ' GB';
     if (n >= 1e6) return (n / 1e6).toFixed(1) + ' MB';
+    if (n >= 1e3) return (n / 1e3).toFixed(0) + ' KB';
     return n + ' B';
-        } else {
-            return (n / 1e3).toFixed(0) + ' KB';
-        }
   };
 
   const fileRow = (f, group) => `
@@ -3347,7 +3456,7 @@ async function loadSettingsPage() {
     <div style="margin-top:30px">
       <div class="t-cap" style="font-size:10.5px;letter-spacing:0.14em;margin:0 0 8px 36px">Correction &amp; summary defaults</div>
       <div class="unit unit--svc" style="border-radius:3px;padding:16px 34px;display:flex;flex-direction:column;gap:12px">
-        <div style="font-size:11.5px;color:var(--label-dim)">Used by auto-correct after every job and by the Summarize button. Keys come from the credential jacks above; the model lists are a curated cost-aware shortlist (OpenRouter shows live pricing).</div>
+        <div style="font-size:11.5px;color:var(--label-dim)">Used by auto-correct after every job, the Summarize button, and — for dictation recordings — the auto-suggested format and the Markdown/Email/Coding-prompt reformat buttons. Keys come from the credential jacks above; the model lists are a curated cost-aware shortlist (OpenRouter shows live pricing).</div>
         <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
           <label class="t-label" style="width:110px" for="llm-corr-provider">Correction</label>
           <select id="llm-corr-provider" class="inp" style="padding:6px 8px;font-size:12px"></select>
@@ -3359,6 +3468,12 @@ async function loadSettingsPage() {
           <select id="llm-sum-provider" class="inp" style="padding:6px 8px;font-size:12px"></select>
           <select id="llm-sum-model" class="inp" style="padding:6px 8px;font-size:12px;min-width:250px"></select>
           <input id="llm-sum-model-text" class="inp" style="padding:6px 8px;font-size:12px;width:250px;display:none" placeholder="model served by your endpoint">
+        </div>
+        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+          <label class="t-label" style="width:110px" for="llm-fmt-provider">Reformat</label>
+          <select id="llm-fmt-provider" class="inp" style="padding:6px 8px;font-size:12px"></select>
+          <select id="llm-fmt-model" class="inp" style="padding:6px 8px;font-size:12px;min-width:250px"></select>
+          <input id="llm-fmt-model-text" class="inp" style="padding:6px 8px;font-size:12px;width:250px;display:none" placeholder="model served by your endpoint">
         </div>
         <button id="llm-defaults-save" style="font-family:var(--f-cond);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:0.03em;background:var(--input);border:1px solid var(--input-edge);color:var(--label);padding:8px 14px;border-radius:2px;cursor:pointer;align-self:flex-start">Save defaults</button>
       </div>
@@ -3407,25 +3522,32 @@ async function loadSettingsPage() {
   const provOpts = LLM_PROVIDERS.map(p => '<option value="' + p.id + '">' + p.name + '</option>').join('');
   $('llm-corr-provider').innerHTML = provOpts;
   $('llm-sum-provider').innerHTML = provOpts;
+  $('llm-fmt-provider').innerHTML = provOpts;
   $('llm-corr-provider').value = normalizeLlmProvider(settings.correction_provider || 'groq');
   $('llm-sum-provider').value = normalizeLlmProvider(settings.summary_provider || 'groq');
+  $('llm-fmt-provider').value = normalizeLlmProvider(settings.format_provider || 'groq');
   fillModelPicker('llm-corr-model', 'llm-corr-model-text', $('llm-corr-provider').value, settings.correction_model);
   fillModelPicker('llm-sum-model', 'llm-sum-model-text', $('llm-sum-provider').value, settings.summary_model);
+  fillModelPicker('llm-fmt-model', 'llm-fmt-model-text', $('llm-fmt-provider').value, settings.format_model);
   $('llm-corr-provider').addEventListener('change', () =>
     fillModelPicker('llm-corr-model', 'llm-corr-model-text', $('llm-corr-provider').value, ''));
   $('llm-sum-provider').addEventListener('change', () =>
     fillModelPicker('llm-sum-model', 'llm-sum-model-text', $('llm-sum-provider').value, ''));
+  $('llm-fmt-provider').addEventListener('change', () =>
+    fillModelPicker('llm-fmt-model', 'llm-fmt-model-text', $('llm-fmt-provider').value, ''));
   $('llm-defaults-save').addEventListener('click', (e) => withBusy(e.currentTarget, async () => {
     const body = {
       correction_provider: $('llm-corr-provider').value,
       correction_model: llmPickerValue('llm-corr-model', 'llm-corr-model-text', $('llm-corr-provider').value),
       summary_provider: $('llm-sum-provider').value,
       summary_model: llmPickerValue('llm-sum-model', 'llm-sum-model-text', $('llm-sum-provider').value),
+      format_provider: $('llm-fmt-provider').value,
+      format_model: llmPickerValue('llm-fmt-model', 'llm-fmt-model-text', $('llm-fmt-provider').value),
     };
-    if (!body.correction_model || !body.summary_model) { toast('Pick a model for each row', 'error'); return; }
+    if (!body.correction_model || !body.summary_model || !body.format_model) { toast('Pick a model for each row', 'error'); return; }
     try {
       await api('/api/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-      toast('Correction & summary defaults saved');
+      toast('Correction, summary & reformat defaults saved');
     } catch (e) { toast(e.message, 'error'); }
   }));
 

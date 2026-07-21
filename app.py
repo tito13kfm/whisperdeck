@@ -44,7 +44,7 @@ from services.hotwords import list_hotwords, add_hotword, delete_hotword
 from services.correction import extract_hotwords_from_doc
 from services.model_catalog import get_correction_models
 from services.llm_jobs import (
-    enqueue_llm_job, enqueue_auto_correction, serialize_llm_job, latest_job,
+    enqueue_llm_job, enqueue_auto_correction, enqueue_auto_classify, serialize_llm_job, latest_job,
     cancel_llm_job, rerun_llm_job, llm_worker_loop, reset_stuck_llm_jobs,
     dismiss_llm_job, clear_finished_llm_jobs,
 )
@@ -234,6 +234,7 @@ def _serialize_transcript(db: Session, t: Transcript) -> dict:
     return {
         "id": t.id,
         "source_transcript_id": t.source_transcript_id,
+        "kind": t.kind or "meeting",
         "title": t.title,
         "filename": t.filename,
         "duration_seconds": t.duration_seconds,
@@ -263,6 +264,33 @@ def _serialize_transcript(db: Session, t: Transcript) -> dict:
         "correction_job": serialize_llm_job(cj) if (cj := latest_job(db, t.id, "correction")) else None,
         "summary_job": serialize_llm_job(sj) if (sj := latest_job(db, t.id, "summary")) else None,
         "voice_match_job": serialize_llm_job(vj) if (vj := latest_job(db, t.id, "voice_match")) else None,
+        **_dictation_job_fields(db, t),
+    }
+
+
+def _dictation_job_fields(db: Session, t: Transcript) -> dict:
+    """format_*_job / classify_intent_job / classify_intent_hint — gated on
+    t.kind so meeting transcripts (the majority, and which can never have
+    these jobs) skip the 4 extra LlmJob queries entirely. Matters because
+    _serialize_transcript runs per-row in list_transcripts (up to 50 rows)."""
+    if t.kind != "dictation":
+        return {
+            "format_markdown_job": None, "format_email_job": None, "format_coding_prompt_job": None,
+            "classify_intent_job": None, "classify_intent_hint": None,
+        }
+    classify_job = latest_job(db, t.id, "classify_intent")
+    return {
+        "format_markdown_job": serialize_llm_job(fmj) if (fmj := latest_job(db, t.id, "format_markdown")) else None,
+        "format_email_job": serialize_llm_job(fej) if (fej := latest_job(db, t.id, "format_email")) else None,
+        "format_coding_prompt_job": serialize_llm_job(fcj) if (fcj := latest_job(db, t.id, "format_coding_prompt")) else None,
+        "classify_intent_job": serialize_llm_job(classify_job) if classify_job else None,
+        # Auto-computed suggestion — a UI hint for which format button to
+        # highlight, not a gate on any of them.
+        "classify_intent_hint": (
+            classify_job.result_json.get("format")
+            if classify_job and classify_job.status == "completed" and classify_job.result_json
+            else None
+        ),
     }
 
 
@@ -629,6 +657,7 @@ async def _run_transcription_pipeline(
     diarize: bool,
     num_speakers: Optional[int],
     source_transcript_id: Optional[int] = None,
+    kind: str = "meeting",
 ) -> dict:
     """Everything after the source audio is on disk: transcode decision,
     chunk-vs-inline branch, inline diarization, auto-correct enqueue.
@@ -638,7 +667,15 @@ async def _run_transcription_pipeline(
     source_transcript_id is set on the transcript row before its first
     commit in both branches — not patched on afterward — so a version-chain
     link is never left missing by an exception raised later in the same
-    request (chunk-job creation, diarization, auto-correct enqueue)."""
+    request (chunk-job creation, diarization, auto-correct enqueue).
+
+    Dictation transcripts are always single-speaker by definition (the
+    summarize prompt and reformatting features assume it) — diarize is
+    forced off here, server-side, rather than trusting the client to have
+    sent diarize=false. Enforced once at this convergence point so it can't
+    be bypassed by calling either entry point directly."""
+    if kind == "dictation":
+        diarize = False
     user_settings = get_user_settings(db, current_user.id)
 
     # Normalize for cloud upload: strips video track, downsamples to 16kHz
@@ -745,6 +782,7 @@ async def _run_transcription_pipeline(
             title=title or filename,
             num_speakers=num_speakers,
             video_path=video_path,
+            kind=kind,
         )
         # Real processed size, not the raw upload size — the sum of all
         # chunk files, since that's what actually gets sent to the provider.
@@ -772,6 +810,7 @@ async def _run_transcription_pipeline(
         )
         transcript.processed_size_bytes = file_size
         transcript.source_transcript_id = source_transcript_id
+        transcript.kind = kind
         db.commit()
 
         # Run diarization if requested
@@ -795,6 +834,7 @@ async def _run_transcription_pipeline(
         # on the Queue screen) instead of blocking this response.
         if user_settings.get("auto_correct", True):
             enqueue_auto_correction(db, transcript, user_settings)
+        enqueue_auto_classify(db, transcript, user_settings)
 
         return _serialize_transcript(db, transcript)
 
@@ -813,10 +853,13 @@ async def transcribe_audio(
     diarize: bool = Form(False),
     num_speakers: Optional[int] = Form(None),
     context_doc: Optional[str] = Form(None),
+    kind: str = Form("meeting"),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     """Upload and transcribe an audio file."""
+    if kind not in ("meeting", "dictation"):
+        raise HTTPException(status_code=400, detail="kind must be 'meeting' or 'dictation'")
     # Save uploaded file
     file_ext = os.path.splitext(file.filename or "audio.mp3")[1] or ".mp3"
     safe_name = f"{utcnow_naive().strftime('%Y%m%d_%H%M%S')}_{hash(file.filename or 'audio')}{file_ext}"
@@ -851,6 +894,7 @@ async def transcribe_audio(
         temperature=temperature,
         diarize=diarize,
         num_speakers=num_speakers,
+        kind=kind,
     )
 
 
@@ -1171,6 +1215,7 @@ async def retranscribe_transcript(
         diarize=diarize if diarize is not None else bool(t.diarize_requested),
         num_speakers=num_speakers if num_speakers is not None else t.num_speakers,
         source_transcript_id=root_id,
+        kind=t.kind or "meeting",
     )
 
 
@@ -1450,6 +1495,48 @@ async def summarize_transcript(
     return {"job": serialize_llm_job(job)}
 
 
+# ── Reformatting (dictation) ────────────────────────────────────────────────
+
+_FORMAT_TARGET_KINDS = {
+    "markdown": "format_markdown",
+    "email": "format_email",
+    "coding_prompt": "format_coding_prompt",
+}
+
+
+@app.post("/api/transcripts/{transcript_id}/format/{target}")
+async def format_transcript(
+    transcript_id: int,
+    target: str,
+    provider: str = Form("local_llm"),
+    model: str = Form(""),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Queue a reformat of a completed dictation transcript into `target`
+    ('markdown' | 'email' | 'coding_prompt') — watch it on the Queue screen
+    or fetch history via GET /api/transcripts/{id}/runs/{kind}."""
+    kind = _FORMAT_TARGET_KINDS.get(target)
+    if not kind:
+        raise HTTPException(status_code=400, detail=f"Unknown format target '{target}' — use markdown, email, or coding_prompt")
+    t = db.query(Transcript).filter(
+        Transcript.id == transcript_id, Transcript.user_id == current_user.id
+    ).first()
+    if not t:
+        raise HTTPException(status_code=404, detail="Transcript not found")
+    if t.kind != "dictation":
+        raise HTTPException(status_code=400, detail="Reformatting is only available for dictation transcripts")
+    if t.status != "completed":
+        raise HTTPException(status_code=400, detail=f"Transcript {transcript_id} is not completed")
+    from services.settings import resolve_provider_key, KEYLESS_PROVIDERS
+    api_key, _ = resolve_provider_key(db, current_user.id, provider)
+    if provider not in KEYLESS_PROVIDERS and not api_key:
+        raise HTTPException(status_code=400, detail=f"No {provider} API key saved — add one in the service panel")
+
+    job = enqueue_llm_job(db, current_user.id, transcript_id, kind, provider, model)
+    return {"job": serialize_llm_job(job)}
+
+
 @app.post("/api/transcripts/{transcript_id}/correct")
 async def correct_transcript_route(
     transcript_id: int,
@@ -1492,6 +1579,8 @@ async def rediarize_transcript(
     ).first()
     if not t:
         raise HTTPException(status_code=404, detail="Transcript not found")
+    if t.kind == "dictation":
+        raise HTTPException(status_code=400, detail="Dictation transcripts are single-speaker — re-diarize doesn't apply")
     if t.status not in ("completed", "partial"):
         raise HTTPException(status_code=400, detail=f"Transcript {transcript_id} is not completed")
     if not (t.audio_path and os.path.exists(t.audio_path)):
@@ -1521,6 +1610,8 @@ async def voice_match_transcript(
     ).first()
     if not t:
         raise HTTPException(status_code=404, detail="Transcript not found")
+    if t.kind == "dictation":
+        raise HTTPException(status_code=400, detail="Dictation transcripts are single-speaker — voice matching doesn't apply")
     if not (t.audio_path and os.path.exists(t.audio_path)):
         raise HTTPException(status_code=400, detail="No stored audio for this transcript")
     job = enqueue_llm_job(db, current_user.id, transcript_id, "voice_match", "", "")
@@ -1538,7 +1629,7 @@ async def transcript_runs(
     including dismissed ones (dismiss only hides a job from the Queue
     screen — the row and its result_json snapshot persist). Powers the
     run-comparison picker on the detail page."""
-    if kind not in ("correction", "summary", "rediarize"):
+    if kind not in ("correction", "summary", "rediarize", "format_markdown", "format_email", "format_coding_prompt", "classify_intent"):
         raise HTTPException(status_code=400, detail=f"Unknown run kind '{kind}'")
     t = db.query(Transcript).filter(
         Transcript.id == transcript_id, Transcript.user_id == current_user.id

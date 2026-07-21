@@ -55,6 +55,11 @@ def test_correct_transcript_sets_error_on_failure_without_raising(db_session):
     db_session.refresh(transcript)
     assert transcript.corrected_text is None
     assert "500" in transcript.correction_error
+    # Pins the pre-extraction wording exactly — services/llm_client.py's
+    # chat_completion() defaults http_error_label to None so correction
+    # keeps its original generic text instead of picking up a feature
+    # prefix meant for summarize/reformatting (see llm_client.py docstring).
+    assert transcript.correction_error == "LLM API error (500): " + json.dumps({"error": "boom"})
 
 
 def test_correct_transcript_includes_glossary_in_prompt(db_session):

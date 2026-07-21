@@ -565,6 +565,8 @@ async def _finalize_if_done(db, transcript_id: int, diarization_service) -> None
             # up, so chunk finalization never blocks on a correction pass.
             from services.llm_jobs import enqueue_auto_correction
             enqueue_auto_correction(db, transcript, user_settings)
+        from services.llm_jobs import enqueue_auto_classify
+        enqueue_auto_classify(db, transcript, user_settings)
 
 
 async def _process_transcript_jobs(db, transcript_id: int, jobs: list, diarization_service,
