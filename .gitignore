@@ -25,6 +25,9 @@ scripts/ux_audit_*
 scripts/provider_local.json
 scripts/settings_payload.json
 
+# OpenCode project-level config (agents use global ~/.config/opencode/agents/)
+.opencode/
+
 # Scheduled-review runtime artifacts (machine-local; log.md, archive/ and
 # last-review-date.txt stay tracked, the wrapper script commits them)
 skill-observations/last-scheduled-review-output.txt
