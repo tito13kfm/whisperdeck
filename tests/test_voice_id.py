@@ -61,7 +61,34 @@ def test_extract_embedding_falls_back_to_mfcc_when_speechbrain_fails(tmp_path, m
     result = svc._extract_embedding("fake.wav")
 
     assert result is not None
-    assert np.array_equal(result, fallback)
+    embedding, model_id = result
+    assert np.array_equal(embedding, fallback)
+    assert model_id == "MFCC fingerprint (librosa)"
+
+
+def test_extract_embedding_speechbrain_success_reports_speechbrain_model(tmp_path, monkeypatch):
+    svc = _svc(tmp_path)
+    ok = np.array([1.0, 2.0, 3.0])
+    monkeypatch.setattr(svc, "_embed_speechbrain", lambda path: ok)
+
+    result = svc._extract_embedding("fake.wav")
+
+    embedding, model_id = result
+    assert np.array_equal(embedding, ok)
+    assert model_id == "speechbrain/spkrec-ecapa-voxceleb"
+
+
+def test_extract_embedding_librosa_backend_reports_mfcc_model(tmp_path, monkeypatch):
+    svc = VoiceIdentificationService(voices_dir=str(tmp_path / "voices"))
+    svc._backend = "librosa_mfcc"
+    ok = np.array([1.0, 2.0])
+    monkeypatch.setattr(svc, "_embed_mfcc", lambda path: ok)
+
+    result = svc._extract_embedding("fake.wav")
+
+    embedding, model_id = result
+    assert np.array_equal(embedding, ok)
+    assert model_id == "MFCC fingerprint (librosa)"
 
 
 def test_detect_backend_skips_unimplemented_pyannote(tmp_path, monkeypatch):

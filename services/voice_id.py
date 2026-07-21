@@ -262,18 +262,24 @@ class VoiceIdentificationService:
         db.commit()
         return True
 
-    def _extract_embedding(self, audio_path: str) -> Optional[np.ndarray]:
-        """Extract a speaker embedding vector from an audio file. Falls back
-        to MFCC if the primary backend fails on this call, rather than
-        committing to whatever _detect_backend guessed at startup."""
+    def _extract_embedding(self, audio_path: str, hf_token: Optional[str] = None) -> Optional[tuple]:
         if self._backend == "speechbrain":
             embedding = self._embed_speechbrain(audio_path)
             if embedding is not None:
-                return embedding
-            return self._embed_mfcc(audio_path)
+                return embedding, "speechbrain/spkrec-ecapa-voxceleb"
+            return self._mfcc_fallback(audio_path)
+        elif self._backend == "pyannote":
+            embedding = self._embed_pyannote(audio_path, hf_token=hf_token)
+            if embedding is not None:
+                return embedding, "pyannote/wespeaker-voxceleb-resnet34-LM"
+            return self._mfcc_fallback(audio_path)
         elif self._backend == "librosa_mfcc":
-            return self._embed_mfcc(audio_path)
+            return self._mfcc_fallback(audio_path)
         return None
+
+    def _mfcc_fallback(self, audio_path: str) -> Optional[tuple]:
+        embedding = self._embed_mfcc(audio_path)
+        return (embedding, "MFCC fingerprint (librosa)") if embedding is not None else None
 
     def _get_classifier(self):
         """Build the SpeechBrain classifier once and cache it — loading it
