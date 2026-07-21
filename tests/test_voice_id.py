@@ -218,7 +218,7 @@ def _profile(db_session, user_id, name="Alice"):
 def test_add_clip_creates_row_and_sets_profile_embedding_to_its_value(tmp_path, monkeypatch, db_session):
     from services.voice_id import VoiceIdentificationService
     svc = VoiceIdentificationService(voices_dir=str(tmp_path / "voices"))
-    monkeypatch.setattr(svc, "_extract_embedding", lambda path: np.array([1.0, 2.0, 3.0]))
+    monkeypatch.setattr(svc, "_extract_embedding", lambda path, hf_token=None: (np.array([1.0, 2.0, 3.0]), "speechbrain/spkrec-ecapa-voxceleb"))
 
     user = _test_user(db_session)
     profile = _profile(db_session, user.id)
@@ -232,13 +232,15 @@ def test_add_clip_creates_row_and_sets_profile_embedding_to_its_value(tmp_path, 
     db_session.refresh(profile)
     assert profile.embedding == [1.0, 2.0, 3.0]
     assert profile.sample_count == 1
+    clip_row = db_session.query(VoiceClip).filter(VoiceClip.id == clip.id).first()
+    assert clip_row.embedding_model == "speechbrain/spkrec-ecapa-voxceleb"
 
 
 def test_add_clip_averages_embedding_across_multiple_clips(tmp_path, monkeypatch, db_session):
     from services.voice_id import VoiceIdentificationService
     svc = VoiceIdentificationService(voices_dir=str(tmp_path / "voices"))
     values = iter([np.array([0.0, 0.0]), np.array([2.0, 4.0])])
-    monkeypatch.setattr(svc, "_extract_embedding", lambda path: next(values))
+    monkeypatch.setattr(svc, "_extract_embedding", lambda path, hf_token=None: (next(values), "speechbrain/spkrec-ecapa-voxceleb"))
 
     user = _test_user(db_session)
     profile = _profile(db_session, user.id)
@@ -255,7 +257,7 @@ def test_add_clip_averages_embedding_across_multiple_clips(tmp_path, monkeypatch
 def test_add_clip_raises_when_extraction_fails(tmp_path, monkeypatch, db_session):
     from services.voice_id import VoiceIdentificationService
     svc = VoiceIdentificationService(voices_dir=str(tmp_path / "voices"))
-    monkeypatch.setattr(svc, "_extract_embedding", lambda path: None)
+    monkeypatch.setattr(svc, "_extract_embedding", lambda path, hf_token=None: None)
 
     user = _test_user(db_session)
     profile = _profile(db_session, user.id)
@@ -266,11 +268,51 @@ def test_add_clip_raises_when_extraction_fails(tmp_path, monkeypatch, db_session
         svc.add_clip(db_session, profile.id, user.id, str(clip_file))
 
 
+def test_add_clip_raises_when_embedding_model_differs_from_existing_clips(tmp_path, monkeypatch, db_session):
+    svc = VoiceIdentificationService(voices_dir=str(tmp_path / "voices"))
+    user = _test_user(db_session)
+    profile = _profile(db_session, user.id)
+
+    monkeypatch.setattr(svc, "_extract_embedding", lambda path, hf_token=None: (np.array([1.0, 2.0]), "speechbrain/spkrec-ecapa-voxceleb"))
+    clip_file_1 = tmp_path / "clip1.wav"
+    clip_file_1.write_bytes(b"wav")
+    svc.add_clip(db_session, profile.id, user.id, str(clip_file_1))
+
+    monkeypatch.setattr(svc, "_extract_embedding", lambda path, hf_token=None: (np.array([3.0, 4.0, 5.0]), "pyannote/wespeaker-voxceleb-resnet34-LM"))
+    clip_file_2 = tmp_path / "clip2.wav"
+    clip_file_2.write_bytes(b"wav")
+
+    with pytest.raises(ValueError) as exc_info:
+        svc.add_clip(db_session, profile.id, user.id, str(clip_file_2))
+
+    assert "speechbrain/spkrec-ecapa-voxceleb" in str(exc_info.value)
+    assert "pyannote/wespeaker-voxceleb-resnet34-LM" in str(exc_info.value)
+
+
+def test_add_clip_allows_legacy_null_embedding_model_to_mix(tmp_path, monkeypatch, db_session):
+    svc = VoiceIdentificationService(voices_dir=str(tmp_path / "voices"))
+    user = _test_user(db_session)
+    profile = _profile(db_session, user.id)
+
+    legacy_clip = VoiceClip(voice_profile_id=profile.id, audio_path="legacy.wav",
+                             embedding=[1.0, 2.0], embedding_model=None)
+    db_session.add(legacy_clip)
+    db_session.commit()
+
+    monkeypatch.setattr(svc, "_extract_embedding", lambda path, hf_token=None: (np.array([3.0, 4.0]), "speechbrain/spkrec-ecapa-voxceleb"))
+    clip_file = tmp_path / "new.wav"
+    clip_file.write_bytes(b"wav")
+
+    clip = svc.add_clip(db_session, profile.id, user.id, str(clip_file))
+
+    assert clip.embedding_model == "speechbrain/spkrec-ecapa-voxceleb"
+
+
 def test_remove_clip_recomputes_embedding_from_remaining(tmp_path, monkeypatch, db_session):
     from services.voice_id import VoiceIdentificationService
     svc = VoiceIdentificationService(voices_dir=str(tmp_path / "voices"))
     values = iter([np.array([0.0, 0.0]), np.array([2.0, 4.0])])
-    monkeypatch.setattr(svc, "_extract_embedding", lambda path: next(values))
+    monkeypatch.setattr(svc, "_extract_embedding", lambda path, hf_token=None: (next(values), "speechbrain/spkrec-ecapa-voxceleb"))
 
     user = _test_user(db_session)
     profile = _profile(db_session, user.id)
@@ -291,7 +333,7 @@ def test_remove_clip_recomputes_embedding_from_remaining(tmp_path, monkeypatch, 
 def test_remove_last_clip_zeroes_profile(tmp_path, monkeypatch, db_session):
     from services.voice_id import VoiceIdentificationService
     svc = VoiceIdentificationService(voices_dir=str(tmp_path / "voices"))
-    monkeypatch.setattr(svc, "_extract_embedding", lambda path: np.array([1.0, 1.0]))
+    monkeypatch.setattr(svc, "_extract_embedding", lambda path, hf_token=None: (np.array([1.0, 1.0]), "speechbrain/spkrec-ecapa-voxceleb"))
 
     user = _test_user(db_session)
     profile = _profile(db_session, user.id)
@@ -310,7 +352,7 @@ def test_delete_profile_removes_clip_files_and_rows(tmp_path, monkeypatch, db_se
     from services.voice_id import VoiceIdentificationService
     svc = VoiceIdentificationService(voices_dir=str(tmp_path / "voices"))
     values = iter([np.array([0.0, 0.0]), np.array([2.0, 4.0])])
-    monkeypatch.setattr(svc, "_extract_embedding", lambda path: next(values))
+    monkeypatch.setattr(svc, "_extract_embedding", lambda path, hf_token=None: (next(values), "speechbrain/spkrec-ecapa-voxceleb"))
 
     user = _test_user(db_session)
     profile = _profile(db_session, user.id)
@@ -336,8 +378,8 @@ def test_identify_skips_profiles_with_no_embedding(tmp_path, monkeypatch, db_ses
     from services.voice_id import VoiceIdentificationService
     svc = VoiceIdentificationService(voices_dir=str(tmp_path / "voices"))
     user = _test_user(db_session)
-    _profile(db_session, user.id, name="Empty")  # embedding=None, no clips
-    monkeypatch.setattr(svc, "_extract_embedding", lambda path: np.array([1.0, 0.0]))
+    _profile(db_session, user.id, name="Empty")
+    monkeypatch.setattr(svc, "_extract_embedding", lambda path, hf_token=None: (np.array([1.0, 0.0]), "speechbrain/spkrec-ecapa-voxceleb"))
 
     probe = tmp_path / "probe.wav"
     probe.write_bytes(b"wav")
@@ -350,7 +392,7 @@ def test_list_voices_includes_clips(client, db_session, tmp_path, monkeypatch):
     user = _test_user(db_session)
     profile = _profile(db_session, user.id)
     from services import voice_id as voice_id_module
-    monkeypatch.setattr("app.voice_id_service._extract_embedding", lambda path: np.array([1.0, 2.0]))
+    monkeypatch.setattr("app.voice_id_service._extract_embedding", lambda path, hf_token=None: (np.array([1.0, 2.0]), "speechbrain/spkrec-ecapa-voxceleb"))
     clip_file = tmp_path / "c.wav"
     clip_file.write_bytes(b"wav")
     import app as app_module
@@ -366,7 +408,7 @@ def test_list_voices_includes_clips(client, db_session, tmp_path, monkeypatch):
 def test_add_clip_route_happy_path(client, db_session, tmp_path, monkeypatch):
     user = _test_user(db_session)
     profile = _profile(db_session, user.id)
-    monkeypatch.setattr("app.voice_id_service._extract_embedding", lambda path: np.array([1.0, 2.0]))
+    monkeypatch.setattr("app.voice_id_service._extract_embedding", lambda path, hf_token=None: (np.array([1.0, 2.0]), "speechbrain/spkrec-ecapa-voxceleb"))
 
     r = client.post(
         f"/api/voices/{profile.id}/clips",
@@ -387,7 +429,7 @@ def test_add_clip_route_404_for_missing_profile(client, db_session):
 def test_delete_clip_route(client, db_session, tmp_path, monkeypatch):
     user = _test_user(db_session)
     profile = _profile(db_session, user.id)
-    monkeypatch.setattr("app.voice_id_service._extract_embedding", lambda path: np.array([1.0, 2.0]))
+    monkeypatch.setattr("app.voice_id_service._extract_embedding", lambda path, hf_token=None: (np.array([1.0, 2.0]), "speechbrain/spkrec-ecapa-voxceleb"))
     import app as app_module
     clip_file = tmp_path / "c.wav"
     clip_file.write_bytes(b"wav")
@@ -404,7 +446,7 @@ def test_delete_clip_route(client, db_session, tmp_path, monkeypatch):
 def test_clip_audio_route_serves_file(client, db_session, tmp_path, monkeypatch):
     user = _test_user(db_session)
     profile = _profile(db_session, user.id)
-    monkeypatch.setattr("app.voice_id_service._extract_embedding", lambda path: np.array([1.0, 2.0]))
+    monkeypatch.setattr("app.voice_id_service._extract_embedding", lambda path, hf_token=None: (np.array([1.0, 2.0]), "speechbrain/spkrec-ecapa-voxceleb"))
     import app as app_module
     clip_file = tmp_path / "c.wav"
     clip_file.write_bytes(b"real wav bytes")
