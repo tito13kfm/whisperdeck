@@ -300,6 +300,8 @@ async def run_llm_job(SessionLocal, job_id: int, transcription_service, diarizat
             if not has_enrolled_voice:
                 _finish(db, job, "failed", "No enrolled voices with clips — add a clip to a roster profile first")
                 return
+            from services.settings import get_user_settings
+            user_settings = get_user_settings(db, job.user_id)
             segments = transcript.segments or []
             job.progress_total = len(segments)
             job.progress_done = 0
@@ -320,7 +322,8 @@ async def run_llm_job(SessionLocal, job_id: int, transcription_service, diarizat
                         # sqlite is opened with check_same_thread=False.
                         loop = asyncio.get_event_loop()
                         def _identify():
-                            return voice_id_service.identify(db, job.user_id, clip_path, threshold=0.65)
+                            return voice_id_service.identify(db, job.user_id, clip_path, threshold=0.65,
+                                                             hf_token=user_settings.get("hf_token"))
                         matches = await loop.run_in_executor(None, _identify)
                     finally:
                         try:

@@ -28,10 +28,9 @@ file isn't touched in the same session, that's a bug — fix it before moving on
 - Queue audit: enqueue dedupe constraint (`docs/superpowers/plans/2026-07-07-queue-audit-enqueue-dedupe-constraint.md`)
 - Queue audit: LLM job auto-retry (`docs/superpowers/plans/2026-07-07-queue-audit-llmjob-auto-retry.md`)
 - Queue audit: split concurrent job pools (`docs/superpowers/plans/2026-07-07-queue-audit-split-concurrent-job-pools.md`)
+- pyannote.audio voice-ID embedding backend (`docs/superpowers/plans/2026-07-21-pyannote-voice-id-backend.md`)
 
 ## In Progress
-
-- **pyannote.audio voice-ID embedding backend** (priority: needed asap — [issue #38](https://github.com/tito13kfm/whisperdeck/issues/38)) — named in `services/voice_id.py`'s backend-label mapping but `_detect_backend()` never returns it; the code comment says to skip it until an embedding extractor is wired up. speechbrain and librosa MFCC are the only real backends today.
 
 ## Parked (not designed yet)
 

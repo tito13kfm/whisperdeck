@@ -28,18 +28,20 @@ class VoiceIdentificationService:
         os.makedirs(voices_dir, exist_ok=True)
         self._backend = self._detect_backend()
         self._classifier = None  # cached speechbrain EncoderClassifier
+        self._pyannote_inference = None  # cached pyannote Inference wrapper
         self._last_backend_error = None
 
     def _detect_backend(self) -> str:
-        """Detect which embedding backend is available."""
         try:
             import speechbrain  # noqa
             return "speechbrain"
         except ImportError:
             pass
-        # NOTE: pyannote.audio is not wired to an embedding extractor below —
-        # detecting it here would silently return None from every enroll/
-        # identify call. Skip it until _embed_pyannote exists.
+        try:
+            import pyannote.audio  # noqa
+            return "pyannote"
+        except ImportError:
+            pass
         try:
             import librosa  # noqa
             return "librosa_mfcc"
@@ -51,7 +53,7 @@ class VoiceIdentificationService:
     def backend_name(self) -> str:
         names = {
             "speechbrain": "speechbrain/spkrec-ecapa-voxceleb",
-            "pyannote": "pyannote/embedding",
+            "pyannote": "pyannote/wespeaker-voxceleb-resnet34-LM",
             "librosa_mfcc": "MFCC fingerprint (librosa)",
             "none": "No backend available — install speechbrain",
         }
@@ -64,17 +66,10 @@ class VoiceIdentificationService:
         name: str,
         audio_path: str,
         notes: str = "",
+        hf_token: Optional[str] = None,
     ) -> VoiceProfile:
-        """Enroll a speaker by name from an audio sample — creates the
-        profile if it doesn't exist yet, then adds this sample as its
-        first clip.
-
-        Embedding extraction is validated before any db access so a failed
-        extraction never mutates state (and never requires a real db when
-        extraction fails outright — see
-        test_enroll_error_includes_underlying_reason_when_all_backends_fail)."""
-        embedding = self._extract_embedding(audio_path)
-        if embedding is None:
+        result = self._extract_embedding(audio_path, hf_token=hf_token)
+        if result is None:
             if self._backend == "none":
                 raise ValueError(
                     "No voice embedding backend available. "
@@ -87,6 +82,7 @@ class VoiceIdentificationService:
                 f"backend. Check that the audio file is valid and the backend's "
                 f"dependencies (e.g. torch, torchaudio) are working correctly.{reason}"
             )
+        embedding, model_id = result
 
         profile = db.query(VoiceProfile).filter(
             VoiceProfile.user_id == user_id, VoiceProfile.name == name
@@ -94,7 +90,7 @@ class VoiceIdentificationService:
         if not profile:
             profile = VoiceProfile(
                 user_id=user_id, name=name, embedding=None,
-                embedding_model=self.backend_name, sample_count=0, notes=notes,
+                embedding_model=model_id, sample_count=0, notes=notes,
             )
             db.add(profile)
             db.commit()
@@ -102,7 +98,8 @@ class VoiceIdentificationService:
             profile.notes = notes
             db.commit()
 
-        self._persist_clip(db, profile, audio_path, embedding)
+        self._ensure_clip_compatible(db, profile, embedding, model_id)
+        self._persist_clip(db, profile, audio_path, embedding, model_id)
         db.refresh(profile)
         return profile
 
@@ -113,24 +110,49 @@ class VoiceIdentificationService:
         user_id: int,
         audio_path: str,
         source_transcript_id: Optional[int] = None,
+        hf_token: Optional[str] = None,
     ) -> VoiceClip:
-        """Add one clip to an existing profile and recompute the profile's
-        match embedding as the mean of all its clips."""
         profile = db.query(VoiceProfile).filter(
             VoiceProfile.id == profile_id, VoiceProfile.user_id == user_id
         ).first()
         if not profile:
             raise ValueError(f"Voice profile {profile_id} not found")
 
-        embedding = self._extract_embedding(audio_path)
-        if embedding is None:
+        result = self._extract_embedding(audio_path, hf_token=hf_token)
+        if result is None:
             reason = f" ({self._last_backend_error})" if self._last_backend_error else ""
             raise ValueError(
                 f"Voice embedding extraction failed using the {self.backend_name} "
                 f"backend.{reason}"
             )
+        embedding, model_id = result
 
-        return self._persist_clip(db, profile, audio_path, embedding, source_transcript_id)
+        self._ensure_clip_compatible(db, profile, embedding, model_id)
+
+        return self._persist_clip(db, profile, audio_path, embedding, model_id, source_transcript_id)
+
+    def _ensure_clip_compatible(self, db, profile: VoiceProfile, embedding, model_id: str) -> None:
+        """Shared by enroll() and add_clip(): refuse clips that can't be
+        averaged with the profile's existing ones — a different embedding
+        model, or (for legacy NULL-model rows) a different vector length."""
+        existing_clips = db.query(VoiceClip).filter(VoiceClip.voice_profile_id == profile.id).all()
+        mismatch = next((c for c in existing_clips if c.embedding_model and c.embedding_model != model_id), None)
+        if mismatch:
+            raise ValueError(
+                f"This clip was extracted using {model_id}, but profile '{profile.name}' "
+                f"already has clips extracted using {mismatch.embedding_model}. Mixing "
+                f"embedding models within one profile isn't supported — switch backends "
+                f"back, or enroll this speaker as a separate profile."
+            )
+        emb_len = len(embedding)
+        dim_mismatch = next((c for c in existing_clips if c.embedding and len(c.embedding) != emb_len), None)
+        if dim_mismatch:
+            raise ValueError(
+                f"This clip's embedding has {emb_len} dimensions, but profile '{profile.name}' "
+                f"already has a clip with {len(dim_mismatch.embedding)} dimensions — likely "
+                f"extracted by a different backend before embedding models were tracked. "
+                f"Remove the profile's older clips or enroll this speaker as a separate profile."
+            )
 
     def _persist_clip(
         self,
@@ -138,16 +160,14 @@ class VoiceIdentificationService:
         profile: VoiceProfile,
         audio_path: str,
         embedding,
+        model_id: str,
         source_transcript_id: Optional[int] = None,
     ) -> VoiceClip:
-        """Shared by enroll() and add_clip(): write the VoiceClip row for an
-        already-extracted embedding and recompute the profile's mean
-        embedding. Kept separate from add_clip so enroll() doesn't have to
-        run embedding extraction twice."""
         clip = VoiceClip(
             voice_profile_id=profile.id,
             audio_path=audio_path,
             embedding=embedding.tolist() if isinstance(embedding, np.ndarray) else embedding,
+            embedding_model=model_id,
             source_transcript_id=source_transcript_id,
         )
         db.add(clip)
@@ -184,15 +204,17 @@ class VoiceIdentificationService:
             stacked = np.array([c.embedding for c in clips])
             profile.embedding = np.mean(stacked, axis=0).tolist()
             profile.sample_count = len(clips)
-        profile.embedding_model = self.backend_name
+            latest_model = next((c.embedding_model for c in reversed(clips) if c.embedding_model), None)
+            if latest_model:
+                profile.embedding_model = latest_model
         profile.updated_at = utcnow_naive()
         db.commit()
 
-    def identify(self, db, user_id: int, audio_path: str, threshold: float = 0.65) -> list[dict]:
-        """Identify a speaker from an audio sample. Returns ranked candidates."""
-        probe_embedding = self._extract_embedding(audio_path)
-        if probe_embedding is None:
+    def identify(self, db, user_id: int, audio_path: str, threshold: float = 0.65, hf_token: Optional[str] = None) -> list[dict]:
+        result = self._extract_embedding(audio_path, hf_token=hf_token)
+        if result is None:
             return []
+        probe_embedding, probe_model = result
 
         profiles = db.query(VoiceProfile).filter(VoiceProfile.user_id == user_id).all()
         if not profiles:
@@ -202,7 +224,11 @@ class VoiceIdentificationService:
         for profile in profiles:
             if profile.embedding is None:
                 continue
+            if profile.embedding_model and profile.embedding_model != probe_model:
+                continue
             stored = np.array(profile.embedding)
+            if len(stored) != len(probe_embedding):
+                continue
             similarity = self._cosine_similarity(probe_embedding, stored)
             if similarity >= threshold:
                 results.append({
@@ -262,18 +288,24 @@ class VoiceIdentificationService:
         db.commit()
         return True
 
-    def _extract_embedding(self, audio_path: str) -> Optional[np.ndarray]:
-        """Extract a speaker embedding vector from an audio file. Falls back
-        to MFCC if the primary backend fails on this call, rather than
-        committing to whatever _detect_backend guessed at startup."""
+    def _extract_embedding(self, audio_path: str, hf_token: Optional[str] = None) -> Optional[tuple]:
         if self._backend == "speechbrain":
             embedding = self._embed_speechbrain(audio_path)
             if embedding is not None:
-                return embedding
-            return self._embed_mfcc(audio_path)
+                return embedding, "speechbrain/spkrec-ecapa-voxceleb"
+            return self._mfcc_fallback(audio_path)
+        elif self._backend == "pyannote":
+            embedding = self._embed_pyannote(audio_path, hf_token=hf_token)
+            if embedding is not None:
+                return embedding, "pyannote/wespeaker-voxceleb-resnet34-LM"
+            return self._mfcc_fallback(audio_path)
         elif self._backend == "librosa_mfcc":
-            return self._embed_mfcc(audio_path)
+            return self._mfcc_fallback(audio_path)
         return None
+
+    def _mfcc_fallback(self, audio_path: str) -> Optional[tuple]:
+        embedding = self._embed_mfcc(audio_path)
+        return (embedding, "MFCC fingerprint (librosa)") if embedding is not None else None
 
     def _get_classifier(self):
         """Build the SpeechBrain classifier once and cache it — loading it
@@ -305,6 +337,36 @@ class VoiceIdentificationService:
             return embedding
         except Exception as e:
             self._last_backend_error = f"speechbrain: {e}"
+            return None
+
+    def _get_pyannote_inference(self, hf_token: Optional[str] = None):
+        if self._pyannote_inference is None:
+            from pyannote.audio import Model, Inference
+            model = Model.from_pretrained(
+                "pyannote/wespeaker-voxceleb-resnet34-LM",
+                token=hf_token or os.environ.get("HUGGINGFACE_TOKEN", None),
+            )
+            self._pyannote_inference = Inference(model, window="whole")
+        return self._pyannote_inference
+
+    def _embed_pyannote(self, audio_path: str, hf_token: Optional[str] = None) -> Optional[np.ndarray]:
+        try:
+            import torch
+            import soundfile as sf
+
+            inference = self._get_pyannote_inference(hf_token)
+            data, sample_rate = sf.read(audio_path, dtype="float32", always_2d=True)
+            waveform = torch.from_numpy(data.T)
+            if waveform.shape[0] > 1:
+                # embedding models expect mono — downmix rather than erroring
+                # out and silently falling back to MFCC
+                waveform = waveform.mean(0).reshape(1, -1)
+            if waveform.shape[1] > sample_rate * 30:
+                waveform = waveform[:, :sample_rate * 30]
+            embedding = inference({"waveform": waveform, "sample_rate": sample_rate})
+            return np.asarray(embedding).reshape(-1)
+        except Exception as e:
+            self._last_backend_error = f"pyannote: {e}"
             return None
 
     def _embed_mfcc(self, audio_path: str) -> Optional[np.ndarray]:

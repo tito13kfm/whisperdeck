@@ -61,7 +61,7 @@ def test_voice_match_relabels_confident_segments_only(db_session, tmp_path):
     async def fake_extract(audio_path, clips, output_dir):
         return str(tmp_path / "clip.wav")
 
-    def fake_identify(db, user_id, audio_path, threshold=0.65):
+    def fake_identify(db, user_id, audio_path, threshold=0.65, hf_token=None):
         # first call (segment 0) matches confidently, second doesn't
         fake_identify.calls += 1
         if fake_identify.calls == 1:
@@ -99,7 +99,7 @@ def test_voice_match_runs_real_identify_through_executor(db_session, tmp_path, m
     async def fake_extract(audio_path, clips, output_dir):
         return str(tmp_path / "clip.wav")
 
-    monkeypatch.setattr(voice_id_service, "_extract_embedding", lambda path: np.array([0.1, 0.2, 0.3]))
+    monkeypatch.setattr(voice_id_service, "_extract_embedding", lambda path, hf_token=None: (np.array([0.1, 0.2, 0.3]), "test"))
 
     factory = lambda: _NoCloseSession(db_session)
     with patch("services.llm_jobs.extract_clips_concat", fake_extract):
@@ -194,7 +194,7 @@ def test_voice_match_skips_segment_on_extraction_failure_without_failing_job(db_
     factory = lambda: _NoCloseSession(db_session)
     with patch("services.llm_jobs.extract_clips_concat", flaky_extract), \
          patch("services.llm_jobs.voice_id_service.identify",
-               lambda db, user_id, audio_path, threshold=0.65: [{"id": 1, "name": "Alice", "similarity": 0.9, "sample_count": 1}]):
+               lambda db, user_id, audio_path, threshold=0.65, hf_token=None: [{"id": 1, "name": "Alice", "similarity": 0.9, "sample_count": 1}]):
         asyncio.run(run_llm_job(factory, job.id, transcription_service=None))
 
     db_session.refresh(job)
@@ -246,3 +246,36 @@ def test_transcript_serialization_includes_voice_match_job(client, db_session, t
     client.post(f"/api/transcripts/{t.id}/voice-match")
     r = client.get(f"/api/transcripts/{t.id}")
     assert r.json()["voice_match_job"]["kind"] == "voice_match"
+
+
+def test_voice_match_passes_hf_token_from_user_settings(db_session, tmp_path):
+    """The background job has no route to fetch settings for it — it must
+    thread the user's hf_token into identify() itself, or a fresh process
+    with a settings-only token silently probes with MFCC and matches nothing."""
+    user = _user(db_session)
+    user.settings = {"hf_token": "job-token-7"}
+    db_session.commit()
+    _enrolled_profile(db_session, user)
+    segments = [{"start": 0.0, "end": 1.0, "text": "hi", "speaker": "SPEAKER_00"}]
+    t = _transcript_with_segments(db_session, user, tmp_path, segments)
+    job = enqueue_llm_job(db_session, user.id, t.id, "voice_match", "", "")
+    job.status = "running"
+    db_session.commit()
+
+    async def fake_extract(audio_path, clips, output_dir):
+        return str(tmp_path / "clip.wav")
+
+    captured = {}
+
+    def fake_identify(db, user_id, audio_path, threshold=0.65, hf_token=None):
+        captured["hf_token"] = hf_token
+        return []
+
+    factory = lambda: _NoCloseSession(db_session)
+    with patch("services.llm_jobs.extract_clips_concat", fake_extract), \
+         patch("services.llm_jobs.voice_id_service.identify", fake_identify):
+        asyncio.run(run_llm_job(factory, job.id, transcription_service=None))
+
+    db_session.refresh(job)
+    assert job.status == "completed"
+    assert captured["hf_token"] == "job-token-7"

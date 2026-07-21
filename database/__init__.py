@@ -153,6 +153,7 @@ class VoiceClip(Base):
     voice_profile_id = Column(Integer, ForeignKey("voice_profiles.id", ondelete="CASCADE"), nullable=False)
     audio_path = Column(String(512), nullable=False)
     embedding = Column(JSON, nullable=False)  # this clip's own embedding, list of floats
+    embedding_model = Column(String(64), nullable=True)  # backend that produced THIS clip's vector; NULL = pre-migration row
     source_transcript_id = Column(Integer, ForeignKey("transcripts.id"), nullable=True)
     created_at = Column(DateTime, default=utcnow_naive)
 
@@ -303,6 +304,7 @@ def init_db(db_path: str = "data/whisperdesk.db") -> tuple:
     ensure_columns(engine, "llm_jobs", {"dismissed": "BOOLEAN DEFAULT 0", "result_json": "JSON", "attempts": "INTEGER DEFAULT 0"})
     ensure_columns(engine, "summaries", {"provider": "TEXT"})
     ensure_columns(engine, "users", {"is_admin": "BOOLEAN DEFAULT 0", "reset_token": "TEXT", "reset_token_expires_at": "TEXT"})
+    ensure_columns(engine, "voice_clips", {"embedding_model": "TEXT"})
     SessionLocal = sessionmaker(bind=engine)
     backfill_llm_job_result_snapshots(SessionLocal)
 

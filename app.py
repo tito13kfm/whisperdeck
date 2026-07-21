@@ -1352,8 +1352,10 @@ async def enroll_speaker_from_transcript(
             profile_created_here = True
         permanent_path = VOICES_DIR / f"clip_{profile.id}_{utcnow_naive().strftime('%Y%m%d_%H%M%S%f')}.wav"
         shutil.copyfile(sample_path, permanent_path)
+        user_settings = get_user_settings(db, current_user.id)
         clip = voice_id_service.add_clip(db, profile.id, current_user.id, str(permanent_path),
-                                          source_transcript_id=t.id)
+                                          source_transcript_id=t.id,
+                                          hf_token=user_settings.get("hf_token"))
         db.refresh(profile)
         return {
             "id": profile.id,
@@ -1783,7 +1785,9 @@ async def enroll_voice(
         f.write(content)
 
     try:
-        profile = voice_id_service.enroll(db, current_user.id, name=name, audio_path=str(save_path), notes=notes)
+        user_settings = get_user_settings(db, current_user.id)
+        profile = voice_id_service.enroll(db, current_user.id, name=name, audio_path=str(save_path),
+                                           notes=notes, hf_token=user_settings.get("hf_token"))
         return {
             "id": profile.id,
             "name": profile.name,
@@ -1812,7 +1816,9 @@ async def identify_speaker(
         f.write(content)
 
     try:
-        matches = voice_id_service.identify(db, current_user.id, str(save_path), threshold=threshold)
+        user_settings = get_user_settings(db, current_user.id)
+        matches = voice_id_service.identify(db, current_user.id, str(save_path), threshold=threshold,
+                                             hf_token=user_settings.get("hf_token"))
         return {
             "matches": matches,
             "total_profiles": len(voice_id_service.list_profiles(db, current_user.id)),
@@ -1846,7 +1852,9 @@ async def add_voice_clip(
         f.write(await file.read())
 
     try:
-        clip = voice_id_service.add_clip(db, profile_id, current_user.id, str(save_path))
+        user_settings = get_user_settings(db, current_user.id)
+        clip = voice_id_service.add_clip(db, profile_id, current_user.id, str(save_path),
+                                          hf_token=user_settings.get("hf_token"))
         return {"id": clip.id, "voice_profile_id": clip.voice_profile_id,
                 "created_at": clip.created_at.isoformat() if clip.created_at else None}
     except ValueError as e:
