@@ -28,6 +28,7 @@ class VoiceIdentificationService:
         os.makedirs(voices_dir, exist_ok=True)
         self._backend = self._detect_backend()
         self._classifier = None  # cached speechbrain EncoderClassifier
+        self._pyannote_inference = None  # cached pyannote Inference wrapper
         self._last_backend_error = None
 
     def _detect_backend(self) -> str:
@@ -311,6 +312,32 @@ class VoiceIdentificationService:
             return embedding
         except Exception as e:
             self._last_backend_error = f"speechbrain: {e}"
+            return None
+
+    def _get_pyannote_inference(self, hf_token: Optional[str] = None):
+        if self._pyannote_inference is None:
+            from pyannote.audio import Model, Inference
+            model = Model.from_pretrained(
+                "pyannote/wespeaker-voxceleb-resnet34-LM",
+                token=hf_token or os.environ.get("HUGGINGFACE_TOKEN", None),
+            )
+            self._pyannote_inference = Inference(model, window="whole")
+        return self._pyannote_inference
+
+    def _embed_pyannote(self, audio_path: str, hf_token: Optional[str] = None) -> Optional[np.ndarray]:
+        try:
+            import torch
+            import soundfile as sf
+
+            inference = self._get_pyannote_inference(hf_token)
+            data, sample_rate = sf.read(audio_path, dtype="float32", always_2d=True)
+            waveform = torch.from_numpy(data.T)
+            if waveform.shape[1] > sample_rate * 30:
+                waveform = waveform[:, :sample_rate * 30]
+            embedding = inference({"waveform": waveform, "sample_rate": sample_rate})
+            return np.asarray(embedding).reshape(-1)
+        except Exception as e:
+            self._last_backend_error = f"pyannote: {e}"
             return None
 
     def _embed_mfcc(self, audio_path: str) -> Optional[np.ndarray]:

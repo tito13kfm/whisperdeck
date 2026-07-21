@@ -106,6 +106,89 @@ def test_detect_backend_skips_unimplemented_pyannote(tmp_path, monkeypatch):
     assert svc._backend != "pyannote"
 
 
+def test_embed_pyannote_caches_inference_across_calls(tmp_path, monkeypatch):
+    svc = VoiceIdentificationService(voices_dir=str(tmp_path / "voices"))
+    svc._backend = "pyannote"
+
+    calls = {"instantiated": 0}
+
+    class FakeInference:
+        def __init__(self, model, window):
+            calls["instantiated"] += 1
+            self.model = model
+            self.window = window
+
+        def __call__(self, audio_dict):
+            return np.array([1.0, 2.0, 3.0])
+
+    class FakeModel:
+        @staticmethod
+        def from_pretrained(name, token=None):
+            return FakeModel()
+
+    fake_pyannote_audio = types.SimpleNamespace(Model=FakeModel, Inference=FakeInference)
+    monkeypatch.setitem(sys.modules, "pyannote.audio", fake_pyannote_audio)
+
+    fake_torch = types.SimpleNamespace(from_numpy=lambda arr: arr)
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+
+    fake_data = np.array([[0.1], [0.2]])
+    fake_soundfile = types.SimpleNamespace(read=lambda path, dtype, always_2d: (fake_data, 16000))
+    monkeypatch.setitem(sys.modules, "soundfile", fake_soundfile)
+
+    svc._embed_pyannote("fake1.wav")
+    svc._embed_pyannote("fake2.wav")
+
+    assert calls["instantiated"] == 1
+
+
+def test_embed_pyannote_returns_flat_vector(tmp_path, monkeypatch):
+    svc = VoiceIdentificationService(voices_dir=str(tmp_path / "voices"))
+    svc._backend = "pyannote"
+
+    class FakeInference:
+        def __init__(self, model, window):
+            pass
+
+        def __call__(self, audio_dict):
+            return np.array([[1.0, 2.0, 3.0]])
+
+    class FakeModel:
+        @staticmethod
+        def from_pretrained(name, token=None):
+            return FakeModel()
+
+    monkeypatch.setitem(sys.modules, "pyannote.audio", types.SimpleNamespace(Model=FakeModel, Inference=FakeInference))
+    monkeypatch.setitem(sys.modules, "torch", types.SimpleNamespace(from_numpy=lambda arr: arr))
+    fake_data = np.array([[0.1], [0.2]])
+    monkeypatch.setitem(sys.modules, "soundfile", types.SimpleNamespace(read=lambda path, dtype, always_2d: (fake_data, 16000)))
+
+    result = svc._embed_pyannote("fake.wav")
+
+    assert result.shape == (3,)
+    assert np.array_equal(result, np.array([1.0, 2.0, 3.0]))
+
+
+def test_embed_pyannote_sets_last_backend_error_on_failure(tmp_path, monkeypatch):
+    svc = VoiceIdentificationService(voices_dir=str(tmp_path / "voices"))
+    svc._backend = "pyannote"
+
+    class FakeModel:
+        @staticmethod
+        def from_pretrained(name, token=None):
+            raise RuntimeError("401 Client Error: gated repo, accept license first")
+
+    monkeypatch.setitem(sys.modules, "pyannote.audio", types.SimpleNamespace(Model=FakeModel, Inference=object))
+    monkeypatch.setitem(sys.modules, "torch", types.SimpleNamespace(from_numpy=lambda arr: arr))
+    monkeypatch.setitem(sys.modules, "soundfile", types.SimpleNamespace(read=lambda path, dtype, always_2d: (np.array([[0.1]]), 16000)))
+
+    result = svc._embed_pyannote("fake.wav", hf_token="bad-token")
+
+    assert result is None
+    assert "pyannote" in svc._last_backend_error
+    assert "gated repo" in svc._last_backend_error
+
+
 def test_enroll_error_includes_underlying_reason_when_all_backends_fail(tmp_path, monkeypatch):
     svc = _svc(tmp_path)
     monkeypatch.setattr(svc, "_embed_speechbrain", lambda path: None)
