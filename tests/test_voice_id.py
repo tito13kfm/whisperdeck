@@ -463,3 +463,37 @@ def test_singleton_voices_dir_is_absolute_and_cwd_independent():
     whatever the process's current working directory happens to be."""
     assert os.path.isabs(voice_id_service.voices_dir)
     assert voice_id_service.voices_dir.replace("\\", "/").endswith("data/voices")
+
+
+def test_recompute_profile_embedding_derives_model_from_latest_clip(tmp_path, monkeypatch, db_session):
+    svc = VoiceIdentificationService(voices_dir=str(tmp_path / "voices"))
+    user = _test_user(db_session)
+    profile = _profile(db_session, user.id)
+
+    monkeypatch.setattr(svc, "_extract_embedding", lambda path, hf_token=None: (np.array([1.0, 2.0]), "speechbrain/spkrec-ecapa-voxceleb"))
+    clip_file = tmp_path / "c.wav"
+    clip_file.write_bytes(b"wav")
+    svc.add_clip(db_session, profile.id, user.id, str(clip_file))
+
+    db_session.refresh(profile)
+    assert profile.embedding_model == "speechbrain/spkrec-ecapa-voxceleb"
+
+
+def test_recompute_profile_embedding_keeps_existing_model_when_only_legacy_clips_remain(tmp_path, db_session):
+    svc = VoiceIdentificationService(voices_dir=str(tmp_path / "voices"))
+    user = _test_user(db_session)
+    profile = VoiceProfile(user_id=user.id, name="LegacyOnly", embedding=None,
+                            embedding_model="speechbrain/spkrec-ecapa-voxceleb", sample_count=0)
+    db_session.add(profile)
+    db_session.commit()
+
+    legacy_clip = VoiceClip(voice_profile_id=profile.id, audio_path="legacy.wav",
+                             embedding=[1.0, 2.0], embedding_model=None)
+    db_session.add(legacy_clip)
+    db_session.commit()
+
+    svc._recompute_profile_embedding(db_session, profile)
+
+    db_session.refresh(profile)
+    assert profile.embedding_model == "speechbrain/spkrec-ecapa-voxceleb"
+    assert profile.embedding == [1.0, 2.0]

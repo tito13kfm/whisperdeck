@@ -188,7 +188,9 @@ class VoiceIdentificationService:
             stacked = np.array([c.embedding for c in clips])
             profile.embedding = np.mean(stacked, axis=0).tolist()
             profile.sample_count = len(clips)
-        profile.embedding_model = self.backend_name
+            latest_model = next((c.embedding_model for c in reversed(clips) if c.embedding_model), None)
+            if latest_model:
+                profile.embedding_model = latest_model
         profile.updated_at = utcnow_naive()
         db.commit()
 
