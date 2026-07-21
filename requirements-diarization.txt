@@ -5,6 +5,13 @@
 # Install: pip install -r requirements.txt -r requirements-diarization.txt
 # Then set a HUGGINGFACE_TOKEN env var (see INSTALL.md).
 
+# This also unlocks the pyannote voice-ID embedding backend
+# (services/voice_id.py) — no separate pip package needed, it reuses
+# torch + pyannote.audio pinned below. Note: the voice-ID model
+# (pyannote/wespeaker-voxceleb-resnet34-LM) is a SEPARATELY gated HF repo
+# from the diarization model (pyannote/speaker-diarization-3.1) — accepting
+# one model's license on huggingface.co does not grant access to the other.
+
 # CPU-only PyTorch. If you have an NVIDIA GPU, install a CUDA build instead:
 #   pip install torch --index-url https://download.pytorch.org/whl/cu121
 # AMD GPUs (e.g. RDNA/RDNA4 cards): PyTorch has no ROCm build for Windows,
