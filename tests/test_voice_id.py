@@ -520,6 +520,28 @@ def test_singleton_voices_dir_is_absolute_and_cwd_independent():
     assert voice_id_service.voices_dir.replace("\\", "/").endswith("data/voices")
 
 
+def test_enroll_route_passes_hf_token_from_user_settings(client, db_session, tmp_path, monkeypatch):
+    from services.settings import get_user_settings
+    user = _test_user(db_session)
+
+    captured = {}
+
+    def fake_enroll(db, user_id, name, audio_path, notes="", hf_token=None):
+        captured["hf_token"] = hf_token
+        return VoiceProfile(id=1, user_id=user_id, name=name, embedding=[1.0], sample_count=1, notes=notes)
+
+    monkeypatch.setattr("app.voice_id_service.enroll", fake_enroll)
+    monkeypatch.setattr("app.get_user_settings", lambda db, uid: {"hf_token": "test-token-123"})
+
+    r = client.post(
+        "/api/voices/enroll",
+        data={"name": "Carol"},
+        files={"file": ("voice.wav", io.BytesIO(b"wav bytes"), "audio/wav")},
+    )
+    assert r.status_code == 200
+    assert captured["hf_token"] == "test-token-123"
+
+
 def test_recompute_profile_embedding_derives_model_from_latest_clip(tmp_path, monkeypatch, db_session):
     svc = VoiceIdentificationService(voices_dir=str(tmp_path / "voices"))
     user = _test_user(db_session)

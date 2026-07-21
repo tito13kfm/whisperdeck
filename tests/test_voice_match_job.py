@@ -99,7 +99,7 @@ def test_voice_match_runs_real_identify_through_executor(db_session, tmp_path, m
     async def fake_extract(audio_path, clips, output_dir):
         return str(tmp_path / "clip.wav")
 
-    monkeypatch.setattr(voice_id_service, "_extract_embedding", lambda path: np.array([0.1, 0.2, 0.3]))
+    monkeypatch.setattr(voice_id_service, "_extract_embedding", lambda path, hf_token=None: (np.array([0.1, 0.2, 0.3]), "test"))
 
     factory = lambda: _NoCloseSession(db_session)
     with patch("services.llm_jobs.extract_clips_concat", fake_extract):

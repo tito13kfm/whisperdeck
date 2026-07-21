@@ -203,7 +203,7 @@ def test_enroll_speaker_appends_clip_to_existing_profile_without_overwriting(cli
     fake_extract = AsyncMock(return_value=str(sample))
 
     with patch("app.extract_clips_concat", fake_extract), \
-         patch("app.voice_id_service._extract_embedding", return_value=__import__("numpy").array([1.0, 3.0])):
+         patch("app.voice_id_service._extract_embedding", return_value=(__import__("numpy").array([1.0, 3.0]), "MFCC fingerprint (librosa)")):
         r = client.post(f"/api/transcripts/{t.id}/enroll-speaker",
                         json={"name": "Alice", "clips": [{"start": 0.0, "end": 2.0}]})
     assert r.status_code == 200
