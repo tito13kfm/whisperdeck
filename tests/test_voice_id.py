@@ -574,3 +574,81 @@ def test_recompute_profile_embedding_keeps_existing_model_when_only_legacy_clips
     db_session.refresh(profile)
     assert profile.embedding_model == "speechbrain/spkrec-ecapa-voxceleb"
     assert profile.embedding == [1.0, 2.0]
+
+
+def test_enroll_rejects_cross_model_clip_on_existing_profile(tmp_path, monkeypatch, db_session):
+    """enroll() on an existing profile name must apply the same cross-model
+    guard as add_clip — otherwise re-enrolling after a backend switch commits
+    a mixed-dimension clip set and poisons every later recompute."""
+    svc = VoiceIdentificationService(voices_dir=str(tmp_path / "voices"))
+    user = _test_user(db_session)
+
+    monkeypatch.setattr(svc, "_extract_embedding", lambda path, hf_token=None: (np.array([1.0, 2.0]), "speechbrain/spkrec-ecapa-voxceleb"))
+    sample1 = tmp_path / "s1.wav"
+    sample1.write_bytes(b"wav")
+    profile = svc.enroll(db_session, user.id, name="Alice", audio_path=str(sample1))
+
+    monkeypatch.setattr(svc, "_extract_embedding", lambda path, hf_token=None: (np.array([1.0, 2.0, 3.0]), "pyannote/wespeaker-voxceleb-resnet34-LM"))
+    sample2 = tmp_path / "s2.wav"
+    sample2.write_bytes(b"wav")
+
+    with pytest.raises(ValueError) as exc_info:
+        svc.enroll(db_session, user.id, name="Alice", audio_path=str(sample2))
+
+    assert "speechbrain/spkrec-ecapa-voxceleb" in str(exc_info.value)
+    clips = db_session.query(VoiceClip).filter(VoiceClip.voice_profile_id == profile.id).all()
+    assert len(clips) == 1  # the rejected clip must not be committed
+
+
+def test_add_clip_rejects_dim_mismatch_with_legacy_null_model_clip(tmp_path, monkeypatch, db_session):
+    """Legacy NULL-model clips are exempt from the model-name guard, but a
+    dimension mismatch still makes the mean-embedding stack ragged — reject
+    before committing rather than crash in recompute afterwards."""
+    svc = VoiceIdentificationService(voices_dir=str(tmp_path / "voices"))
+    user = _test_user(db_session)
+    profile = _profile(db_session, user.id)
+
+    legacy_clip = VoiceClip(voice_profile_id=profile.id, audio_path="legacy.wav",
+                             embedding=[1.0, 2.0], embedding_model=None)
+    db_session.add(legacy_clip)
+    db_session.commit()
+
+    monkeypatch.setattr(svc, "_extract_embedding", lambda path, hf_token=None: (np.array([3.0, 4.0, 5.0]), "pyannote/wespeaker-voxceleb-resnet34-LM"))
+    clip_file = tmp_path / "new.wav"
+    clip_file.write_bytes(b"wav")
+
+    with pytest.raises(ValueError) as exc_info:
+        svc.add_clip(db_session, profile.id, user.id, str(clip_file))
+
+    assert "dimension" in str(exc_info.value).lower()
+    clips = db_session.query(VoiceClip).filter(VoiceClip.voice_profile_id == profile.id).all()
+    assert len(clips) == 1
+
+
+def test_embed_pyannote_downmixes_stereo_to_mono(tmp_path, monkeypatch):
+    svc = VoiceIdentificationService(voices_dir=str(tmp_path / "voices"))
+    svc._backend = "pyannote"
+    seen = {}
+
+    class FakeInference:
+        def __init__(self, model, window):
+            pass
+
+        def __call__(self, audio_dict):
+            seen["shape"] = audio_dict["waveform"].shape
+            return np.array([1.0, 2.0, 3.0])
+
+    class FakeModel:
+        @staticmethod
+        def from_pretrained(name, token=None):
+            return FakeModel()
+
+    monkeypatch.setitem(sys.modules, "pyannote.audio", types.SimpleNamespace(Model=FakeModel, Inference=FakeInference))
+    monkeypatch.setitem(sys.modules, "torch", types.SimpleNamespace(from_numpy=lambda arr: arr))
+    stereo = np.array([[0.1, 0.3], [0.2, 0.4], [0.3, 0.5]])  # (3 samples, 2 channels)
+    monkeypatch.setitem(sys.modules, "soundfile", types.SimpleNamespace(read=lambda path, dtype, always_2d: (stereo, 16000)))
+
+    result = svc._embed_pyannote("stereo.wav")
+
+    assert result is not None
+    assert seen["shape"] == (1, 3)

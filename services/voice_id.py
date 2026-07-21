@@ -98,6 +98,7 @@ class VoiceIdentificationService:
             profile.notes = notes
             db.commit()
 
+        self._ensure_clip_compatible(db, profile, embedding, model_id)
         self._persist_clip(db, profile, audio_path, embedding, model_id)
         db.refresh(profile)
         return profile
@@ -126,6 +127,14 @@ class VoiceIdentificationService:
             )
         embedding, model_id = result
 
+        self._ensure_clip_compatible(db, profile, embedding, model_id)
+
+        return self._persist_clip(db, profile, audio_path, embedding, model_id, source_transcript_id)
+
+    def _ensure_clip_compatible(self, db, profile: VoiceProfile, embedding, model_id: str) -> None:
+        """Shared by enroll() and add_clip(): refuse clips that can't be
+        averaged with the profile's existing ones — a different embedding
+        model, or (for legacy NULL-model rows) a different vector length."""
         existing_clips = db.query(VoiceClip).filter(VoiceClip.voice_profile_id == profile.id).all()
         mismatch = next((c for c in existing_clips if c.embedding_model and c.embedding_model != model_id), None)
         if mismatch:
@@ -135,8 +144,15 @@ class VoiceIdentificationService:
                 f"embedding models within one profile isn't supported — switch backends "
                 f"back, or enroll this speaker as a separate profile."
             )
-
-        return self._persist_clip(db, profile, audio_path, embedding, model_id, source_transcript_id)
+        emb_len = len(embedding)
+        dim_mismatch = next((c for c in existing_clips if c.embedding and len(c.embedding) != emb_len), None)
+        if dim_mismatch:
+            raise ValueError(
+                f"This clip's embedding has {emb_len} dimensions, but profile '{profile.name}' "
+                f"already has a clip with {len(dim_mismatch.embedding)} dimensions — likely "
+                f"extracted by a different backend before embedding models were tracked. "
+                f"Remove the profile's older clips or enroll this speaker as a separate profile."
+            )
 
     def _persist_clip(
         self,
@@ -341,6 +357,10 @@ class VoiceIdentificationService:
             inference = self._get_pyannote_inference(hf_token)
             data, sample_rate = sf.read(audio_path, dtype="float32", always_2d=True)
             waveform = torch.from_numpy(data.T)
+            if waveform.shape[0] > 1:
+                # embedding models expect mono — downmix rather than erroring
+                # out and silently falling back to MFCC
+                waveform = waveform.mean(0).reshape(1, -1)
             if waveform.shape[1] > sample_rate * 30:
                 waveform = waveform[:, :sample_rate * 30]
             embedding = inference({"waveform": waveform, "sample_rate": sample_rate})

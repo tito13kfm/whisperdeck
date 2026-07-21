@@ -351,3 +351,28 @@ def test_extract_clips_concat_durations(tmp_path):
         assert leftovers == []
     finally:
         os.remove(out)
+
+
+def test_enroll_speaker_route_passes_hf_token_to_add_clip(client, db_session, tmp_path):
+    """The transcript-seed enrollment path must thread the user's hf_token
+    just like the direct voice routes — otherwise pyannote users with a
+    settings-only token silently get MFCC clips from this flow."""
+    t = _transcript(db_session, tmp_path)
+    sample = tmp_path / "seed.wav"
+    sample.write_bytes(b"wav")
+
+    captured = {}
+
+    def fake_add_clip(db, profile_id, user_id, audio_path, source_transcript_id=None, hf_token=None):
+        captured["hf_token"] = hf_token
+        from database import VoiceClip
+        return VoiceClip(id=1, voice_profile_id=profile_id)
+
+    with patch("app.extract_clips_concat", AsyncMock(return_value=str(sample))), \
+         patch("app.voice_id_service.add_clip", fake_add_clip), \
+         patch("app.get_user_settings", lambda db, uid: {"hf_token": "settings-token-9"}):
+        r = client.post(f"/api/transcripts/{t.id}/enroll-speaker",
+                        json={"name": "Alice", "clips": [{"start": 0.0, "end": 2.0}]})
+
+    assert r.status_code == 200
+    assert captured["hf_token"] == "settings-token-9"

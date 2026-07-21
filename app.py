@@ -1352,8 +1352,10 @@ async def enroll_speaker_from_transcript(
             profile_created_here = True
         permanent_path = VOICES_DIR / f"clip_{profile.id}_{utcnow_naive().strftime('%Y%m%d_%H%M%S%f')}.wav"
         shutil.copyfile(sample_path, permanent_path)
+        user_settings = get_user_settings(db, current_user.id)
         clip = voice_id_service.add_clip(db, profile.id, current_user.id, str(permanent_path),
-                                          source_transcript_id=t.id)
+                                          source_transcript_id=t.id,
+                                          hf_token=user_settings.get("hf_token"))
         db.refresh(profile)
         return {
             "id": profile.id,
