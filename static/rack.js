@@ -179,20 +179,54 @@ function toast(msg, type = 'ok') {
   setTimeout(() => el.remove(), 4200);
 }
 
+let inFlightCount = 0;
+
+function setInFlight(n) {
+  inFlightCount += n;
+  const led = document.getElementById('net-led');
+  if (led) led.classList.toggle('on', inFlightCount > 0);
+}
+
 async function api(path, opts = {}) {
   const method = (opts.method || 'GET').toUpperCase();
   const isMutation = ['POST', 'PUT', 'PATCH', 'DELETE'].includes(method);
   const headers = { ...(opts.headers || {}) };
   if (isMutation && csrfToken) headers['X-CSRF-Token'] = csrfToken;
-  const res = await fetch(path, { credentials: 'same-origin', ...opts, headers });
-  if (res.status === 401) { showLogin(); throw new Error('Not signed in'); }
-  let data = null;
-  try { data = await res.json(); } catch { /* non-JSON */ }
-  if (!res.ok) {
-    const detail = data && (data.detail || data.error) ? (data.detail || data.error) : ('HTTP ' + res.status);
-    throw new Error(typeof detail === 'string' ? detail : JSON.stringify(detail));
+  setInFlight(1);
+  try {
+    const res = await fetch(path, { credentials: 'same-origin', ...opts, headers });
+    if (res.status === 401) { showLogin(); throw new Error('Not signed in'); }
+    let data = null;
+    try { data = await res.json(); } catch { /* non-JSON */ }
+    if (!res.ok) {
+      const detail = data && (data.detail || data.error) ? (data.detail || data.error) : ('HTTP ' + res.status);
+      throw new Error(typeof detail === 'string' ? detail : JSON.stringify(detail));
+    }
+    return data;
+  } finally {
+    setInFlight(-1);
   }
-  return data;
+}
+
+// Disables `el` synchronously (re-entrancy guard) for the duration of `fn`.
+// `el` must be the element resolved at click time (e.currentTarget / e.target.closest(...)),
+// not a reference captured at bind time, so this works under event delegation too.
+async function withBusy(el, fn, opts = {}) {
+  // No element to guard (a caller forgot to pass one) — still run the action
+  // rather than silently no-op; just skip the busy-state chrome.
+  if (!el) return fn();
+  if (el.disabled) return;
+  const prevText = opts.busyText ? el.textContent : null;
+  el.disabled = true;
+  if (opts.busyText) el.textContent = opts.busyText;
+  if (opts.spinner) el.classList.add('is-busy');
+  try {
+    return await fn();
+  } finally {
+    el.disabled = false;
+    el.classList.remove('is-busy');
+    if (opts.busyText) el.textContent = prevText;
+  }
 }
 
 /* ══════════════════ component render helpers ══════════════════ */
@@ -463,8 +497,9 @@ async function showGenerateResetCode() {
       $('fp-token-text').textContent = r.reset_token;
     } catch (e) { toast(e.message, 'error'); }
   };
-  $('fp-generate').addEventListener('click', doGenerate);
-  $('fp-username').addEventListener('keydown', (e) => { if (e.key === 'Enter') doGenerate(); });
+  const guardedGenerate = () => withBusy($('fp-generate'), doGenerate);
+  $('fp-generate').addEventListener('click', guardedGenerate);
+  $('fp-username').addEventListener('keydown', (e) => { if (e.key === 'Enter') guardedGenerate(); });
 }
 
 async function showResetCode() {
@@ -496,8 +531,9 @@ async function showResetCode() {
       await checkAuth();
     } catch (e) { toast(e.message, 'error'); }
   };
-  $('rc-submit').addEventListener('click', doReset);
-  $('rc-password').addEventListener('keydown', (e) => { if (e.key === 'Enter') doReset(); });
+  const guardedReset = () => withBusy($('rc-submit'), doReset);
+  $('rc-submit').addEventListener('click', guardedReset);
+  $('rc-password').addEventListener('keydown', (e) => { if (e.key === 'Enter') guardedReset(); });
   $('rc-token').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('rc-password').focus(); });
 }
 
@@ -506,18 +542,20 @@ async function submitAuth(ev) {
   const username = $('auth-user').value.trim();
   const password = $('auth-pass').value;
   if (!username || !password) { toast('Operator and password required', 'error'); return; }
-  try {
-    await api('/api/' + S.authMode /* api-paths: /api/login /api/register */, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username, password }),
-    });
-    $('auth-led').classList.add('ok');
-    await refreshCsrfToken();
-    await checkAuth();
-  } catch (e) {
-    toast(e.message, 'error');
-  }
+  return withBusy($('auth-submit'), async () => {
+    try {
+      await api('/api/' + S.authMode /* api-paths: /api/login /api/register */, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username, password }),
+      });
+      $('auth-led').classList.add('ok');
+      await refreshCsrfToken();
+      await checkAuth();
+    } catch (e) {
+      toast(e.message, 'error');
+    }
+  }, { spinner: true });
 }
 
 async function logout() {
@@ -1017,8 +1055,8 @@ function wireTranscribe() {
     if (S.doneId) navigate('detail', S.doneId);
   });
   $('tx-start').addEventListener('click', startJob);
-  $('tx-cancel').addEventListener('click', cancelJob);
-  $('ctl-provider').addEventListener('click', async () => {
+  $('tx-cancel').addEventListener('click', (e) => withBusy(e.currentTarget, cancelJob));
+  $('ctl-provider').addEventListener('click', (e) => withBusy(e.currentTarget, async () => {
     if (S.running) return;
     S.providerIdx = (S.providerIdx + 1) % S.providers.length;
     S.modelIdx = 0;
@@ -1028,7 +1066,7 @@ function wireTranscribe() {
     if (curProv().id === 'moonshine') S.langIdx = 0;
     await fetchModelsFor(S.providerIdx);
     syncTranscribe();
-  });
+  }));
   $('ctl-model').addEventListener('click', () => {
     if (S.running) return;
     S.modelIdx = (S.modelIdx + 1) % curProv().models.length;
@@ -1400,6 +1438,7 @@ function analyserLevel(an) {
 
 async function startLiveCapture() {
   if (S.capturing || S.running) return;
+  toast('Requesting microphone…', 'info');
   let mic;
   try {
     mic = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -1572,34 +1611,36 @@ async function loadTranscripts() {
   // Delegated on the stable `root` node (not per-row) so it keeps working
   // after renderBankRows() replaces #bank-rows' contents. Assignment (not
   // addEventListener) so it doesn't stack a duplicate handler on every poll.
-  root.onclick = async (e) => {
+  root.onclick = (e) => {
     const b = e.target.closest('[data-act]');
     if (!b) return;
     e.preventDefault();
     const id = Number(b.dataset.id), act = b.dataset.act;
-    try {
-      if (act === 'open') { navigate('detail', id); return; }
-      if (act === 'cancel') { await api('/api/transcripts/' + id + '/cancel', { method: 'POST' }); toast('Cancelled — resumable later', 'info'); }
-      if (act === 'resume') { const r = await api('/api/transcripts/' + id + '/resume', { method: 'POST' }); toast('Resumed ' + r.resumed + ' sections', 'info'); }
-      if (act === 'retry') { const r = await api('/api/transcripts/' + id + '/retry-failed-chunks', { method: 'POST' }); toast('Retrying ' + r.retried + ' sections', 'info'); }
-      if (act === 'rename') {
-        const row = bankListCache.find(x => x.id === id);
-        const name = await styledPrompt('Rename this transcript:', row ? (row.title || row.filename) : '');
-        if (name === null || !name.trim()) return;
-        const updated = await api('/api/transcripts/' + id, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title: name.trim() }) });
-        const idx = bankListCache.findIndex(x => x.id === id);
-        if (idx >= 0) bankListCache[idx] = updated;
-        renderBankRows();
-        toast('Renamed', 'info');
-        return;
-      }
-      if (act === 'delete') {
-        if (!(await styledConfirm('Delete this transcript permanently?'))) return;
-        await api('/api/transcripts/' + id, { method: 'DELETE' });
-        toast('Transcript deleted');
-      }
-      loadTranscripts();
-    } catch (err) { toast(err.message, 'error'); }
+    if (act === 'open') { navigate('detail', id); return; }
+    withBusy(b, async () => {
+      try {
+        if (act === 'cancel') { await api('/api/transcripts/' + id + '/cancel', { method: 'POST' }); toast('Cancelled — resumable later', 'info'); }
+        if (act === 'resume') { const r = await api('/api/transcripts/' + id + '/resume', { method: 'POST' }); toast('Resumed ' + r.resumed + ' sections', 'info'); }
+        if (act === 'retry') { const r = await api('/api/transcripts/' + id + '/retry-failed-chunks', { method: 'POST' }); toast('Retrying ' + r.retried + ' sections', 'info'); }
+        if (act === 'rename') {
+          const row = bankListCache.find(x => x.id === id);
+          const name = await styledPrompt('Rename this transcript:', row ? (row.title || row.filename) : '');
+          if (name === null || !name.trim()) return;
+          const updated = await api('/api/transcripts/' + id, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title: name.trim() }) });
+          const idx = bankListCache.findIndex(x => x.id === id);
+          if (idx >= 0) bankListCache[idx] = updated;
+          renderBankRows();
+          toast('Renamed', 'info');
+          return;
+        }
+        if (act === 'delete') {
+          if (!(await styledConfirm('Delete this transcript permanently?'))) return;
+          await api('/api/transcripts/' + id, { method: 'DELETE' });
+          toast('Transcript deleted');
+        }
+        loadTranscripts();
+      } catch (err) { toast(err.message, 'error'); }
+    });
   };
 
   clearTimeout(bankPollTimer);
@@ -1762,20 +1803,22 @@ async function loadQueue() {
     </div>
     ${jobs.length ? rows : '<div class="empty-unit">Queue idle — jobs appear here when the machine is working</div>'}`;
 
-  root.querySelectorAll('[data-jact]').forEach(b => b.addEventListener('click', async (e) => {
+  root.querySelectorAll('[data-jact]').forEach(b => b.addEventListener('click', (e) => {
     e.preventDefault();
     const act = b.dataset.jact, jid = b.dataset.jid, tid = Number(b.dataset.tid);
-    try {
-      if (act === 'open') { navigate('detail', tid); return; }
-      if (act === 'j-cancel') { await api('/api/jobs/' + jid + '/cancel', { method: 'POST' }); toast('Job cancelled', 'info'); }
-      if (act === 'j-rerun') { await api('/api/jobs/' + jid + '/rerun', { method: 'POST' }); toast('Job requeued', 'info'); }
-      if (act === 't-cancel') { await api('/api/transcripts/' + tid + '/cancel', { method: 'POST' }); toast('Cancelled — resumable later', 'info'); }
-      if (act === 't-resume') { const r = await api('/api/transcripts/' + tid + '/resume', { method: 'POST' }); toast('Resumed ' + r.resumed + ' sections', 'info'); }
-      if (act === 't-retry') { const r = await api('/api/transcripts/' + tid + '/retry-failed-chunks', { method: 'POST' }); toast('Retrying ' + r.retried + ' sections', 'info'); }
-      if (act === 'j-dismiss') { await api('/api/jobs/' + jid + '/dismiss', { method: 'POST' }); toast('Cleared', 'info'); }
-      if (act === 'clear-finished') { const r = await api('/api/jobs/clear', { method: 'POST' }); toast('Cleared ' + r.cleared + ' finished job(s)', 'info'); }
-      loadQueue();
-    } catch (err) { toast(err.message, 'error'); }
+    if (act === 'open') { navigate('detail', tid); return; }
+    withBusy(b, async () => {
+      try {
+        if (act === 'j-cancel') { await api('/api/jobs/' + jid + '/cancel', { method: 'POST' }); toast('Job cancelled', 'info'); }
+        if (act === 'j-rerun') { await api('/api/jobs/' + jid + '/rerun', { method: 'POST' }); toast('Job requeued', 'info'); }
+        if (act === 't-cancel') { await api('/api/transcripts/' + tid + '/cancel', { method: 'POST' }); toast('Cancelled — resumable later', 'info'); }
+        if (act === 't-resume') { const r = await api('/api/transcripts/' + tid + '/resume', { method: 'POST' }); toast('Resumed ' + r.resumed + ' sections', 'info'); }
+        if (act === 't-retry') { const r = await api('/api/transcripts/' + tid + '/retry-failed-chunks', { method: 'POST' }); toast('Retrying ' + r.retried + ' sections', 'info'); }
+        if (act === 'j-dismiss') { await api('/api/jobs/' + jid + '/dismiss', { method: 'POST' }); toast('Cleared', 'info'); }
+        if (act === 'clear-finished') { const r = await api('/api/jobs/clear', { method: 'POST' }); toast('Cleared ' + r.cleared + ' finished job(s)', 'info'); }
+        loadQueue();
+      } catch (err) { toast(err.message, 'error'); }
+    });
   }));
 
   clearTimeout(queuePollTimer);
@@ -2033,7 +2076,7 @@ async function openEnrollMarkedModal() {
       <button id="enroll-marked-go" class="btn btn--amber btn--sm">Enroll</button>
     </div>`);
   $('enroll-marked-cancel').addEventListener('click', closeModal);
-  $('enroll-marked-go').addEventListener('click', async () => {
+  $('enroll-marked-go').addEventListener('click', (e) => withBusy(e.currentTarget, async () => {
     const sp = $('enroll-marked-speaker').value;
     const existing = $('enroll-marked-existing').value;
     const newName = $('enroll-marked-new').value.trim();
@@ -2051,7 +2094,7 @@ async function openEnrollMarkedModal() {
       renderDetailBody();
       syncEnrollMarkedBtn();
     } catch (e) { toast(e.message, 'error'); }
-  });
+  }));
 }
 
 async function openRetagModal() {
@@ -2075,7 +2118,7 @@ async function openRetagModal() {
       <button id="retag-go" class="btn btn--amber btn--sm">Re-tag</button>
     </div>`);
   $('retag-cancel').addEventListener('click', closeModal);
-  $('retag-go').addEventListener('click', async () => {
+  $('retag-go').addEventListener('click', (e) => withBusy(e.currentTarget, async () => {
     const existing = $('retag-existing').value;
     const newName = $('retag-new').value.trim();
     const name = existing || newName;
@@ -2091,7 +2134,7 @@ async function openRetagModal() {
       closeModal();
       await loadTranscriptDetail(detailData.id, { preserveQuery: true });
     } catch (e) { toast(e.message, 'error'); }
-  });
+  }));
 }
 
 function llmJobActive(job) {
@@ -2457,7 +2500,7 @@ function renderDetail() {
   });
   const retagBtn = $('retag-selected-btn');
   if (retagBtn) retagBtn.addEventListener('click', openRetagModal);
-  root.querySelectorAll('[data-dact]').forEach(b => b.addEventListener('click', () => detailAction(b.dataset.dact)));
+  root.querySelectorAll('[data-dact]').forEach(b => b.addEventListener('click', () => detailAction(b.dataset.dact, b)));
   // Delegated: segment rows re-render on search/poll, the container doesn't.
   $('detail-body').addEventListener('click', detailBodyClick);
 }
@@ -2479,7 +2522,7 @@ async function renderDetailBody() {
       } catch { /* roster fetch failing is non-fatal — just skip the nudge */ }
     }
     body.innerHTML = vm + nudge + exportToolbarHtml('transcript') + '<div class="unit" style="border-radius:3px;margin-top:' + (vm || nudge ? '10px' : '0') + ';padding:6px 32px">' + segmentsHtml(t) + '</div>';
-    body.querySelectorAll('[data-dact]').forEach(b => b.addEventListener('click', () => detailAction(b.dataset.dact)));
+    body.querySelectorAll('[data-dact]').forEach(b => b.addEventListener('click', () => detailAction(b.dataset.dact, b)));
   } else if (S.detailTab === 'corrected') {
     body.innerHTML = (t.corrected_text ? exportToolbarHtml('corrected') : '') + correctedHtml(t);
   } else {
@@ -2488,9 +2531,11 @@ async function renderDetailBody() {
   }
 }
 
-async function detailAction(act) {
+async function detailAction(act, btn) {
   const t = detailData;
   if (!t) return;
+  const opts = act === 'summarize' ? { spinner: true } : {};
+  return withBusy(btn, async () => {
   try {
     if (act === 'delete') {
       if (!(await styledConfirm('Delete this transcript permanently?'))) return;
@@ -2610,6 +2655,7 @@ async function detailAction(act) {
       return;
     }
   } catch (e) { toast(e.message, 'error'); }
+  }, opts);
 }
 
 const LLM_PROVIDERS = [
@@ -2674,7 +2720,7 @@ async function toggleRerunPicker() {
   await fillModelPicker('rerun-model', 'rerun-model-text', prov, settings.correction_model);
   $('rerun-provider').addEventListener('change', () =>
     fillModelPicker('rerun-model', 'rerun-model-text', $('rerun-provider').value, ''));
-  $('rerun-go').addEventListener('click', rerunCorrection);
+  $('rerun-go').addEventListener('click', (e) => withBusy(e.currentTarget, rerunCorrection));
 }
 
 async function rerunCorrection() {
@@ -2726,7 +2772,7 @@ async function toggleRetranscribePicker() {
   };
   await fillModels();
   $('retx-provider').addEventListener('change', fillModels);
-  $('retx-go').addEventListener('click', async () => {
+  $('retx-go').addEventListener('click', (e) => withBusy(e.currentTarget, async () => {
     const t = detailData;
     const fd = new FormData();
     fd.append('provider', $('retx-provider').value);
@@ -2738,7 +2784,7 @@ async function toggleRetranscribePicker() {
       refreshQueueBadge();
       await loadTranscriptDetail(nt.id);
     } catch (e) { toast(e.message, 'error'); }
-  });
+  }));
 }
 
 async function toggleRediarizePicker() {
@@ -2753,7 +2799,7 @@ async function toggleRediarizePicker() {
       <button id="rediar-go" class="btn btn--amber" style="font-size:12px;padding:7px 14px">Run</button>
       <span style="font-size:11px;color:var(--label-dim)">Updates speaker labels in place; re-run correction afterwards if you use the corrected text.</span>
     </div>`;
-  $('rediar-go').addEventListener('click', async () => {
+  $('rediar-go').addEventListener('click', (e) => withBusy(e.currentTarget, async () => {
     const t = detailData;
     const fd = new FormData();
     const n = $('rediar-speakers').value.trim();
@@ -2765,7 +2811,7 @@ async function toggleRediarizePicker() {
       refreshQueueBadge();
       await loadTranscriptDetail(t.id);
     } catch (e) { toast(e.message, 'error'); }
-  });
+  }));
 }
 
 async function runVoiceMatch() {
@@ -2789,7 +2835,7 @@ async function toggleContextPicker() {
                 placeholder="Paste the agenda or jargon-heavy notes — names and terms get added to your term glossary."></textarea>
       <button id="ctx-go" class="btn btn--amber" style="font-size:12px;padding:7px 14px">Extract terms</button>
     </div>`;
-  $('ctx-go').addEventListener('click', async () => {
+  $('ctx-go').addEventListener('click', (e) => withBusy(e.currentTarget, async () => {
     const t = detailData;
     const doc = $('ctx-doc').value.trim();
     if (!doc) { toast('Paste some context first', 'error'); return; }
@@ -2803,7 +2849,7 @@ async function toggleContextPicker() {
       // Applying the new terms takes a correction re-run — open that picker.
       if (n && $('rerun-picker').style.display === 'none') toggleRerunPicker();
     } catch (e) { toast(e.message, 'error'); }
-  });
+  }));
 }
 
 /* ══════════════════ voice roster ══════════════════ */
@@ -2857,14 +2903,16 @@ async function loadVoices() {
   $('nav-badge-voices').textContent = String(voices.length).padStart(2, '0');
   $('voice-enroll-btn').addEventListener('click', openEnrollModal);
   $('voice-identify-btn').addEventListener('click', openIdentifyModal);
-  root.querySelectorAll('[data-vdel]').forEach(b => b.addEventListener('click', async (e) => {
+  root.querySelectorAll('[data-vdel]').forEach(b => b.addEventListener('click', (e) => {
     e.stopPropagation();
-    if (!(await styledConfirm('Remove this voice profile from the roster?'))) return;
-    try {
-      await api('/api/voices/' + b.dataset.vdel, { method: 'DELETE' });
-      toast('Profile removed');
-      loadVoices();
-    } catch (e) { toast(e.message, 'error'); }
+    withBusy(b, async () => {
+      if (!(await styledConfirm('Remove this voice profile from the roster?'))) return;
+      try {
+        await api('/api/voices/' + b.dataset.vdel, { method: 'DELETE' });
+        toast('Profile removed');
+        loadVoices();
+      } catch (e) { toast(e.message, 'error'); }
+    });
   }));
   root.querySelectorAll('[data-voice-toggle]').forEach(el => el.addEventListener('click', () => {
     const id = Number(el.dataset.voiceToggle);
@@ -2876,14 +2924,14 @@ async function loadVoices() {
     clipAudio = new Audio('/api/voices/' + btn.dataset.vid + '/clips/' + btn.dataset.clipPlay + '/audio');
     clipAudio.play().catch(err => toast(err.message, 'error'));
   }));
-  root.querySelectorAll('[data-clip-del]').forEach(btn => btn.addEventListener('click', async () => {
+  root.querySelectorAll('[data-clip-del]').forEach(btn => btn.addEventListener('click', () => withBusy(btn, async () => {
     if (!(await styledConfirm('Remove this clip?'))) return;
     try {
       await api('/api/voices/' + btn.dataset.vid + '/clips/' + btn.dataset.clipDel, { method: 'DELETE' });
       toast('Clip removed');
       loadVoices();
     } catch (e) { toast(e.message, 'error'); }
-  }));
+  })));
   root.querySelectorAll('[data-add-clip]').forEach(btn => btn.addEventListener('click', () => openAddClipModal(Number(btn.dataset.addClip))));
 }
 
@@ -2922,7 +2970,7 @@ function openEnrollModal() {
     });
     inp.click();
   });
-  $('enroll-go').addEventListener('click', async () => {
+  $('enroll-go').addEventListener('click', (e) => withBusy(e.currentTarget, async () => {
     const name = $('enroll-name').value.trim();
     if (!name) { toast('Speaker name required', 'error'); return; }
     if (!enrollFile) { toast('Choose a voice sample first', 'error'); return; }
@@ -2936,7 +2984,7 @@ function openEnrollModal() {
       closeModal();
       loadVoices();
     } catch (e) { toast(e.message, 'error'); }
-  });
+  }, { spinner: true }));
 }
 
 let addClipFile = null;
@@ -2963,7 +3011,7 @@ function openAddClipModal(profileId) {
     });
     inp.click();
   });
-  $('add-clip-go').addEventListener('click', async () => {
+  $('add-clip-go').addEventListener('click', (e) => withBusy(e.currentTarget, async () => {
     if (!addClipFile) { toast('Choose a voice sample first', 'error'); return; }
     const fd = new FormData();
     fd.append('file', addClipFile);
@@ -2973,7 +3021,7 @@ function openAddClipModal(profileId) {
       closeModal();
       loadVoices();
     } catch (e) { toast(e.message, 'error'); }
-  });
+  }));
 }
 
 let identifyFile = null, identifyThreshold = '65';
@@ -3003,7 +3051,7 @@ function openIdentifyModal() {
     });
     inp.click();
   });
-  $('identify-go').addEventListener('click', runIdentify);
+  $('identify-go').addEventListener('click', (e) => withBusy(e.currentTarget, runIdentify, { spinner: true }));
 }
 
 function renderThresholds() {
@@ -3216,7 +3264,7 @@ async function loadSettingsPage() {
     fillModelPicker('llm-corr-model', 'llm-corr-model-text', $('llm-corr-provider').value, ''));
   $('llm-sum-provider').addEventListener('change', () =>
     fillModelPicker('llm-sum-model', 'llm-sum-model-text', $('llm-sum-provider').value, ''));
-  $('llm-defaults-save').addEventListener('click', async () => {
+  $('llm-defaults-save').addEventListener('click', (e) => withBusy(e.currentTarget, async () => {
     const body = {
       correction_provider: $('llm-corr-provider').value,
       correction_model: llmPickerValue('llm-corr-model', 'llm-corr-model-text', $('llm-corr-provider').value),
@@ -3228,11 +3276,11 @@ async function loadSettingsPage() {
       await api('/api/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
       toast('Correction & summary defaults saved');
     } catch (e) { toast(e.message, 'error'); }
-  });
+  }));
 
   // credential jacks
   JACK_DEFS.forEach(j => {
-    $('jack-act-' + j.id).addEventListener('click', async () => {
+    $('jack-act-' + j.id).addEventListener('click', (e) => withBusy(e.currentTarget, async () => {
       const val = $('jack-input-' + j.id).value.trim();
       try {
         if (j.kind === 'hf') {
@@ -3262,11 +3310,11 @@ async function loadSettingsPage() {
         setJackLed(j.id, false);
         toast(j.name + ': ' + e.message, 'error');
       }
-    });
+    }, { spinner: true }));
     // Clear button for key-type jacks — confirmation then empty-string PUT
     const clearBtn = $('jack-clear-' + j.id);
     if (clearBtn) {
-      clearBtn.addEventListener('click', async () => {
+      clearBtn.addEventListener('click', (e) => withBusy(e.currentTarget, async () => {
         if (!(await styledConfirm('Clear the saved ' + j.name + ' API key? This cannot be undone.'))) return;
         try {
           await api('/api/providers/' + j.id, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ api_key: '' }) });
@@ -3277,7 +3325,7 @@ async function loadSettingsPage() {
           // Reload the settings page to remove the Clear button
           loadSettingsPage();
         } catch (e) { toast(e.message, 'error'); }
-      });
+      }));
     }
   });
 
@@ -3292,7 +3340,7 @@ async function loadSettingsPage() {
     tog.classList.toggle('on', on);
     tog.querySelector('.tog-paddle').style.top = on ? '1px' : '15px';
   });
-  $('audio-save').addEventListener('click', async () => {
+  $('audio-save').addEventListener('click', (e) => withBusy(e.currentTarget, async () => {
     const body = {
       bitrate_kbps: parseInt($('audio-bitrate').value, 10) || 128,
       chunk_threshold_mb: parseInt($('audio-chunk').value, 10) || 20,
@@ -3304,9 +3352,9 @@ async function loadSettingsPage() {
       S.autoCorrect = body.auto_correct;
       toast('Audio settings saved');
     } catch (e) { toast(e.message, 'error'); }
-  });
+  }));
 
-  $('svc-logout').addEventListener('click', logout);
+  $('svc-logout').addEventListener('click', (e) => withBusy(e.currentTarget, logout));
   // Admin-only reset-code generator — only exists when S.isAdmin is true
   const resetBtn = $('svc-reset-code');
   if (resetBtn) resetBtn.addEventListener('click', showGenerateResetCode);
@@ -3354,23 +3402,25 @@ async function renderHotwordRows() {
       <button data-hwdel="${h.id}" title="Remove term" style="background:none;border:none;color:var(--red);cursor:pointer;font-size:13px;padding:0 4px">×</button>
     </div>`).join('')
     : '<div style="font-family:var(--f-mono);font-size:10.5px;color:var(--label-faint);padding:8px 0">No terms yet.</div>';
-  box.querySelectorAll('[data-hwdel]').forEach(b => b.addEventListener('click', async () => {
+  box.querySelectorAll('[data-hwdel]').forEach(b => b.addEventListener('click', () => withBusy(b, async () => {
     try {
       await api('/api/hotwords/' + b.dataset.hwdel, { method: 'DELETE' });
       renderHotwordRows();
     } catch (e) { toast(e.message, 'error'); }
-  }));
+  })));
 }
 
 async function addHotword() {
   const inp = $('hotword-new');
   const term = inp.value.trim();
   if (!term) return;
-  try {
-    await api('/api/hotwords', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ term }) });
-    inp.value = '';
-    renderHotwordRows();
-  } catch (e) { toast(e.message, 'error'); }
+  return withBusy($('hotword-add'), async () => {
+    try {
+      await api('/api/hotwords', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ term }) });
+      inp.value = '';
+      renderHotwordRows();
+    } catch (e) { toast(e.message, 'error'); }
+  });
 }
 
 /* ══════════════════ init ══════════════════ */
@@ -3392,7 +3442,7 @@ document.addEventListener('DOMContentLoaded', () => {
     e.target.value = '';
   });
   // Account recovery links (login page)
-  $('auth-forgot-username').addEventListener('click', showForgotUsername);
+  $('auth-forgot-username').addEventListener('click', (e) => withBusy(e.currentTarget, showForgotUsername));
   $('auth-reset-code').addEventListener('click', showResetCode);
   checkAuth();
 });

@@ -444,6 +444,21 @@ textarea.inp { resize: vertical; }
 .btn:hover:not(:disabled) { background: var(--hover); }
 .btn:focus-visible { outline: none; box-shadow: 0 0 0 2px var(--amber); }
 .btn:disabled { opacity: 0.45; cursor: default; }
+.is-busy { position: relative; color: transparent !important; }
+.is-busy::after {
+  content: '';
+  position: absolute; top: 50%; left: 50%; width: 13px; height: 13px;
+  margin: -7px 0 0 -7px;
+  border: 2px solid rgba(255,255,255,0.35);
+  border-top-color: var(--amber);
+  border-radius: 50%;
+  animation: reel-spin 0.7s linear infinite;
+}
+#net-led.on { background: var(--amber); box-shadow: 0 0 5px var(--amber); }
+/* Fallback dim for disabled buttons outside the .btn/.key skins (bare inline
+   buttons, .ctl knobs) — so withBusy's disable is always visible, not just
+   on the two classes that already style :disabled. */
+button:disabled:not(.btn):not(.key) { opacity: 0.5; cursor: default; }
 .btn--red { border-color: var(--red); color: var(--red); }
 .btn--red:hover { background: rgba(224, 85, 74, 0.12); }
 .btn--amber { background: var(--amber); border-color: var(--amber); color: var(--amber-ink); }
