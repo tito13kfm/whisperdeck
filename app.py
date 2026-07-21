@@ -1001,6 +1001,9 @@ async def list_files(db: Session = Depends(get_db), current_user: User = Depends
         else:
             orphaned.append({"path": full, "size_bytes": size, "modified_at": mtime})
             total_orphaned += size
+    linked.sort(key=lambda x: x["modified_at"])
+    orphaned.sort(key=lambda x: x["modified_at"])
+
     return {"linked": linked, "orphaned": orphaned,
             "total_linked_bytes": total_linked, "total_orphaned_bytes": total_orphaned}
 
