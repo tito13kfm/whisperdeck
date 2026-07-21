@@ -939,7 +939,8 @@ async def delete_transcript(transcript_id: int, db: Session = Depends(get_db), c
                 continue
             try:
                 os.remove(path)
-            except OSError:
+            except OSError as e:
+                logging.warning(f" OSError removing transcript file {path!r}: {e} ")
                 pass
     db.delete(t)
     db.commit()
