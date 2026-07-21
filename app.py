@@ -21,6 +21,7 @@ from fastapi.responses import JSONResponse, FileResponse, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from database import init_db, backfill_user_id, Transcript, Summary, VoiceProfile, VoiceClip, ProviderConfig, User, LlmJob, TranscriptionJob, utcnow_naive
@@ -884,11 +885,12 @@ _LIVE_JOB_STATUSES = ("pending", "running", "failed", "cancelled")
 
 
 def _live_job_paths(db: Session) -> set:
-    return {
-        os.path.realpath(j.audio_path)
-        for j in db.query(TranscriptionJob).filter(TranscriptionJob.status.in_(_LIVE_JOB_STATUSES)).all()
-        if j.audio_path
-    }
+    rows = (
+        db.query(TranscriptionJob.audio_path)
+        .filter(TranscriptionJob.status.in_(_LIVE_JOB_STATUSES))
+        .all()
+    )
+    return {os.path.realpath(audio_path) for (audio_path,) in rows if audio_path}
 
 
 def _transcript_refs_by_realpath(db: Session) -> dict:
@@ -896,9 +898,19 @@ def _transcript_refs_by_realpath(db: Session) -> dict:
     Reference checks compare resolved paths, not raw strings — a textual
     variant of the same file (redundant separators, '.' or '..' segments)
     stored in the DB would slip past a string-equality check and let the
-    file be deleted out from under the transcript that references it."""
+    file be deleted out from under the transcript that references it.
+
+    Filtered at the query level to rows that actually hold a path — a
+    transcript with both columns NULL can never match a realpath lookup,
+    so excluding it up front (rather than after loading the full row)
+    keeps the table scan cheap as it grows. Full Transcript ORM objects
+    are still returned (not a column projection): delete_files mutates
+    and commits these same instances after removing a file."""
     refs = {}
-    for t in db.query(Transcript).all():
+    rows = db.query(Transcript).filter(
+        or_(Transcript.audio_path.isnot(None), Transcript.video_path.isnot(None))
+    ).all()
+    for t in rows:
         for field in ("audio_path", "video_path"):
             p = getattr(t, field)
             if p:
