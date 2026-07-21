@@ -32,15 +32,16 @@ class VoiceIdentificationService:
         self._last_backend_error = None
 
     def _detect_backend(self) -> str:
-        """Detect which embedding backend is available."""
         try:
             import speechbrain  # noqa
             return "speechbrain"
         except ImportError:
             pass
-        # NOTE: pyannote.audio is not wired to an embedding extractor below —
-        # detecting it here would silently return None from every enroll/
-        # identify call. Skip it until _embed_pyannote exists.
+        try:
+            import pyannote.audio  # noqa
+            return "pyannote"
+        except ImportError:
+            pass
         try:
             import librosa  # noqa
             return "librosa_mfcc"
@@ -52,7 +53,7 @@ class VoiceIdentificationService:
     def backend_name(self) -> str:
         names = {
             "speechbrain": "speechbrain/spkrec-ecapa-voxceleb",
-            "pyannote": "pyannote/embedding",
+            "pyannote": "pyannote/wespeaker-voxceleb-resnet34-LM",
             "librosa_mfcc": "MFCC fingerprint (librosa)",
             "none": "No backend available — install speechbrain",
         }

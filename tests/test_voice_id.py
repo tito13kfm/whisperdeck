@@ -91,11 +91,7 @@ def test_extract_embedding_librosa_backend_reports_mfcc_model(tmp_path, monkeypa
     assert model_id == "MFCC fingerprint (librosa)"
 
 
-def test_detect_backend_skips_unimplemented_pyannote(tmp_path, monkeypatch):
-    # pyannote.audio importing successfully used to make _detect_backend pick
-    # "pyannote" — but _extract_embedding has no pyannote branch, so every
-    # enroll/identify call silently returned None forever, surfacing as the
-    # generic "torch, torchaudio" error regardless of what's actually broken.
+def test_detect_backend_picks_pyannote_when_speechbrain_absent(tmp_path, monkeypatch):
     monkeypatch.setitem(sys.modules, "speechbrain", None)
     monkeypatch.setitem(sys.modules, "librosa", None)
     monkeypatch.setitem(sys.modules, "pyannote", types.ModuleType("pyannote"))
@@ -103,7 +99,18 @@ def test_detect_backend_skips_unimplemented_pyannote(tmp_path, monkeypatch):
 
     svc = VoiceIdentificationService(voices_dir=str(tmp_path / "voices"))
 
-    assert svc._backend != "pyannote"
+    assert svc._backend == "pyannote"
+    assert svc.backend_name == "pyannote/wespeaker-voxceleb-resnet34-LM"
+
+
+def test_detect_backend_prefers_speechbrain_over_pyannote(tmp_path, monkeypatch):
+    monkeypatch.setitem(sys.modules, "speechbrain", types.ModuleType("speechbrain"))
+    monkeypatch.setitem(sys.modules, "pyannote", types.ModuleType("pyannote"))
+    monkeypatch.setitem(sys.modules, "pyannote.audio", types.ModuleType("pyannote.audio"))
+
+    svc = VoiceIdentificationService(voices_dir=str(tmp_path / "voices"))
+
+    assert svc._backend == "speechbrain"
 
 
 def test_embed_pyannote_caches_inference_across_calls(tmp_path, monkeypatch):
