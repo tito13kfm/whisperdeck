@@ -939,7 +939,8 @@ async def delete_transcript(transcript_id: int, db: Session = Depends(get_db), c
                 continue
             try:
                 os.remove(path)
-            except OSError:
+            except OSError as e:
+                logging.warning(f" OSError removing transcript file {path!r}: {e} ")
                 pass
     db.delete(t)
     db.commit()
@@ -1000,6 +1001,9 @@ async def list_files(db: Session = Depends(get_db), current_user: User = Depends
         else:
             orphaned.append({"path": full, "size_bytes": size, "modified_at": mtime})
             total_orphaned += size
+    linked.sort(key=lambda x: x["modified_at"])
+    orphaned.sort(key=lambda x: x["modified_at"])
+
     return {"linked": linked, "orphaned": orphaned,
             "total_linked_bytes": total_linked, "total_orphaned_bytes": total_orphaned}
 
