@@ -388,6 +388,61 @@ def test_identify_skips_profiles_with_no_embedding(tmp_path, monkeypatch, db_ses
     assert results == []  # no crash, no match — the empty profile is skipped
 
 
+def test_identify_skips_profile_with_different_embedding_model(tmp_path, monkeypatch, db_session):
+    svc = VoiceIdentificationService(voices_dir=str(tmp_path / "voices"))
+    user = _test_user(db_session)
+
+    profile = VoiceProfile(user_id=user.id, name="Bob", embedding=[1.0, 0.0],
+                            embedding_model="pyannote/wespeaker-voxceleb-resnet34-LM", sample_count=1)
+    db_session.add(profile)
+    db_session.commit()
+
+    monkeypatch.setattr(svc, "_extract_embedding", lambda path, hf_token=None: (np.array([1.0, 0.0]), "speechbrain/spkrec-ecapa-voxceleb"))
+
+    probe = tmp_path / "probe.wav"
+    probe.write_bytes(b"wav")
+    results = svc.identify(db_session, user.id, str(probe))
+
+    assert results == []
+
+
+def test_identify_still_matches_legacy_profile_with_no_recorded_model(tmp_path, monkeypatch, db_session):
+    svc = VoiceIdentificationService(voices_dir=str(tmp_path / "voices"))
+    user = _test_user(db_session)
+
+    profile = VoiceProfile(user_id=user.id, name="LegacyBob", embedding=[1.0, 0.0],
+                            embedding_model=None, sample_count=1)
+    db_session.add(profile)
+    db_session.commit()
+
+    monkeypatch.setattr(svc, "_extract_embedding", lambda path, hf_token=None: (np.array([1.0, 0.0]), "speechbrain/spkrec-ecapa-voxceleb"))
+
+    probe = tmp_path / "probe.wav"
+    probe.write_bytes(b"wav")
+    results = svc.identify(db_session, user.id, str(probe))
+
+    assert len(results) == 1
+    assert results[0]["name"] == "LegacyBob"
+
+
+def test_identify_dim_mismatch_guard_still_skips_same_label_different_length(tmp_path, monkeypatch, db_session):
+    svc = VoiceIdentificationService(voices_dir=str(tmp_path / "voices"))
+    user = _test_user(db_session)
+
+    profile = VoiceProfile(user_id=user.id, name="Weird", embedding=[1.0, 0.0, 0.0],
+                            embedding_model="speechbrain/spkrec-ecapa-voxceleb", sample_count=1)
+    db_session.add(profile)
+    db_session.commit()
+
+    monkeypatch.setattr(svc, "_extract_embedding", lambda path, hf_token=None: (np.array([1.0, 0.0]), "speechbrain/spkrec-ecapa-voxceleb"))
+
+    probe = tmp_path / "probe.wav"
+    probe.write_bytes(b"wav")
+    results = svc.identify(db_session, user.id, str(probe))
+
+    assert results == []
+
+
 def test_list_voices_includes_clips(client, db_session, tmp_path, monkeypatch):
     user = _test_user(db_session)
     profile = _profile(db_session, user.id)

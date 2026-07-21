@@ -194,11 +194,11 @@ class VoiceIdentificationService:
         profile.updated_at = utcnow_naive()
         db.commit()
 
-    def identify(self, db, user_id: int, audio_path: str, threshold: float = 0.65) -> list[dict]:
-        """Identify a speaker from an audio sample. Returns ranked candidates."""
-        probe_embedding = self._extract_embedding(audio_path)
-        if probe_embedding is None:
+    def identify(self, db, user_id: int, audio_path: str, threshold: float = 0.65, hf_token: Optional[str] = None) -> list[dict]:
+        result = self._extract_embedding(audio_path, hf_token=hf_token)
+        if result is None:
             return []
+        probe_embedding, probe_model = result
 
         profiles = db.query(VoiceProfile).filter(VoiceProfile.user_id == user_id).all()
         if not profiles:
@@ -208,7 +208,11 @@ class VoiceIdentificationService:
         for profile in profiles:
             if profile.embedding is None:
                 continue
+            if profile.embedding_model and profile.embedding_model != probe_model:
+                continue
             stored = np.array(profile.embedding)
+            if len(stored) != len(probe_embedding):
+                continue
             similarity = self._cosine_similarity(probe_embedding, stored)
             if similarity >= threshold:
                 results.append({
