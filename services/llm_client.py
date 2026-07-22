@@ -142,7 +142,7 @@ async def chat_completion(
     # Reasoning/MTP models (e.g. Qwen3.5) put their output in
     # reasoning_content instead of content. Fall back when content
     # is empty so correction/summary/reformatting work with those models too.
-    content = msg.get("reasoning_content") or msg.get("content") or ""
+    content = msg.get("content") or msg.get("reasoning_content") or ""
     if raise_on_truncation and choice.get("finish_reason") == "length":
         raise RuntimeError(
             truncation_message

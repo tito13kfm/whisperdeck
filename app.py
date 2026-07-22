@@ -1136,6 +1136,10 @@ async def update_transcript(transcript_id: int, data: dict = Body(...), db: Sess
         t.segments = data["segments"]
     if "full_text" in data:
         t.full_text = data["full_text"]
+    if "kind" in data:
+        if data["kind"] not in ("meeting", "dictation"):
+            raise HTTPException(status_code=400, detail="kind must be 'meeting' or 'dictation'")
+        t.kind = data["kind"]
     t.updated_at = utcnow_naive()
     db.commit()
     return _serialize_transcript(db, t)
@@ -1722,10 +1726,19 @@ async def add_transcript_context(
 
 
 @app.get("/api/correction-models/{provider}")
-async def correction_models(provider: str, current_user: User = Depends(get_current_user)):
+async def correction_models(provider: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     """Curated, cost-aware model shortlist for the correction/summary pickers.
-    OpenRouter entries are validated against its live catalog with pricing."""
-    return {"provider": provider, "models": await get_correction_models(provider)}
+    OpenRouter entries are validated against its live catalog with pricing.
+    For local_llm, fetches live models from the configured endpoint."""
+    local_llm_api_url = None
+    if provider == "local_llm":
+        cfg = db.query(ProviderConfig).filter(
+            ProviderConfig.user_id == current_user.id,
+            ProviderConfig.name == "local_llm",
+        ).first()
+        if cfg:
+            local_llm_api_url = cfg.api_url
+    return {"provider": provider, "models": await get_correction_models(provider, local_llm_api_url)}
 
 
 # ── Job queue (unified: transcription + LLM jobs) ─────────────────────────

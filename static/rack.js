@@ -916,7 +916,7 @@ async function renderTranscribe() {
             ${deckKey('key-play-b', '▶', 'Play', 'disabled', 'Preview voice sample — available in Voice roster')}
             ${deckKey('key-ff-b', '▶▶', 'FF', 'inert', 'Fast-forward — no mapped action')}
             <div style="visibility:hidden"><button tabindex="-1" aria-hidden="true" class="key"></button></div>
-            ${deckKey('key-open-done', '⏹', 'Stop/Eject', 'active', 'Open finished transcript')}
+            ${deckKey('key-open-done', '⏹', 'Open', 'active', 'Open finished transcript')}
           </div>
         </div>
       </div>
@@ -1029,13 +1029,13 @@ async function renderTranscribe() {
       </div>
     </details>
 
-    <!-- start strip -->
+    <!-- status strip (arm state + done navigation) -->
     <div class="unit" style="border-radius:3px">
       <div style="display:flex;justify-content:space-between;align-items:center;padding:12px 22px;gap:16px">
         <div id="tx-arm-text" style="font-family:var(--f-mono);font-size:10.5px;color:var(--label-dim);text-transform:uppercase;letter-spacing:0.08em"></div>
         <div style="display:flex;align-items:center;gap:10px">
-          <div class="led-dot" id="tx-start-led"></div>
-          <button class="key key--wide" id="tx-start" disabled>▶ Start transcription</button>
+          <div class="led-dot" id="tx-status-led"></div>
+          <button class="key key--wide" id="tx-view-results" style="display:none">☰ View transcript</button>
         </div>
       </div>
     </div>`;
@@ -1060,8 +1060,10 @@ function wireTranscribe() {
   $('key-open-done').addEventListener('click', () => {
     if (S.doneId) navigate('detail', S.doneId);
   });
-  $('tx-start').addEventListener('click', startJob);
   $('tx-cancel').addEventListener('click', (e) => withBusy(e.currentTarget, cancelJob));
+  $('tx-view-results').addEventListener('click', () => {
+    if (S.doneId) navigate('detail', S.doneId);
+  });
   $('ctl-provider').addEventListener('click', (e) => withBusy(e.currentTarget, async () => {
     if (S.running) return;
     S.providerIdx = (S.providerIdx + 1) % S.providers.length;
@@ -1190,28 +1192,37 @@ function syncTranscribe() {
     dB.style.color = 'var(--label-dim)';
   }
 
-  // play key + start key + LEDs
-  const playKey = $('key-play-a'), startKey = $('tx-start');
+  // play key + status LED
+  const playKey = $('key-play-a');
   playKey.disabled = !canStart;
   playKey.title = canStart ? 'Start transcription' : S.running ? 'Job running' : !S.tapeLoaded ? 'Load media first' : 'Provider needs a key — see service panel';
-  startKey.disabled = !canStart;
   const ledColor = (S.running || canStart) ? GREEN : null;
-  ['key-play-a-led', 'tx-start-led'].forEach(id => {
-    const el = $(id);
-    el.style.background = ledColor || 'var(--edge)';
-    el.style.boxShadow = ledColor ? '0 0 5px ' + GREEN : 'none';
-  });
+  const statusLed = $('tx-status-led');
+  if (statusLed) {
+    statusLed.style.background = ledColor || 'var(--edge)';
+    statusLed.style.boxShadow = ledColor ? '0 0 5px ' + GREEN : 'none';
+  }
   const recLed = $('key-rec-led');
   recLed.style.background = S.capturing ? RED : 'var(--edge)';
   recLed.style.boxShadow = S.capturing ? '0 0 5px ' + RED : 'none';
   $('key-rec').title = S.capturing ? 'Stop recording' : 'Live capture — asks before recording';
 
-  // arm strip
-  $('tx-arm-text').textContent = S.running
-    ? 'Job in progress — settings locked'
-    : S.tapeLoaded
-      ? 'Armed — ' + prov.name + ' · ' + curModel() + ' · ' + LANGUAGES[S.langIdx]
-      : 'Load a tape to arm the transport';
+  // status strip
+  const armText = $('tx-arm-text');
+  const viewBtn = $('tx-view-results');
+  if (S.jobDone && S.doneId) {
+    armText.textContent = 'Transcription complete — ' + formatDur(detailData ? detailData.duration_seconds : null);
+    viewBtn.style.display = '';
+    playKey.disabled = false;
+    playKey.title = 'Load another file to start';
+  } else {
+    viewBtn.style.display = 'none';
+    armText.textContent = S.running
+      ? 'Job in progress — settings locked'
+      : S.tapeLoaded
+        ? 'Armed — ' + prov.name + ' · ' + curModel() + ' · ' + LANGUAGES[S.langIdx]
+        : 'Load a tape to arm the transport';
+  }
 
   // meter row
   $('tx-meter').style.display = S.running ? '' : 'none';
@@ -1616,7 +1627,12 @@ async function loadTranscripts() {
     </div>
     <div id="bank-rows"></div>`;
 
-  renderBankRows(openIds);
+  try {
+    renderBankRows(openIds);
+  } catch (e) {
+    console.error('renderBankRows error:', e);
+    root.innerHTML += '<div class="empty-unit">Error rendering tape library: ' + escapeHtml(e.message) + '</div>';
+  }
 
   $('bank-search').addEventListener('input', () => {
     S.bankQuery = $('bank-search').value;
@@ -2612,7 +2628,7 @@ function renderDetail() {
         <div style="font-size:12.5px"><div style="font-family:var(--f-mono);font-size:10px;text-transform:uppercase;letter-spacing:0.08em;color:var(--label-dim);margin-bottom:3px">Provider</div>${escapeHtml((t.provider || '—') + (t.model ? ' · ' + t.model : ''))}</div>
         <div style="font-size:12.5px"><div style="font-family:var(--f-mono);font-size:10px;text-transform:uppercase;letter-spacing:0.08em;color:var(--label-dim);margin-bottom:3px">Status</div><span class="status-badge status-badge--${escapeHtml(sv.word)}" data-word="${escapeHtml(sv.word)}">${escapeHtml(sv.word)}</span></div>
         <div style="font-size:12.5px"><div style="font-family:var(--f-mono);font-size:10px;text-transform:uppercase;letter-spacing:0.08em;color:var(--label-dim);margin-bottom:3px">Speakers</div>${t.speaker_count || '—'}</div>
-        <div style="font-size:12.5px"><div style="font-family:var(--f-mono);font-size:10px;text-transform:uppercase;letter-spacing:0.08em;color:var(--label-dim);margin-bottom:3px">Segments</div>${(t.segments || []).length}</div>
+        <div style="font-size:12.5px"><div style="font-family:var(--f-mono);font-size:10px;text-transform:uppercase;letter-spacing:0.08em;color:var(--label-dim);margin-bottom:3px">Mode</div><button class="btn" style="font-size:11px;padding:2px 10px;border-color:var(--inset-edge);cursor:pointer" data-dact="toggle-kind">${escapeHtml((t.kind || 'meeting').charAt(0).toUpperCase() + (t.kind || 'meeting').slice(1))}</button></div>
       </div>
     </div>
     ${videoHtml}
@@ -2700,7 +2716,18 @@ async function detailAction(act, btn) {
       navigate('transcripts');
       return;
     }
-    if (act === 'retry') {
+    if (act === 'toggle-kind') {
+      const newKind = t.kind === 'dictation' ? 'meeting' : 'dictation';
+      await api('/api/transcripts/' + t.id, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ kind: newKind }),
+      });
+      toast('Switched to ' + newKind + ' mode', 'info');
+      S.detailTab = 'transcript';
+      await loadTranscriptDetail(t.id);
+      return;
+    }
       const r = await api('/api/transcripts/' + t.id + '/retry-failed-chunks', { method: 'POST' });
       toast('Retrying ' + r.retried + ' sections', 'info');
       loadTranscriptDetail(t.id);
@@ -2843,13 +2870,28 @@ function normalizeLlmProvider(id) {
 }
 
 // Populate a model <select> from the curated catalog (labels carry live
-// pricing for OpenRouter). local has no catalog — swap to free text.
+// pricing for OpenRouter). local_llm now fetches live models from the
+// configured endpoint — shows a dropdown with the results, not free text.
 async function fillModelPicker(selectId, textId, provider, preferred) {
   const sel = $(selectId), txt = $(textId);
   const isLocal = provider === 'local_llm';
   sel.style.display = isLocal ? 'none' : '';
   txt.style.display = isLocal ? '' : 'none';
   if (isLocal) {
+    // Fetch models from the local endpoint; fall back to free text on failure
+    sel.innerHTML = '<option>Loading…</option>';
+    try {
+      const r = await api('/api/correction-models/local_llm');
+      const models = r.models || [];
+      if (models.length) {
+        sel.style.display = '';
+        txt.style.display = 'none';
+        sel.innerHTML = models.map(m =>
+          '<option value="' + escapeHtml(m.id) + '">' + escapeHtml(m.label || m.id) + '</option>').join('');
+        if (preferred && models.some(m => m.id === preferred)) sel.value = preferred;
+        return;
+      }
+    } catch { /* fall through to free text */ }
     if (preferred) txt.value = preferred;
     return;
   }
@@ -3260,17 +3302,17 @@ async function runIdentify() {
 }
 
 /* ══════════════════ files: linked / orphaned inventory ══════════════════ */
+function fmtBytes(n) {
+  if (n >= 1e9) return (n / 1e9).toFixed(2) + ' GB';
+  if (n >= 1e6) return (n / 1e6).toFixed(1) + ' MB';
+  if (n >= 1e3) return (n / 1e3).toFixed(0) + ' KB';
+  return n + ' B';
+}
+
 async function renderFilesPage() {
   const root = $('page-files');
   let data;
   try { data = await api('/api/files'); } catch (e) { toast(e.message, 'error'); return; }
-
-  const fmtBytes = (n) => {
-    if (n >= 1e9) return (n / 1e9).toFixed(2) + ' GB';
-    if (n >= 1e6) return (n / 1e6).toFixed(1) + ' MB';
-    if (n >= 1e3) return (n / 1e3).toFixed(0) + ' KB';
-    return n + ' B';
-  };
 
   const fileRow = (f, group) => `
     <div style="display:flex;align-items:center;gap:12px;padding:9px 22px 9px 34px;border-bottom:1px solid var(--seg-edge)">
@@ -3335,7 +3377,8 @@ async function renderFilesPage() {
 }
 
 async function deleteSelectedFiles(group) {
-  const paths = [...document.querySelectorAll('[data-file-select="' + group + '"]:checked')].map(el => el.dataset.path);
+  const root = $('page-files');
+  const paths = [...root.querySelectorAll('[data-file-select="' + group + '"]:checked')].map(el => el.dataset.path);
   if (!paths.length) { toast('No files selected', 'error'); return; }
   if (!(await styledConfirm('Delete ' + paths.length + ' file(s)? This cannot be undone.'))) return;
   try {
@@ -3344,9 +3387,13 @@ async function deleteSelectedFiles(group) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ paths }),
     });
-    toast('Deleted ' + r.deleted.length + ', skipped ' + r.skipped.length, r.skipped.length ? 'info' : 'ok');
+    const msg = [];
+    if (r.deleted.length) msg.push(r.deleted.length + ' deleted');
+    if (r.skipped.length) msg.push(r.skipped.length + ' skipped (' + r.skipped.map(s => s.reason).join(', ') + ')');
+    if (r.freed_bytes) msg.push('freed ' + fmtBytes(r.freed_bytes));
+    toast(msg.join(' · ') || 'Nothing to delete', r.skipped.length ? 'info' : 'ok');
     renderFilesPage();
-  } catch (e) { toast(e.message, 'error'); }
+  } catch (e) { toast('Delete failed: ' + e.message, 'error'); }
 }
 /* ══════════════════ rear service panel ══════════════════ */
 const JACK_DEFS = [
