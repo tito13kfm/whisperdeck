@@ -11,23 +11,8 @@ stays in the active log (never archived) until resolved to ACTIONED or DECLINED
 
 ## 2026-07-10
 
-### Observation 14: HEAD-based blob staging cleanly splits your hunks from foreign uncommitted work in the same file
-
-**Status:** ACTIONED — Applied to CLAUDE.md "Verification gates that temporarily modify a file" section as (wd#14) (scheduled review 2026-07-13)
-**Date:** 2026-07-10
-**Session context:** PR 3 of the code-review fixes needed two README edits while the working tree README carried 31 uncommitted lines of someone else's in-progress screenshot work. Interactive `git add -p` is unavailable in the harness, and stash was ruled out (prior incident leaked uncommitted content).
-**Skill:** verification-before-completion, superpowers:finishing-a-development-branch
-**Type:** open-source
-**Phase/Area:** Committing when the working tree contains unrelated uncommitted changes to the same file
-
-**Issue:** Needed to commit only my hunks of a co-modified file without touching the other work. Solution that worked cleanly: (1) apply my edits to the working-tree file so both change sets coexist there, (2) extract the HEAD version to a temp file (byte-exact via bash redirect), (3) apply the same edits to the temp copy, (4) `git hash-object -w --path=<file>` (the --path applies clean filters, keeping line-ending conversion correct) then `git update-index --cacheinfo 100644,<hash>,<file>`, (5) plain `git commit` of the staged index. Result verified: committed diff contained exactly my hunks; post-merge worktree diff was exactly the foreign 31 lines.
-
-**Suggested improvement:** Candidate rule for the CLAUDE.md git-workflow area or the finishing-a-development-branch skill: when a file you must change carries foreign uncommitted modifications, never stash, never commit the whole file; edit both the worktree AND a HEAD-derived temp copy, stage the temp copy via hash-object --path + update-index --cacheinfo, and verify both directions after commit (staged diff = only your hunks; worktree diff = only the foreign hunks).
-
-**Principle:** Search output is a lossy view of a file; only a byte-faithful Read is evidence. Verify surprising content at the source before treating it as a defect.
-
 ### Observation 10: Compound UI action — failure in step B suppressed feedback for already-committed step A
-**Status:** OPEN
+**Status:** ACTIONED — duplicate re-log of archived Observation 10 (2026-07-10 archive); rule already in CLAUDE.md "Verifying against a live app" as (wd#10), no new edit needed (scheduled review 2026-07-22)
 
 **Date:** 2026-07-04
 **Session context:** WhisperDeck speaker-naming feature; rename-then-enroll flow in the transcript detail screen
@@ -43,7 +28,7 @@ stays in the active log (never archived) until resolved to ACTIONED or DECLINED
 
 ### Observation 11: Orphan classification only excluded "active" job states, missing revivable ones
 
-**Status:** OPEN
+**Status:** ACTIONED — Applied to CLAUDE.md "Verifying against a live app" as (wd#15); tag wd#11 was already taken by the archived 2026-07-10 Observation 11 (scheduled review 2026-07-22)
 **Date:** 2026-07-20
 **Session context:** Review of draft PRs #39/#40 (video playback + file inventory/cleanup)
 **Skill:** review (also relevant to writing-plans for any cleanup/GC feature)
@@ -58,7 +43,7 @@ stays in the active log (never archived) until resolved to ACTIONED or DECLINED
 
 ### Observation 12: New API field fed to an existing frontend formatter with a different serialization convention
 
-**Status:** OPEN
+**Status:** ACTIONED — Applied to CLAUDE.md "Verifying against a live app" as (wd#16); tag wd#12 was already taken by the archived 2026-07-13 Observation 12 (scheduled review 2026-07-22)
 **Date:** 2026-07-20
 **Session context:** Browser verification pass on PR #40 (Files page)
 **Skill:** verify (also review; instance of the CLAUDE.md mirror-paths rule)
@@ -70,3 +55,20 @@ stays in the active log (never archived) until resolved to ACTIONED or DECLINED
 **Suggested improvement:** When a change introduces a new backend field consumed by an existing frontend helper (formatter, parser, sorter), check the helper's expected input convention against the new field's actual serialization, and add a backend test pinning the convention. Real-browser passes catch this class; HTTP-only tests don't.
 
 **Principle:** A shared client-side helper encodes an implicit serialization contract; every new producer feeding it must be checked against that contract, not just against "returns a valid value."
+
+## 2026-07-22
+
+### Observation 17: Observation numbering collided after archival; duplicate re-log surfaced as OPEN
+
+**Status:** ACTIONED — resolved in place: numbers 15 and 16 are reserved as CLAUDE.md rule tags (see below), numbering resumes at 18 (scheduled review 2026-07-22)
+**Date:** 2026-07-22
+**Session context:** Scheduled comprehensive review (autonomous)
+**Skill:** task-observer
+**Type:** internal
+**Phase/Area:** Observation numbering / archival-on-write
+
+**Issue:** The active log held Observation 10 as an exact duplicate of the archived, already-ACTIONED Observation 10 (rule live as wd#10), and Observations 11 and 12 (dated 2026-07-20) reused numbers already claimed by archived observations (docs-rewrite rule wd#11, scheduler-cadence rule wd#12). A prior session evidently numbered from log.md alone after archival had emptied it, despite the skill's scan-archives-too rule. Separately, Observation 14 was archived and removed on 2026-07-20, then reappeared in the active log (a later session apparently rewrote log.md from stale content, which also explains the duplicate Observation 10 re-log) and was archived again by copy on 2026-07-21 without removal; this run removes it from the active log a second time (archive/log-2026-07-22.md).
+
+**Suggested improvement:** No new rule needed; the task-observer skill already mandates scanning archive/*.md in the pre-logging max-number step and moving (not copying) entries on archival. This entry records the collision resolution: CLAUDE.md tags wd#15 and wd#16 belong to the duplicate-numbered 2026-07-20 Observations 11 and 12 respectively; observation numbers 15 and 16 are therefore retired, and the next observation number is 18.
+
+**Principle:** An append-only ID scheme survives archival only if the max-scan covers every location IDs can live; any copy-without-remove archival turns "move" into silent duplication.
