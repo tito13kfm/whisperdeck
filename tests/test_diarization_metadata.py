@@ -39,3 +39,31 @@ async def test_diarize_and_merge_returns_method_pyannote(monkeypatch, tmp_path):
     )
     assert method == "pyannote"
     assert merged[0]["speaker"] == "SPEAKER_00"
+
+
+@pytest.mark.asyncio
+async def test_diarize_and_merge_prefers_live_stereo(monkeypatch, tmp_path):
+    from services.diarization import DiarizationResult, DiarizationSegment
+    svc = DiarizationService()
+    monkeypatch.setattr(svc, "_check_pyannote", lambda: True)
+
+    async def fake_stereo(stereo_path, num_speakers=None, hf_token=None):
+        return DiarizationResult(
+            segments=[DiarizationSegment(start=0.0, end=2.0, speaker="You")],
+            speaker_count=1, method="live_stereo",
+        )
+
+    async def fail_pyannote(*a, **k):
+        raise AssertionError("mixed-audio path must not run when a stereo copy exists")
+
+    monkeypatch.setattr(svc, "diarize_live_stereo", fake_stereo)
+    monkeypatch.setattr(svc, "diarize_pyannote", fail_pyannote)
+    stereo = tmp_path / "s.flac"
+    stereo.write_bytes(b"x")  # existence check only; the fake never reads it
+    merged, count, method = await svc.diarize_and_merge(
+        str(tmp_path / "a.mp3"), num_speakers=2,
+        segments=[{"start": 0.0, "end": 1.0, "text": "hi"}],
+        stereo_audio_path=str(stereo),
+    )
+    assert method == "live_stereo"
+    assert merged[0]["speaker"] == "You"

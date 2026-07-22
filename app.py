@@ -843,6 +843,7 @@ async def _run_transcription_pipeline(
                     num_speakers=num_speakers,
                     segments=transcript.segments,
                     hf_token=user_settings.get("hf_token"),
+                    stereo_audio_path=transcript.stereo_audio_path,
                 )
                 transcript.segments = merged
                 transcript.speaker_count = speaker_count

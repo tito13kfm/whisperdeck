@@ -514,6 +514,7 @@ async def _finalize_if_done(db, transcript_id: int, diarization_service) -> None
         db.rollback()
         transcript_user_id = transcript.user_id
         audio_path = transcript.audio_path
+        stereo_audio_path = transcript.stereo_audio_path
         num_speakers = transcript.num_speakers
         try:
             from services.settings import get_user_settings  # local import avoids a module-load cycle with app.py
@@ -523,6 +524,7 @@ async def _finalize_if_done(db, transcript_id: int, diarization_service) -> None
             merged, speaker_count, diarization_method = await diarization_service.diarize_and_merge(
                 audio_path, num_speakers=num_speakers, segments=segments,
                 hf_token=user_settings.get("hf_token"),
+                stereo_audio_path=stereo_audio_path,
             )
             segments = merged
         except Exception as e:

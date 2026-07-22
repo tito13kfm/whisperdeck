@@ -330,6 +330,7 @@ async def run_llm_job(SessionLocal, job_id: int, transcription_service, diarizat
                     num_speakers=transcript.num_speakers,
                     segments=transcript.segments or [],
                     hf_token=user_settings.get("hf_token"),
+                    stereo_audio_path=transcript.stereo_audio_path,
                 )
                 transcript.segments = merged
                 transcript.speaker_count = speaker_count

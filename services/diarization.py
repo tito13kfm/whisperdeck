@@ -54,13 +54,25 @@ class DiarizationService:
         num_speakers: Optional[int],
         segments: list[dict],
         hf_token: Optional[str] = None,
+        stereo_audio_path: Optional[str] = None,
     ) -> tuple[list[dict], int, str]:
-        """Best-available diarization (pyannote if installed, else the
-        pause-gap heuristic) merged onto existing transcript segments.
-        num_speakers=None lets pyannote auto-detect; the heuristic can't,
-        so it defaults to 2. Returns (merged_segments, speaker_count, method).
+        """Best-available diarization merged onto existing transcript
+        segments: channel-aware live-stereo when a stereo copy exists and
+        pyannote is installed, else pyannote on the mixed audio, else the
+        pause-gap heuristic (which can't auto-detect, so it defaults to 2).
+        Returns (merged_segments, speaker_count, method).
         Raises on failure — callers decide whether that's fatal."""
-        if self._check_pyannote():
+        if stereo_audio_path and os.path.exists(stereo_audio_path) and self._check_pyannote():
+            try:
+                result = await self.diarize_live_stereo(
+                    stereo_audio_path, num_speakers=num_speakers, hf_token=hf_token
+                )
+            except Exception as e:
+                print(f"[diarization] live-stereo path failed ({e}); falling back to mixed audio")
+                result = await self.diarize_pyannote(
+                    audio_path, num_speakers=num_speakers, hf_token=hf_token
+                )
+        elif self._check_pyannote():
             result = await self.diarize_pyannote(
                 audio_path, num_speakers=num_speakers, hf_token=hf_token
             )
