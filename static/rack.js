@@ -17,6 +17,7 @@ const S = {
   tapeLoaded: false,
   tapeName: '',
   tapeFile: null,
+  tapeIsLiveStereo: false,
   running: false,
   runningId: null,
   pct: 0,
@@ -1275,10 +1276,11 @@ function wireTranscribeDrop() {
   });
 }
 
-function loadTape(file) {
+function loadTape(file, isLiveStereo = false) {
   S.tapeFile = file;
   S.tapeName = file.name;
   S.tapeLoaded = true;
+  S.tapeIsLiveStereo = isLiveStereo;
   S.jobDone = false;
   S.pct = 0;
   syncTranscribe();
@@ -1288,6 +1290,7 @@ function ejectTape() {
   S.tapeFile = null;
   S.tapeName = '';
   S.tapeLoaded = false;
+  S.tapeIsLiveStereo = false;
   S.jobDone = false;
   S.pct = 0;
   syncTranscribe();
@@ -1315,6 +1318,7 @@ async function startJob() {
   if (!S.tapeLoaded || S.running || !prov.ready || !S.tapeFile) return;
   const form = new FormData();
   form.append('file', S.tapeFile);
+  if (S.tapeIsLiveStereo) form.append('capture_source', 'live_stereo');
   form.append('provider', prov.id);
   form.append('model', curModel());
   const lang = LANGUAGES[S.langIdx];
@@ -1365,6 +1369,7 @@ async function startJob() {
     S.tapeLoaded = false;
     S.tapeFile = null;
     S.tapeName = '';
+    S.tapeIsLiveStereo = false;
     syncTranscribe();
   } catch (e) {
     S.running = false;
@@ -1537,6 +1542,7 @@ function stopLiveCapture() {
 }
 
 function finishLiveCapture() {
+  const wasStereo = !!CAP.disp;
   const blob = new Blob(CAP.chunks, { type: 'audio/webm' });
   [CAP.mic, CAP.disp].forEach(s => s && s.getTracks().forEach(t => t.stop()));
   if (CAP.actx) CAP.actx.close();
@@ -1549,7 +1555,7 @@ function finishLiveCapture() {
   const now = new Date();
   const stamp = String(now.getHours()).padStart(2, '0') + String(now.getMinutes()).padStart(2, '0');
   if (blob.size > 0) {
-    loadTape(new File([blob], 'live_capture_' + stamp + '.webm', { type: 'audio/webm' }));
+    loadTape(new File([blob], 'live_capture_' + stamp + '.webm', { type: 'audio/webm' }), wasStereo);
     toast('Capture loaded onto Deck A — press START to transcribe');
   } else {
     toast('Nothing was recorded', 'info');
