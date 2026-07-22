@@ -67,3 +67,57 @@ async def test_diarize_and_merge_prefers_live_stereo(monkeypatch, tmp_path):
     )
     assert method == "live_stereo"
     assert merged[0]["speaker"] == "You"
+
+
+@pytest.mark.asyncio
+async def test_diarize_and_merge_falls_back_to_pyannote_on_stereo_failure(monkeypatch, tmp_path):
+    from services.diarization import DiarizationResult, DiarizationSegment
+    svc = DiarizationService()
+    monkeypatch.setattr(svc, "_check_pyannote", lambda: True)
+
+    async def broken_stereo(stereo_path, num_speakers=None, hf_token=None):
+        raise RuntimeError("stereo channel split failed")
+
+    async def fake_pyannote(audio_path, num_speakers=None, hf_token=None):
+        return DiarizationResult(
+            segments=[DiarizationSegment(start=0.0, end=6.0, speaker="SPEAKER_00")],
+            speaker_count=1, method="pyannote",
+        )
+
+    monkeypatch.setattr(svc, "diarize_live_stereo", broken_stereo)
+    monkeypatch.setattr(svc, "diarize_pyannote", fake_pyannote)
+    stereo = tmp_path / "s.flac"
+    stereo.write_bytes(b"x")  # existence check only; the fake never reads it
+    merged, count, method = await svc.diarize_and_merge(
+        str(tmp_path / "a.mp3"), num_speakers=2,
+        segments=[{"start": 0.0, "end": 2.0, "text": "hi"}],
+        stereo_audio_path=str(stereo),
+    )
+    assert method == "pyannote"
+    assert merged[0]["speaker"] == "SPEAKER_00"
+
+
+@pytest.mark.asyncio
+async def test_diarize_and_merge_falls_through_when_stereo_file_missing(monkeypatch, tmp_path):
+    from services.diarization import DiarizationResult, DiarizationSegment
+    svc = DiarizationService()
+    monkeypatch.setattr(svc, "_check_pyannote", lambda: True)
+
+    async def fail_stereo(*a, **k):
+        raise AssertionError("live-stereo path must not run when the stereo file doesn't exist")
+
+    async def fake_pyannote(audio_path, num_speakers=None, hf_token=None):
+        return DiarizationResult(
+            segments=[DiarizationSegment(start=0.0, end=6.0, speaker="SPEAKER_00")],
+            speaker_count=1, method="pyannote",
+        )
+
+    monkeypatch.setattr(svc, "diarize_live_stereo", fail_stereo)
+    monkeypatch.setattr(svc, "diarize_pyannote", fake_pyannote)
+    merged, count, method = await svc.diarize_and_merge(
+        str(tmp_path / "a.mp3"), num_speakers=2,
+        segments=[{"start": 0.0, "end": 2.0, "text": "hi"}],
+        stereo_audio_path=str(tmp_path / "missing_stereo.flac"),
+    )
+    assert method == "pyannote"
+    assert merged[0]["speaker"] == "SPEAKER_00"
