@@ -263,3 +263,73 @@ class DiarizationService:
             })
 
         return merged
+
+    @staticmethod
+    def _active_intervals(
+        channel,
+        sample_rate: int,
+        frame_ms: int = 30,
+        threshold_ratio: float = 4.0,
+        min_speech_s: float = 0.25,
+        max_gap_s: float = 0.6,
+    ) -> list[tuple[float, float]]:
+        """Energy VAD over one channel: frames whose RMS exceeds
+        threshold_ratio times the noise floor (10th-percentile frame RMS)
+        count as speech; speech runs closer than max_gap_s merge; runs
+        shorter than min_speech_s drop. Returns [(start_s, end_s), ...].
+
+        Uses the 10th percentile rather than a higher one so the floor
+        estimate stays anchored to true background noise even on clips
+        that are mostly speech (e.g. a near-continuous single-speaker
+        turn) rather than drifting up into the signal itself."""
+        import numpy as np
+
+        frame = int(sample_rate * frame_ms / 1000)
+        n = len(channel) // frame
+        if n == 0:
+            return []
+        rms = np.sqrt((channel[: n * frame].reshape(n, frame) ** 2).mean(axis=1))
+        floor = float(np.percentile(rms, 10)) + 1e-8
+        speech = rms > threshold_ratio * floor
+
+        intervals: list[tuple[float, float]] = []
+        start = None
+        for i, flag in enumerate(speech):
+            t = i * frame / sample_rate
+            if flag and start is None:
+                start = t
+            elif not flag and start is not None:
+                intervals.append((start, t))
+                start = None
+        if start is not None:
+            intervals.append((start, n * frame / sample_rate))
+
+        merged: list[tuple[float, float]] = []
+        for s, e in intervals:
+            if merged and s - merged[-1][1] <= max_gap_s:
+                merged[-1] = (merged[-1][0], e)
+            else:
+                merged.append((s, e))
+        return [(s, e) for s, e in merged if e - s >= min_speech_s]
+
+    @staticmethod
+    def _drop_bleed(
+        intervals: list[tuple[float, float]],
+        mic,
+        system,
+        sample_rate: int,
+        dominance: float = 1.2,
+    ) -> list[tuple[float, float]]:
+        """Remote voices leak into the mic through speakers. A genuine local
+        utterance is louder on the mic channel than on the system channel
+        over the same span; bleed is the reverse. Keep mic-dominant spans."""
+        import numpy as np
+
+        kept = []
+        for s, e in intervals:
+            a, b = int(s * sample_rate), int(e * sample_rate)
+            rms_mic = float(np.sqrt((mic[a:b] ** 2).mean() + 1e-12))
+            rms_sys = float(np.sqrt((system[a:b] ** 2).mean() + 1e-12))
+            if rms_mic > rms_sys * dominance:
+                kept.append((s, e))
+        return kept
