@@ -171,6 +171,29 @@ class DiarizationService:
 
         return pseudo_segments
 
+    def _run_pyannote_sync(self, waveform, sample_rate: int, num_speakers, hf_token):
+        """Blocking pyannote inference on a (channel, time) float32 tensor.
+        Callers wrap this in run_in_executor; imports stay inside so machines
+        without torch can still import this module. `waveform` may be handed
+        in as a plain numpy array (e.g. from diarize_live_stereo, which never
+        needs torch on the async side) — convert here so the torch dependency
+        stays confined to this one method."""
+        import torch
+        from pyannote.audio import Pipeline
+
+        if not isinstance(waveform, torch.Tensor):
+            waveform = torch.from_numpy(waveform)
+
+        pipeline = Pipeline.from_pretrained(
+            "pyannote/speaker-diarization-3.1",
+            token=hf_token or os.environ.get("HUGGINGFACE_TOKEN", None),
+        )
+        output = pipeline({"waveform": waveform, "sample_rate": sample_rate}, num_speakers=num_speakers)
+        return [
+            DiarizationSegment(start=turn.start, end=turn.end, speaker=speaker)
+            for turn, _, speaker in output.speaker_diarization.itertracks(yield_label=True)
+        ]
+
     async def diarize_pyannote(
         self,
         audio_path: str,
@@ -191,12 +214,6 @@ class DiarizationService:
         def _run() -> list[DiarizationSegment]:
             import torch
             import soundfile as sf
-            from pyannote.audio import Pipeline
-
-            pipeline = Pipeline.from_pretrained(
-                "pyannote/speaker-diarization-3.1",
-                token=hf_token or os.environ.get("HUGGINGFACE_TOKEN", None),
-            )
 
             # Load audio ourselves and hand pyannote a waveform tensor rather
             # than a file path — pyannote's built-in decoder requires torchcodec,
@@ -205,17 +222,7 @@ class DiarizationService:
             # fails to load its native DLLs.
             data, sample_rate = sf.read(audio_path, dtype="float32", always_2d=True)
             waveform = torch.from_numpy(data.T)  # (channel, time)
-
-            output = pipeline({"waveform": waveform, "sample_rate": sample_rate}, num_speakers=num_speakers)
-
-            segments = []
-            for turn, _, speaker in output.speaker_diarization.itertracks(yield_label=True):
-                segments.append(DiarizationSegment(
-                    start=turn.start,
-                    end=turn.end,
-                    speaker=speaker,
-                ))
-            return segments
+            return self._run_pyannote_sync(waveform, sample_rate, num_speakers, hf_token)
 
         # Model load + inference are synchronous/blocking (no internal await) —
         # run off the event loop so one diarize call doesn't stall every other
@@ -281,7 +288,15 @@ class DiarizationService:
         Uses the 10th percentile rather than a higher one so the floor
         estimate stays anchored to true background noise even on clips
         that are mostly speech (e.g. a near-continuous single-speaker
-        turn) rather than drifting up into the signal itself."""
+        turn) rather than drifting up into the signal itself.
+
+        Known blind spot: this is a purely relative-floor VAD, so a channel
+        with zero internal silence (fully continuous energy, no pauses at
+        all) has no low-RMS frames to anchor the floor to and will not be
+        detected as speech. Real microphone audio always has some pause
+        structure, so this hasn't been worth fixing with an absolute floor
+        (which would need calibrating against real room-tone levels, not
+        the digital-zero silence typical of unit-test fixtures)."""
         import numpy as np
 
         frame = int(sample_rate * frame_ms / 1000)
@@ -311,6 +326,52 @@ class DiarizationService:
             else:
                 merged.append((s, e))
         return [(s, e) for s, e in merged if e - s >= min_speech_s]
+
+    async def diarize_live_stereo(
+        self,
+        stereo_path: str,
+        num_speakers: Optional[int] = None,
+        hf_token: Optional[str] = None,
+    ) -> DiarizationResult:
+        """Channel-aware diarization for live captures (mic on channel 0,
+        system audio on channel 1, see static/rack.js live capture). The mic
+        channel needs no clustering: any speech there is the local user.
+        Remote speakers exist only on the system channel, so pyannote runs
+        on that channel alone with one fewer expected speaker."""
+        import numpy as np
+        import soundfile as sf
+
+        data, sample_rate = sf.read(stereo_path, dtype="float32", always_2d=True)
+        if data.shape[1] < 2:
+            raise ValueError(f"{stereo_path} is not stereo — cannot channel-split")
+        mic, system = data[:, 0], data[:, 1]
+
+        mic_intervals = self._drop_bleed(
+            self._active_intervals(mic, sample_rate), mic, system, sample_rate
+        )
+        segments = [
+            DiarizationSegment(start=s, end=e, speaker="You") for s, e in mic_intervals
+        ]
+
+        remote_count = (num_speakers - 1) if num_speakers else None
+        system_active = self._active_intervals(system, sample_rate)
+        if remote_count != 0 and system_active:
+            # Hand _run_pyannote_sync a plain numpy array rather than a torch
+            # tensor — it converts internally, so this async method (and its
+            # tests, which monkeypatch _run_pyannote_sync entirely) never
+            # need torch importable.
+            waveform = np.ascontiguousarray(system[np.newaxis, :])
+            loop = asyncio.get_event_loop()
+            remote = await loop.run_in_executor(
+                None, self._run_pyannote_sync, waveform, sample_rate, remote_count, hf_token
+            )
+            segments.extend(remote)
+
+        segments.sort(key=lambda s: s.start)
+        speaker_set = set(s.speaker for s in segments)
+        return DiarizationResult(
+            segments=segments, speaker_count=len(speaker_set), method="live_stereo"
+        )
 
     @staticmethod
     def _drop_bleed(
