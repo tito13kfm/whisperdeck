@@ -171,13 +171,20 @@ class DiarizationService:
 
         return pseudo_segments
 
-    def _run_pyannote_sync(self, waveform, sample_rate: int, num_speakers, hf_token):
-        """Blocking pyannote inference on a (channel, time) float32 tensor.
-        Callers wrap this in run_in_executor; imports stay inside so machines
-        without torch can still import this module. `waveform` may be handed
-        in as a plain numpy array (e.g. from diarize_live_stereo, which never
-        needs torch on the async side) — convert here so the torch dependency
-        stays confined to this one method."""
+    def _run_pyannote_sync(
+        self,
+        waveform,
+        sample_rate: int,
+        num_speakers: Optional[int],
+        hf_token: Optional[str],
+    ) -> list[DiarizationSegment]:
+        """Blocking pyannote inference on a (channel, time) audio buffer —
+        either a torch tensor or a plain numpy array. Callers wrap this in
+        run_in_executor; imports stay inside so machines without torch can
+        still import this module. A plain numpy array (e.g. from
+        diarize_live_stereo, which never needs torch on the async side) is
+        converted to a tensor here, keeping the torch dependency confined to
+        this one method."""
         import torch
         from pyannote.audio import Pipeline
 
@@ -343,7 +350,7 @@ class DiarizationService:
 
         data, sample_rate = sf.read(stereo_path, dtype="float32", always_2d=True)
         if data.shape[1] < 2:
-            raise ValueError(f"{stereo_path} is not stereo — cannot channel-split")
+            raise ValueError(f"{stereo_path} has fewer than 2 channels — cannot channel-split")
         mic, system = data[:, 0], data[:, 1]
 
         mic_intervals = self._drop_bleed(
@@ -354,8 +361,14 @@ class DiarizationService:
         ]
 
         remote_count = (num_speakers - 1) if num_speakers else None
-        system_active = self._active_intervals(system, sample_rate)
-        if remote_count != 0 and system_active:
+        system_intervals = self._active_intervals(system, sample_rate)
+        # Degrade to mic-only "You" segments rather than raising when pyannote
+        # isn't installed — unlike diarize_pyannote (a direct, user-invoked
+        # entry point where a friendly ImportError is the right feedback),
+        # this is meant to sit in diarize_and_merge's fallback chain, where a
+        # raised error would be more disruptive than just returning what the
+        # mic channel already found.
+        if remote_count != 0 and system_intervals and self.pyannote_available:
             # Hand _run_pyannote_sync a plain numpy array rather than a torch
             # tensor — it converts internally, so this async method (and its
             # tests, which monkeypatch _run_pyannote_sync entirely) never

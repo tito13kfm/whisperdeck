@@ -54,6 +54,11 @@ def _stereo_flac(tmp_path, mic, system):
 async def test_live_stereo_mic_becomes_you_and_system_goes_to_pyannote(monkeypatch, tmp_path):
     from services.diarization import DiarizationSegment
     svc = DiarizationService()
+    # This test's scenario assumes pyannote is installed on the machine (it
+    # mocks out only the heavy _run_pyannote_sync call, not availability) —
+    # set this explicitly since the dev/CI venv running these tests may not
+    # actually have pyannote installed.
+    monkeypatch.setattr(svc, "pyannote_available", True)
     mic = np.concatenate([_tone(2), _silence(3)])
     system = np.concatenate([_silence(2), _tone(3)])
     path = _stereo_flac(tmp_path, mic, system)
@@ -63,6 +68,11 @@ async def test_live_stereo_mic_becomes_you_and_system_goes_to_pyannote(monkeypat
     def fake_sync(waveform, sample_rate, num_speakers, hf_token):
         calls["num_speakers"] = num_speakers
         calls["channels"] = waveform.shape[0]
+        # Content check, not just shape: confirms it's actually the system
+        # channel (index 1) that got routed to pyannote, not the mic channel
+        # (index 0) — a channel-assignment swap would still pass a shape-only
+        # check but fails this. Small tolerance for FLAC's lossy round-trip.
+        assert np.allclose(waveform[0], system, atol=1e-3)
         return [DiarizationSegment(start=2.0, end=5.0, speaker="SPEAKER_00")]
 
     monkeypatch.setattr(svc, "_run_pyannote_sync", fake_sync)
@@ -90,6 +100,26 @@ async def test_live_stereo_silent_system_skips_pyannote(monkeypatch, tmp_path):
 
     monkeypatch.setattr(svc, "_run_pyannote_sync", boom)
     result = await svc.diarize_live_stereo(path, num_speakers=2, hf_token=None)
+    assert {s.speaker for s in result.segments} == {"You"}
+
+
+@pytest.mark.asyncio
+async def test_live_stereo_degrades_gracefully_without_pyannote(monkeypatch, tmp_path):
+    """A system channel with activity would normally route to pyannote, but
+    on a machine without pyannote installed this must degrade to mic-only
+    "You" segments rather than raising a raw ImportError out of a worker
+    thread — mirrors diarize_pyannote's own pyannote_available guard."""
+    svc = DiarizationService()
+    monkeypatch.setattr(svc, "pyannote_available", False)
+    mic = np.concatenate([_tone(2), _silence(3)])
+    system = np.concatenate([_silence(2), _tone(3)])
+    path = _stereo_flac(tmp_path, mic, system)
+
+    def boom(*a, **k):
+        raise AssertionError("pyannote must not run when unavailable")
+
+    monkeypatch.setattr(svc, "_run_pyannote_sync", boom)
+    result = await svc.diarize_live_stereo(path, num_speakers=3, hf_token=None)
     assert {s.speaker for s in result.segments} == {"You"}
 
 
