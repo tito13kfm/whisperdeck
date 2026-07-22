@@ -198,9 +198,6 @@ class DiarizationService:
                 token=hf_token or os.environ.get("HUGGINGFACE_TOKEN", None),
             )
 
-            if num_speakers:
-                pipeline.instantiate({"clustering": {"threshold": 0.7}})
-
             # Load audio ourselves and hand pyannote a waveform tensor rather
             # than a file path — pyannote's built-in decoder requires torchcodec,
             # which needs FFmpeg's shared-library build; Windows installs
