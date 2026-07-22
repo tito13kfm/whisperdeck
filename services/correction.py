@@ -9,18 +9,10 @@ for why a same-audio pre-pass was rejected in favor of this approach.
 """
 import json
 
-import httpx
-
 from services.hotwords import list_hotwords, add_hotword
+from services.llm_client import chat_completion, JSON_MODE_PROVIDERS
 
-_API_BASES = {
-    "groq": "https://api.groq.com/openai/v1",
-    "openai": "https://api.openai.com/v1",
-    "openrouter": "https://openrouter.ai/api/v1",
-}
 _DEFAULT_MODEL = "llama-3.3-70b-versatile"
-# Providers whose chat endpoint accepts response_format json_object
-_JSON_MODE_PROVIDERS = ("groq", "openai", "openrouter")
 # Rough per-call input budget for the correction pass; keeps each request's
 # output comfortably inside max_tokens instead of silently truncating long
 # transcripts at 8192 output tokens.
@@ -28,56 +20,17 @@ _CHUNK_CHAR_BUDGET = 6000
 _CONTEXT_TAIL_LINES = 2
 
 
-def _api_base(provider_name: str, provider_config: dict | None = None) -> str:
-    if provider_name in ("local", "local_llm"):
-        return (provider_config or {}).get("api_url") or "http://localhost:11434/v1"
-    base = _API_BASES.get(provider_name)
-    if not base:
-        # Never silently fall back to another provider's endpoint — that sends
-        # the wrong key to the wrong host and reads as "invalid API key".
-        raise RuntimeError(
-            f"Correction does not support provider '{provider_name}' — "
-            f"use groq, openai, openrouter, local, or local_llm."
-        )
-    return base
-
-
 async def _chat_completion(
     prompt: str, api_key: str, provider_name: str, model: str, json_mode: bool,
     provider_config: dict | None = None,
 ) -> str:
     """Raises on any failure — callers catch and set their own error field."""
-    request_body = {
-        "model": model,
-        "messages": [
-            {"role": "system", "content": "You output only what is requested, no commentary."},
-            {"role": "user", "content": prompt},
-        ],
-        "temperature": 0.2,
-        "max_tokens": 16384,
-    }
-    if json_mode and provider_name in _JSON_MODE_PROVIDERS:
-        request_body["response_format"] = {"type": "json_object"}
-
-    headers = {"Content-Type": "application/json"}
-    if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
-
-    async with httpx.AsyncClient(timeout=120) as client:
-        response = await client.post(
-            f"{_api_base(provider_name, provider_config)}/chat/completions",
-            headers=headers,
-            json=request_body,
-        )
-
-    if response.status_code != 200:
-        raise RuntimeError(f"LLM API error ({response.status_code}): {response.text}")
-
-    msg = response.json()["choices"][0]["message"]
-    # Reasoning/MTP models (e.g. Qwen3.5) put their output in
-    # reasoning_content instead of content. Fall back when content
-    # is empty so correction/summary work with those models too.
-    return msg.get("reasoning_content") or msg.get("content") or ""
+    return await chat_completion(
+        prompt, api_key, provider_name, model, json_mode,
+        provider_config=provider_config,
+        restrict_json_mode_to=JSON_MODE_PROVIDERS,
+        feature_name="Correction",
+    )
 
 
 def _transcript_lines(transcript) -> list[str]:

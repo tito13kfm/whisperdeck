@@ -17,24 +17,28 @@ from services.voice_id import voice_id_service
 ACTIVE_STATUSES = ("pending", "running")
 TERMINAL_LLM_STATUSES = ("completed", "failed", "cancelled")
 
-VALID_KINDS = ("correction", "summary", "rediarize", "voice_match")
+VALID_KINDS = (
+    "correction", "summary", "rediarize", "voice_match",
+    "format_markdown", "format_email", "format_coding_prompt", "classify_intent",
+)
 # Auto-retry (issue #14) is scoped to network-dependent kinds only —
-# correction/summary call a provider API and can fail transiently.
-# rediarize/voice_match are local CPU-bound compute (diarization clustering,
-# voice-embedding extraction); a failure there is far more likely to be
-# deterministic (bad audio, missing backend, no enrolled voices) than
-# transient, so blindly retrying up to MAX_ATTEMPTS would just re-run
-# expensive local inference against the same failure. See "Open Design
-# Questions" in docs/superpowers/plans/2026-07-07-queue-audit-llmjob-auto-retry.md
+# correction/summary/format_*/classify_intent call a provider API and can
+# fail transiently. rediarize/voice_match are local CPU-bound compute
+# (diarization clustering, voice-embedding extraction); a failure there is
+# far more likely to be deterministic (bad audio, missing backend, no
+# enrolled voices) than transient, so blindly retrying up to MAX_ATTEMPTS
+# would just re-run expensive local inference against the same failure. See
+# "Open Design Questions" in
+# docs/superpowers/plans/2026-07-07-queue-audit-llmjob-auto-retry.md
 # if reconsidering.
-AUTO_RETRY_KINDS = ("correction", "summary")
+AUTO_RETRY_KINDS = ("correction", "summary", "format_markdown", "format_email", "format_coding_prompt", "classify_intent")
 # Two independent concurrency pools, capped separately (issue #14): I/O-bound
 # kinds are provider API calls (bounded by provider rate limits, not local
 # resources), CPU-bound kinds are local compute (diarization clustering /
 # embedding extraction) and stay small so they don't fight each other for
 # the same CPU. IO_KINDS/CPU_KINDS must partition VALID_KINDS exactly — see
 # test_io_cpu_pools_partition_valid_kinds.
-IO_KINDS = ("correction", "summary")
+IO_KINDS = ("correction", "summary", "format_markdown", "format_email", "format_coding_prompt", "classify_intent")
 CPU_KINDS = ("rediarize", "voice_match")
 _MAX_CONCURRENT_IO_JOBS = 2
 _MAX_CONCURRENT_CPU_JOBS = 1
@@ -158,6 +162,25 @@ def enqueue_auto_correction(db, transcript, user_settings: dict) -> LlmJob:
     return enqueue_llm_job(db, transcript.user_id, transcript.id, "correction", provider, model, error=error)
 
 
+def enqueue_auto_classify(db, transcript, user_settings: dict) -> LlmJob | None:
+    """Auto-classify entry point for the inline and chunked-finalize paths —
+    dictation transcripts only. Guesses which reformat action (Markdown /
+    email / coding prompt) best fits, surfaced as a UI hint; the underlying
+    classify_intent() call never raises, so this never needs an error path
+    of its own beyond the usual missing-API-key skip."""
+    if transcript.kind != "dictation":
+        return None
+    from services.settings import resolve_provider_key, KEYLESS_PROVIDERS
+
+    provider = user_settings.get("format_provider", "groq")
+    model = user_settings.get("format_model", "llama-3.3-70b-versatile")
+    api_key, _ = resolve_provider_key(db, transcript.user_id, provider)
+    error = None
+    if provider not in KEYLESS_PROVIDERS and not api_key:
+        error = f"auto-classify skipped: no {provider} API key saved (see service panel)"
+    return enqueue_llm_job(db, transcript.user_id, transcript.id, "classify_intent", provider, model, error=error)
+
+
 def cancel_llm_job(db, user_id: int, job_id: int) -> LlmJob:
     job = db.query(LlmJob).filter(LlmJob.id == job_id, LlmJob.user_id == user_id).first()
     if not job:
@@ -196,6 +219,9 @@ async def run_llm_job(SessionLocal, job_id: int, transcription_service, diarizat
     import os
 
     from services.correction import correct_transcript
+    from services.reformatting import (
+        format_as_markdown, format_as_email, format_as_coding_prompt, classify_intent,
+    )
     from services.settings import resolve_provider_key, KEYLESS_PROVIDERS
 
     db = SessionLocal()
@@ -209,7 +235,7 @@ async def run_llm_job(SessionLocal, job_id: int, transcription_service, diarizat
             return
 
         api_key, provider_config = None, None
-        if job.kind not in ("rediarize", "voice_match"):  # local compute — no LLM key involved
+        if job.kind not in CPU_KINDS:  # local compute — no LLM key involved
             api_key, provider_config = resolve_provider_key(db, job.user_id, job.provider)
             if job.provider not in KEYLESS_PROVIDERS and not api_key:
                 _finish(db, job, "failed", f"no {job.provider} API key saved (see service panel)")
@@ -257,6 +283,36 @@ async def run_llm_job(SessionLocal, job_id: int, transcription_service, diarizat
                 _finish(db, job, "completed")
             except Exception as e:
                 _finish(db, job, "failed", str(e))
+        elif job.kind in ("format_markdown", "format_email", "format_coding_prompt"):
+            job.progress_total = 1
+            db.commit()
+            generate = {
+                "format_markdown": format_as_markdown,
+                "format_email": format_as_email,
+                "format_coding_prompt": format_as_coding_prompt,
+            }[job.kind]
+            try:
+                text = await generate(
+                    transcript, api_key=api_key, provider_name=job.provider,
+                    provider_config=provider_config, model=job.model,
+                )
+                job.result_json = {"text": text}
+                job.progress_done = 1
+                db.commit()
+                _finish(db, job, "completed")
+            except Exception as e:
+                _finish(db, job, "failed", str(e))
+        elif job.kind == "classify_intent":
+            job.progress_total = 1
+            db.commit()
+            label = await classify_intent(
+                transcript, api_key=api_key, provider_name=job.provider,
+                provider_config=provider_config, model=job.model,
+            )
+            job.result_json = {"format": label}
+            job.progress_done = 1
+            db.commit()
+            _finish(db, job, "completed")
         elif job.kind == "rediarize":
             job.progress_total = 1
             db.commit()

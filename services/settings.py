@@ -26,6 +26,8 @@ DEFAULT_SETTINGS = {
     "correction_model": "gpt-oss-20b-mxfp4-GGUF",
     "summary_provider": "local_llm",
     "summary_model": "gpt-oss-20b-mxfp4-GGUF",
+    "format_provider": "local_llm",
+    "format_model": "gpt-oss-20b-mxfp4-GGUF",
 }
 
 # Providers that work without an API key (local inference / user-hosted URL).

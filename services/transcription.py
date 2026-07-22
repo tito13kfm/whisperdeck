@@ -7,6 +7,7 @@ from typing import Optional
 from database import Transcript, Summary, utcnow_naive
 from backends import get_provider, ProviderError
 from backends.base import BaseProvider, TranscriptionResult
+from services.llm_client import chat_completion, resolve_model, transcript_text_for_prompt
 
 
 class TranscriptionService:
@@ -29,6 +30,7 @@ class TranscriptionService:
         title: Optional[str] = None,
         num_speakers: Optional[int] = None,
         video_path: Optional[str] = None,
+        kind: str = "meeting",
     ) -> Transcript:
         """Create a Transcript row in 'processing' status without calling a
         provider — used by the chunked upload path, which enqueues chunk
@@ -50,6 +52,7 @@ class TranscriptionService:
             diarize_requested=diarize_requested,
             num_speakers=num_speakers,
             video_path=video_path,
+            kind=kind,
         )
         db.add(transcript)
         db.commit()
@@ -179,15 +182,23 @@ class TranscriptionService:
         if transcript.status != "completed":
             raise ValueError(f"Transcript {transcript_id} is not completed")
 
-        text = transcript.full_text
-        if not text:
-            text = " ".join(s.get("text", "") for s in (transcript.segments or []))
+        text = transcript_text_for_prompt(transcript)
 
-        max_chars = 80000
-        if len(text) > max_chars:
-            text = text[:max_chars] + "..."
+        if transcript.kind == "dictation":
+            prompt = f"""You are summarizing a single person's spoken dictation (not a meeting — there is no "discussion" between multiple people). Analyze the following transcript and produce a structured summary.
 
-        prompt = f"""You are an expert meeting summarizer. Analyze the following transcript and produce a structured summary.
+TRANSCRIPT:
+{text}
+
+Respond in JSON format with exactly these keys:
+- "short_summary": A 2-3 sentence overview of what the speaker was talking about
+- "key_points": An array of 3-8 key points or ideas the speaker raised, each as a concise string
+- "action_items": An array of specific tasks or follow-ups the speaker mentioned needing to do, each as a string
+- "decisions": An array of any conclusions or decisions the speaker reached out loud, each as a string
+
+Return ONLY valid JSON, no markdown, no code fences."""
+        else:
+            prompt = f"""You are an expert meeting summarizer. Analyze the following transcript and produce a structured summary.
 
 TRANSCRIPT:
 {text}
@@ -200,67 +211,29 @@ Respond in JSON format with exactly these keys:
 
 Return ONLY valid JSON, no markdown, no code fences."""
 
-        import httpx
+        try:
+            model = resolve_model(provider_name, model, feature_name="Summarization")
+        except RuntimeError as e:
+            raise ProviderError(str(e)) from e
 
-        api_base = "https://api.groq.com/openai/v1"
-        if provider_name == "openai":
-            api_base = "https://api.openai.com/v1"
-            model = model or "gpt-4o-mini"
-        elif provider_name == "openrouter":
-            api_base = "https://openrouter.ai/api/v1"
-            model = model or "deepseek/deepseek-v4-flash"
-        elif provider_name in ("local", "local_llm"):
-            api_base = (provider_config or {}).get("api_url") or "http://localhost:11434/v1"
-            model = model or "llama3"
-        elif provider_name == "groq":
-            model = model or "llama-3.3-70b-versatile"
-        else:
-            raise ProviderError(
-                f"Summarization does not support provider '{provider_name}' — "
-                f"use groq, openai, openrouter, local, or local_llm."
+        try:
+            content = await chat_completion(
+                prompt, api_key, provider_name, model, json_mode=True,
+                provider_config=provider_config,
+                system="You output only valid JSON.",
+                temperature=0.3,
+                raise_on_truncation=True,
+                feature_name="Summarization",
+                http_error_label="Summarization",
+                truncation_message=(
+                    "Summary generation was cut off (model hit its token/context "
+                    "limit) — try a shorter recording or a model with a larger "
+                    "context window."
+                ),
             )
+        except RuntimeError as e:
+            raise ProviderError(str(e)) from e
 
-        request_body = {
-            "model": model,
-            "messages": [
-                {"role": "system", "content": "You output only valid JSON."},
-                {"role": "user", "content": prompt},
-            ],
-            "temperature": 0.3,
-            "max_tokens": 16384,
-        }
-        # Forces the model to emit well-formed JSON instead of prose that
-        # merely resembles JSON. Sent unconditionally, including to local
-        # providers: OpenAI-compatible endpoints that don't support this
-        # field just ignore it, while ones that do (current Ollama/LM
-        # Studio/llama.cpp server) enforce valid JSON output, which is
-        # exactly what local models — with weaker instruction-following —
-        # need most.
-        request_body["response_format"] = {"type": "json_object"}
-
-        headers = {"Content-Type": "application/json"}
-        if api_key:
-            headers["Authorization"] = f"Bearer {api_key}"
-
-        async with httpx.AsyncClient(timeout=120) as client:
-            resp = await client.post(
-                f"{api_base}/chat/completions",
-                headers=headers,
-                json=request_body,
-            )
-
-        if resp.status_code != 200:
-            raise ProviderError(f"Summarization API error ({resp.status_code}): {resp.text}")
-
-        choice = resp.json()["choices"][0]
-        msg = choice["message"]
-        content = msg.get("reasoning_content") or msg.get("content") or ""
-        if choice.get("finish_reason") == "length":
-            raise ProviderError(
-                "Summary generation was cut off (model hit its token/context "
-                "limit) — try a shorter recording or a model with a larger "
-                "context window."
-            )
         content = content.strip()
         if content.startswith("```"):
             content = content.split("\n", 1)[-1]

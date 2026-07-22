@@ -96,6 +96,37 @@ def test_summarize_raises_clear_error_when_response_was_cut_off(db_session, tmp_
             ))
 
 
+def test_summarize_truncation_and_http_error_text_unchanged_by_llm_client_extraction(db_session, tmp_path):
+    """Pins the exact original wording — services/llm_client.py's shared
+    chat_completion() takes http_error_label/truncation_message overrides
+    specifically so this extraction couldn't silently genericize summarize's
+    long-standing user-facing error text (see llm_client.py docstring)."""
+    user, transcript = _make_user_and_transcript(db_session)
+    svc = TranscriptionService(str(tmp_path))
+
+    truncated = '{"short_summary": "The team discussed refunds and ca'
+    fake_post = AsyncMock(return_value=_chat_response(truncated, finish_reason="length"))
+    with patch("httpx.AsyncClient.post", fake_post):
+        with pytest.raises(ProviderError) as exc_info:
+            asyncio.run(svc.summarize(
+                db_session, user.id, transcript.id, api_key="", provider_name="local",
+                provider_config={"api_url": "http://box:8080/v1"}, model="llama3",
+            ))
+    assert str(exc_info.value) == (
+        "Summary generation was cut off (model hit its token/context limit) — "
+        "try a shorter recording or a model with a larger context window."
+    )
+
+    fake_post_500 = AsyncMock(return_value=_FakeResponse(500, {"error": "boom"}))
+    with patch("httpx.AsyncClient.post", fake_post_500):
+        with pytest.raises(ProviderError) as exc_info:
+            asyncio.run(svc.summarize(
+                db_session, user.id, transcript.id, api_key="", provider_name="local",
+                provider_config={"api_url": "http://box:8080/v1"}, model="llama3",
+            ))
+    assert str(exc_info.value).startswith("Summarization API error (500):")
+
+
 def test_summarize_raises_clear_error_on_invalid_json(db_session, tmp_path):
     """A local model without JSON-mode enforcement sometimes returns text
     that isn't valid JSON at all (not truncated, just malformed) — this must

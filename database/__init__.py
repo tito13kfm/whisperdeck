@@ -35,6 +35,7 @@ class Transcript(Base):
     user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     title = Column(String(255), nullable=False)
     filename = Column(String(255), nullable=False)
+    kind = Column(String(16), default="meeting")  # meeting | dictation — drives default diarization, summary prompt, and available reformat actions
     duration_seconds = Column(Float, default=0)
     provider = Column(String(64), default="groq")
     model = Column(String(64), default="whisper-large-v3-turbo")
@@ -300,7 +301,7 @@ def init_db(db_path: str = "data/whisperdesk.db") -> tuple:
     migrated_tables = migrate_schema(engine)
     Base.metadata.create_all(engine)
     ensure_columns(engine, "users", {"settings": "JSON"})
-    ensure_columns(engine, "transcripts", {"audio_path": "TEXT", "diarize_requested": "BOOLEAN", "num_speakers": "INTEGER", "processed_size_bytes": "INTEGER", "corrected_text": "TEXT", "correction_error": "TEXT", "correction_model": "TEXT", "queue_dismissed": "BOOLEAN DEFAULT 0", "source_transcript_id": "INTEGER", "video_path": "TEXT"})
+    ensure_columns(engine, "transcripts", {"audio_path": "TEXT", "diarize_requested": "BOOLEAN", "num_speakers": "INTEGER", "processed_size_bytes": "INTEGER", "corrected_text": "TEXT", "correction_error": "TEXT", "correction_model": "TEXT", "queue_dismissed": "BOOLEAN DEFAULT 0", "source_transcript_id": "INTEGER", "video_path": "TEXT", "kind": "TEXT DEFAULT 'meeting'"})
     ensure_columns(engine, "llm_jobs", {"dismissed": "BOOLEAN DEFAULT 0", "result_json": "JSON", "attempts": "INTEGER DEFAULT 0"})
     ensure_columns(engine, "summaries", {"provider": "TEXT"})
     ensure_columns(engine, "users", {"is_admin": "BOOLEAN DEFAULT 0", "reset_token": "TEXT", "reset_token_expires_at": "TEXT"})
