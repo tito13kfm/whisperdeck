@@ -24,7 +24,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
-from database import init_db, backfill_user_id, Transcript, Summary, VoiceProfile, VoiceClip, ProviderConfig, User, LlmJob, TranscriptionJob, utcnow_naive
+from database import init_db, backfill_user_id, Transcript, Summary, VoiceProfile, VoiceClip, ProviderConfig, User, LlmJob, TranscriptionJob, RelabelHistory, utcnow_naive
 from services.auth import (
     get_or_create_fallback_user, create_user, authenticate_user,
     list_usernames, generate_reset_token, reset_password,
@@ -222,7 +222,7 @@ def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
     return user
 
 
-def _serialize_transcript(db: Session, t: Transcript) -> dict:
+def _serialize_transcript(db: Session, t: Transcript, include_relabel: bool = False) -> dict:
     jobs = t.jobs or []
     job_progress = None
     if jobs:
@@ -231,7 +231,7 @@ def _serialize_transcript(db: Session, t: Transcript) -> dict:
             "completed": sum(1 for j in jobs if j.status == "completed"),
             "failed": sum(1 for j in jobs if j.status == "failed"),
         }
-    return {
+    data = {
         "id": t.id,
         "source_transcript_id": t.source_transcript_id,
         "kind": t.kind or "meeting",
@@ -268,6 +268,17 @@ def _serialize_transcript(db: Session, t: Transcript) -> dict:
         "voice_match_job": serialize_llm_job(vj) if (vj := latest_job(db, t.id, "voice_match")) else None,
         **_dictation_job_fields(db, t),
     }
+    if include_relabel:
+        last = (
+            db.query(RelabelHistory)
+            .filter(RelabelHistory.transcript_id == t.id)
+            .order_by(RelabelHistory.id.desc())
+            .first()
+        )
+        data["last_relabel"] = (
+            {"kind": last.kind, "description": last.description} if last else None
+        )
+    return data
 
 
 def _dictation_job_fields(db: Session, t: Transcript) -> dict:
@@ -944,7 +955,7 @@ async def get_transcript(transcript_id: int, db: Session = Depends(get_db), curr
     ).first()
     if not t:
         raise HTTPException(status_code=404, detail="Transcript not found")
-    return _serialize_transcript(db, t)
+    return _serialize_transcript(db, t, include_relabel=True)
 
 
 # Job states whose chunk files are still needed: pending/running are
@@ -1314,14 +1325,23 @@ async def rename_transcript_speaker(
     # New list, not in-place mutation — SQLAlchemy doesn't change-track
     # in-place edits on a JSON column.
     renamed = 0
+    changed = []
     new_segments = []
-    for seg in t.segments or []:
+    for idx, seg in enumerate(t.segments or []):
         if (seg.get("speaker") or "") == old:
+            changed.append((idx, seg.get("speaker") or ""))
             seg = {**seg, "speaker": new}
             renamed += 1
         new_segments.append(seg)
     if renamed == 0:
         raise HTTPException(status_code=400, detail=f"No segments have speaker '{old}'")
+
+    from services.relabel import record_relabel
+    record_relabel(
+        db, t, "rename", changed,
+        corrected_text_before=t.corrected_text if t.corrected_text else None,
+        description=f"rename {old} to {new} ({renamed} lines)",
+    )
     t.segments = new_segments
 
     if t.corrected_text:
@@ -1335,7 +1355,7 @@ async def rename_transcript_speaker(
 
     t.updated_at = utcnow_naive()
     db.commit()
-    return {"renamed": renamed, "transcript": _serialize_transcript(db, t)}
+    return {"renamed": renamed, "transcript": _serialize_transcript(db, t, include_relabel=True)}
 
 
 @app.post("/api/transcripts/{transcript_id}/segments/retag")
@@ -1366,6 +1386,10 @@ async def retag_transcript_segments(
             raise HTTPException(status_code=400, detail=f"Segment index {i} is out of range")
 
     index_set = set(indices)
+    changed = [(i, segments[i].get("speaker") or "") for i in sorted(index_set)]
+    from services.relabel import record_relabel
+    record_relabel(db, t, "retag", changed,
+                   description=f"retag {len(index_set)} lines to {speaker}")
     new_segments = [
         {**seg, "speaker": speaker} if i in index_set else seg
         for i, seg in enumerate(segments)
@@ -1373,7 +1397,46 @@ async def retag_transcript_segments(
     t.segments = new_segments
     t.updated_at = utcnow_naive()
     db.commit()
-    return {"retagged": len(index_set), "transcript": _serialize_transcript(db, t)}
+    return {"retagged": len(index_set), "transcript": _serialize_transcript(db, t, include_relabel=True)}
+
+
+@app.post("/api/transcripts/{transcript_id}/relabel-undo")
+async def undo_last_relabel(
+    transcript_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Revert the most recent bulk relabel (rename / retag / voice match) by
+    applying its stored inverse patch. Per-line manual edits are not bulk
+    actions and are not tracked here."""
+    t = db.query(Transcript).filter(
+        Transcript.id == transcript_id, Transcript.user_id == current_user.id
+    ).first()
+    if not t:
+        raise HTTPException(status_code=404, detail="Transcript not found")
+    entry = (
+        db.query(RelabelHistory)
+        .filter(RelabelHistory.transcript_id == t.id)
+        .order_by(RelabelHistory.id.desc())
+        .first()
+    )
+    if not entry:
+        raise HTTPException(status_code=404, detail="Nothing to undo")
+
+    segments = list(t.segments or [])
+    for patch in entry.inverse.get("segments", []):
+        i = patch.get("index")
+        if isinstance(i, int) and 0 <= i < len(segments):
+            segments[i] = {**segments[i], "speaker": patch.get("speaker") or ""}
+    t.segments = segments
+    if entry.inverse.get("corrected_text") is not None:
+        t.corrected_text = entry.inverse["corrected_text"]
+    undone_kind, undone_desc = entry.kind, entry.description
+    db.delete(entry)
+    t.updated_at = utcnow_naive()
+    db.commit()
+    return {"undone": undone_kind, "description": undone_desc,
+            "transcript": _serialize_transcript(db, t, include_relabel=True)}
 
 
 @app.post("/api/transcripts/{transcript_id}/enroll-speaker")
