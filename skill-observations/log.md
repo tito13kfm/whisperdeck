@@ -70,3 +70,48 @@ stays in the active log (never archived) until resolved to ACTIONED or DECLINED
 **Suggested improvement:** When a change introduces a new backend field consumed by an existing frontend helper (formatter, parser, sorter), check the helper's expected input convention against the new field's actual serialization, and add a backend test pinning the convention. Real-browser passes catch this class; HTTP-only tests don't.
 
 **Principle:** A shared client-side helper encodes an implicit serialization contract; every new producer feeding it must be checked against that contract, not just against "returns a valid value."
+
+### Observation 15: Driving a DOM-diffed SPA via browser MCP produces false findings unless probes are page/state-scoped
+
+**Status:** OPEN
+**Date:** 2026-07-22
+**Session context:** Deep UX audit of WhisperDeck (new e2e-ux-audit-deep skill); repeatedly measured wrong before correcting.
+**Skill:** e2e-ux-audit, e2e-ux-audit-deep (also any browser-MCP-driven audit)
+**Type:** open-source
+**Phase/Area:** how to read SPA state via Playwright/UI-TARS browser_evaluate
+
+**Issue:** Four separate false findings arose from naive DOM probes against WhisperDeck's single-page app: (1) every nav "page" stays mounted in the DOM, so `document.querySelector('h1')` and bare `[data-tid]`/`[data-seg-*]` selectors matched hidden pages and reported "landed on Monitor" / inflated row counts; (2) the modal container `#modal-box` is always present (emptied when closed), so checking for a `[role="dialog"]` element gave false "modal still open" readings — the real signal is `#modal-overlay.classList.contains('open')`; (3) toasts auto-remove after 4.2s, so snapshotting between tool calls missed them, producing false "no feedback" findings — must poll `#toast-wrap .toast` at click time inside one browser_evaluate; (4) marking/renaming re-renders the segment list, staling cached element refs.
+
+**Suggested improvement:** Add a "Reading SPA state (pitfalls)" section to the browser-audit skills: scope every probe to `[id^="page-"].active`; scope row queries to their container; detect modals by the overlay's open-class not element presence; instrument toasts at action time by polling; re-query re-rendered lists rather than caching refs. These prevent the audit from generating retractions.
+
+**Principle:** In a client-rendered app, "present in the DOM" ≠ "visible/active," and transient UI (toasts, re-rendered lists) can't be observed by after-the-fact snapshots. Audit probes must assert on the app's own visibility/state signals, captured synchronously with the action, or they measure the framework rather than the UX.
+
+### Observation 16: Test harness can silently corrupt the system under test via a per-call-rotating token endpoint
+
+**Status:** OPEN
+**Date:** 2026-07-22
+**Session context:** Deep UX audit; out-of-band GET /api/csrf-token bricked all in-browser mutations for ~15 min before diagnosis.
+**Skill:** e2e-ux-audit-deep, e2e-regression-http (also any skill that configures the app via direct HTTP alongside a browser session)
+**Type:** open-source
+**Phase/Area:** setup / provider+settings configuration
+
+**Issue:** WhisperDeck's `GET /api/csrf-token` overwrites the session's CSRF token on every call. The skill's setup configured providers via out-of-band HTTP that first fetched a token; this rotated the server token out from under the browser's boot-cached one, so every subsequent UI mutation failed 403 with only a 4.2s jargon toast. Time lost distinguishing "product bug" from "harness self-inflicted." (It is also a real product bug — a second tab bricks the first — filed as F1.)
+
+**Suggested improvement:** In setup, perform mutations through the browser page's own `api()` helper (reusing its cached token) rather than a separate HTTP client, OR fetch the token once and reuse it for the whole config sequence, never re-calling the token endpoint mid-session. Document token-rotation endpoints as harness hazards in the skill's Pitfalls.
+
+**Principle:** Before configuring an app out-of-band while also driving it in a browser, check whether any auth/CSRF/session endpoint mutates shared session state on read; if so, share one token source or drive everything through the same client, else the harness and the UI fight over session state and failures look like product bugs.
+
+### Observation 17: A dependency the audit needs may be absent on the test machine and must be stubbed hermetically
+
+**Status:** OPEN
+**Date:** 2026-07-22
+**Session context:** Deep UX audit; no local LLM (Lemonade) and zero configured API keys on the isolated instance, blocking all correction/summary/context journeys.
+**Skill:** e2e-ux-audit-deep, e2e-ux-audit
+**Type:** open-source
+**Phase/Area:** setup / backend availability
+
+**Issue:** The audit machine had no local LLM and the fresh isolated instance started with `has_key:false` on every provider, so LLM-dependent journeys (correction, summary, context, wrap-up flow) could not run at all as written. A tiny committed OpenAI-compatible stub (deterministic, offline, slow-by-design) unblocked every LLM path and additionally made progress-UI and cancel-race testing observable. One subtlety: the stub had to return the app's expected summary JSON schema, else the summary pipeline failed on a parse error and masked the actual UX being tested.
+
+**Suggested improvement:** Ship a hermetic provider stub with the skill (committed to a tracked dir, not a gitignored fixtures dir), point the app's provider at it in setup, and teardown must kill it + free its port. Make the stub schema-aware for any endpoint that parses structured model output. Offer the operator the choice of real key vs stub, defaulting to the stub for repeatability.
+
+**Principle:** An audit that depends on an external/heavy backend must own a hermetic stand-in so it runs anywhere and deterministically; the stub must satisfy not just the transport contract but every response *schema* the app parses, or it silently converts the feature-under-test into an error path.

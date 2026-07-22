@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WhisperDeck UX Audit Report — 2026-07-22</title>
+<style>
+  :root {
+    --bg: #f6f7f8; --card: #fff; --ink: #1a1d21; --muted: #57606a; --line: #d0d7de;
+    --blocker: #cf222e; --major: #bf8700; --minor: #57606a; --ok: #1a7f37;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #0d1117; --card: #161b22; --ink: #e6edf3; --muted: #8b949e; --line: #30363d; }
+  }
+  * { box-sizing: border-box; }
+  body { font-family: system-ui, -apple-system, sans-serif; max-width: 960px; margin: 0 auto;
+         padding: 2rem 1rem 4rem; background: var(--bg); color: var(--ink); line-height: 1.5; }
+  h1 { font-size: 1.7rem; margin-bottom: 0.25rem; }
+  h2 { font-size: 1.2rem; margin-top: 2.2rem; border-bottom: 2px solid var(--line); padding-bottom: 0.3rem; }
+  .sub { color: var(--muted); margin-top: 0; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
+  th, td { border: 1px solid var(--line); padding: 0.45rem 0.6rem; text-align: left; font-size: 0.92rem; vertical-align: top; }
+  th { background: rgba(127,127,127,0.08); }
+  .PASS { color: var(--ok); font-weight: 600; }
+  .FAIL { color: var(--blocker); font-weight: 600; }
+  .SKIPPED { color: var(--major); font-weight: 600; }
+  .finding { background: var(--card); border: 1px solid var(--line); border-left-width: 5px;
+             border-radius: 6px; padding: 0.8rem 1rem; margin-bottom: 1rem; }
+  .finding.major { border-left-color: var(--major); }
+  .finding.minor { border-left-color: var(--minor); }
+  .finding h3 { margin: 0 0 0.4rem; font-size: 1.02rem; }
+  .tag { display: inline-block; font-size: 0.72rem; font-weight: 600; padding: 0.1rem 0.5rem;
+         border-radius: 999px; margin-right: 0.4rem; text-transform: uppercase; letter-spacing: 0.03em; }
+  .tag.major { background: var(--major); color: #fff; }
+  .tag.minor { background: var(--minor); color: #fff; }
+  .tag.bug { background: #8250df; color: #fff; }
+  .tag.cat { background: rgba(127,127,127,0.15); color: var(--ink); }
+  .finding p { margin: 0.35rem 0; font-size: 0.92rem; }
+  .finding .meta { color: var(--muted); font-size: 0.83rem; }
+  code { background: rgba(127,127,127,0.15); padding: 0.05rem 0.35rem; border-radius: 4px; font-size: 0.85em; }
+  .note { color: var(--muted); font-size: 0.9rem; }
+  .pos { background: rgba(26,127,55,0.08); border-left: 5px solid var(--ok); padding: 0.6rem 1rem; border-radius: 6px; }
+  ul { margin: 0.4rem 0; padding-left: 1.2rem; }
+</style>
+</head>
+<body>
+<h1>WhisperDeck UX Audit Report</h1>
+<p class="sub">2026-07-22 · isolated instance (Moonshine STT, heuristic diarization, librosa MFCC voice ID, hermetic LLM stub) · exploratory browser pass via Playwright MCP + full control sweep + empty/error-state matrix + partial-failure probes</p>
+
+<h2>Journey summary</h2>
+<table>
+<tr><th>Journey</th><th>Status</th><th>Notes</th></tr>
+<tr><td>1: Cold start (register → configure → upload → read)</td><td class="PASS">PASS</td><td>Register mode clear; deck feedback good; transcript rendered.</td></tr>
+<tr><td>2: Live capture end-to-end</td><td class="PASS">PASS</td><td>First-ever live run (manual mic-Allow). Recording → transcript OK; feedback gaps logged (F9, F10).</td></tr>
+<tr><td>3: Voice roster across meetings</td><td class="PASS">PASS</td><td>Rename, enroll, nudge banner (#9 fix holds), match, delete-with-confirm all work; match quality logged (F3).</td></tr>
+<tr><td>4: Wrap-up flow (correct / context / summarize / export)</td><td class="PASS">PASS</td><td>Correction + summary end-to-end; exports work; feedback gaps logged (F4, F6, F19).</td></tr>
+<tr><td>5: Backlog management (search / sort / cancel / delete)</td><td class="PASS">PASS</td><td>Search + sort + rename work; cancel race winnable; delete confirmed.</td></tr>
+<tr><td>6: Misconfiguration recovery</td><td class="PASS">PASS</td><td>Broken provider → job fails, surfaced on tab + Queue; clean recovery after fix. Active toast still missing (F6).</td></tr>
+</table>
+<p class="note">All 6 journeys functionally pass. "PASS" means the flow completes; the findings below are usability/quality/consistency issues surfaced along the way, not journey blockers. Backend behavior verified in source where a claim was behavioral.</p>
+
+<h2>Findings — bugs / confirmed defects</h2>
+
+<div class="finding major">
+<h3>F1 · Second browser tab silently bricks the first (CSRF token)</h3>
+<p><span class="tag bug">bug</span><span class="tag major">major</span><span class="tag cat">error-recovery</span></p>
+<p><code>generate_csrf_token</code> (security.py:19-23) writes a NEW random token on every call; <code>GET /api/csrf-token</code> (app.py:315) calls it unconditionally. Frontend fetches once at boot and caches it (rack.js:427); <code>api()</code> never refreshes+retries on a 403 (rack.js:202).</p>
+<p><strong>Failure:</strong> opening a second tab (its boot rotates the server token) makes the first tab's every mutation fail 403 until manual reload. Only signal is a 4.2s toast with the raw string "Invalid or missing CSRF token"; UI otherwise looks idle.</p>
+<p class="meta">Fix: on 403-CSRF, call refreshCsrfToken() + retry once, and/or make the session token stable across reads.</p>
+</div>
+
+<div class="finding major">
+<h3>F8 · Transcribe deck "Auto-correct" toggle is a dead control</h3>
+<p><span class="tag bug">bug</span><span class="tag major">major</span><span class="tag cat">dead-control</span></p>
+<p>Deck showed Auto-correct OFF yet correction auto-ran on every upload. <code>ctl-autocorrect</code> (rack.js:1104) only flips client var <code>S.autoCorrect</code>; <code>startJob</code> (rack.js:1316-1330) never sends it. Server keys purely off the global <code>user_settings.auto_correct</code> (default true, app.py:835). Two identically-named switches, one inert.</p>
+<p class="meta">Fix: send + honor the deck toggle per-job, or remove it and point to the Service-panel global.</p>
+</div>
+
+<div class="finding major">
+<h3>F3 · Voice match collapsed two diarized speakers into one profile, no confidence / undo</h3>
+<p><span class="tag bug">bug</span><span class="tag major">major</span><span class="tag cat">quality</span></p>
+<p>Second upload's "Match now" labeled all 69 segments (incl. the 16 "Speaker 2" lines) as the single enrolled "Alice". No per-speaker confidence shown, no result summary, no undo short of full re-diarize. MFCC fallback backend (open issue #38) over-matches; UI offers no guard.</p>
+<p class="meta">Related: issue #38 (pyannote embedding backend). Fix: show match confidence per speaker + allow reject.</p>
+</div>
+
+<div class="finding major">
+<h3>F19 · "Add context" reports a dead LLM provider as success ("No new terms found")</h3>
+<p><span class="tag bug">bug</span><span class="tag major">major</span><span class="tag cat">masked-failure</span></p>
+<p>With the correction provider pointed at an unreachable address, adding a context doc full of proper nouns returned the success-shaped toast "No new terms found" (200 OK). <code>extract_hotwords_from_doc</code> (correction.py:139-165) wraps the LLM call in <code>try/except Exception: return []</code>, so a transport failure is indistinguishable from a genuine empty extraction. Inconsistent with correction/summarize, which DO surface "failed".</p>
+<p class="meta">Fix: distinguish provider/transport errors from empty results; toast a reachability error on the former.</p>
+</div>
+
+<div class="finding major">
+<h3>F16 · Transcribe deck retains the previous session's transcript state across logout/login</h3>
+<p><span class="tag bug">bug</span><span class="tag major">major</span><span class="tag cat">stale-state</span></p>
+<p>After logout + register of a fresh zero-data account, Deck B still read "Transcript written — press ⏹ to open it" and its key still targeted the prior user's transcript id. Clicking → toast "Transcript not found" AND the detail page rendered a stale header for the previous user's file ("e2e_multispeaker.mp3"). Client state (last-finished id, deck status) is not cleared on logout.</p>
+<p class="meta">Fix: clear detail/deck state (and any localStorage) on logout; guard the open-finished key against a cross-user id.</p>
+</div>
+
+<h2>Findings — missing feedback / progress</h2>
+
+<div class="finding major">
+<h3>F2 · Session-start snapshot never refreshes — Monitor, nav badges, storage meter (the "blank Monitor" symptom)</h3>
+<p><span class="tag bug">bug</span><span class="tag major">major</span><span class="tag cat">stale-ui</span></p>
+<p>Monitor (stat tiles + "Recent signals"), nav badges (Tape library, Voice roster), and the rail Storage meter render from data fetched once at login. After creating 3 transcripts + 1 voice profile, Monitor still showed the full empty state ("No signals yet — load a tape") and badges read "00". A badge self-corrects only when its own page is visited. Since Monitor is the landing page, returning to it after doing work falsely shows an empty account.</p>
+<p class="meta">This is the reported "blank Monitor on first load" symptom — reframed: genuine first-load is a correct empty state (see F18); the blankness is this stale snapshot after data exists. Fix: refresh dashboard/badges on navigation or via a shared store.</p>
+</div>
+
+<div class="finding major">
+<h3>F4 · Long synchronous operations give no progress affordance</h3>
+<p><span class="tag major">major</span><span class="tag cat">missing-feedback</span></p>
+<p>"Enroll marked clips" ran 10-20s with the modal open and the button silently disabled — no spinner/progress, looks frozen. "Match against voice roster" ran ~34s with only an initial 4.2s toast. The re-transcribe/re-run pickers also show a ~1-2s blank gap while their model list loads. Any <code>withBusy()</code> op &gt;2s lacks a visible busy state beyond the disabled attribute.</p>
+<p class="meta">Fix: spinner/progress text on long ops; skeleton/placeholder while picker options load.</p>
+</div>
+
+<div class="finding major">
+<h3>F6 · Job failures notify passively only (residue of closed #5)</h3>
+<p><span class="tag major">major</span><span class="tag cat">missing-feedback</span></p>
+<p>A failed summary produced NO toast; the failure was visible only by visiting the Summary tab ("Summary failed — &lt;raw JSON parse error&gt;") or the Queue ("ERR failed" + Rerun/Clear). Tab/queue surfacing is the #5 fix working; an active failure notification is still absent, and the raw parser error string is shown verbatim.</p>
+<p class="meta">Fix: toast on background-job failure; humanize the error string.</p>
+</div>
+
+<div class="finding major">
+<h3>F9 · Mic-permission-pending state looks dead</h3>
+<p><span class="tag major">major</span><span class="tag cat">missing-feedback</span></p>
+<p>While the browser mic-permission prompt is pending, the only cue is a 4.2s "Requesting microphone…" toast; after it expires the monitor reads STANDBY and the Rec key looks idle, with nothing persistent. A user who misses the browser's permission chip sees a dead app.</p>
+<p class="meta">Fix: persistent "waiting for microphone permission…" state until grant/deny resolves.</p>
+</div>
+
+<h2>Findings — UI / UX / copy</h2>
+
+<div class="finding minor">
+<h3>F10 · Live-capture recording UX gaps</h3>
+<p><span class="tag minor">minor</span><span class="tag cat">missing-feedback / copy</span></p>
+<ul>
+<li>No elapsed-time counter during recording (scope animates + REC LED lit, but no duration).</li>
+<li>Status line claims "mic (L) + system (R)" even when only mic was granted; should reflect actual channels.</li>
+<li>The control that OPENS a finished transcript is the ⏹ "Stop/Eject" key — label contradicts action (guidance text compensates).</li>
+</ul>
+</div>
+
+<div class="finding minor">
+<h3>F11 · Detail-header action overload</h3>
+<p><span class="tag minor">minor</span><span class="tag cat">ui</span></p>
+<p>11 identically-styled buttons in one row (Re-transcribe … Delete), including a red Delete in the same strip. No grouping or hierarchy; the "which button do I press to proceed" problem.</p>
+</div>
+
+<div class="finding minor">
+<h3>F14 · Rail status reads "Working" on an idle fresh account</h3>
+<p><span class="tag minor">minor</span><span class="tag cat">mislabeled</span></p>
+<p>Bottom rail shows "Working" persistently even when idle. If it means "operational", the word reads as "busy".</p>
+</div>
+
+<div class="finding minor">
+<h3>F15 · Inconsistent job-kind labels in Queue</h3>
+<p><span class="tag minor">minor</span><span class="tag cat">copy</span></p>
+<p>"CORRECT" (styled) vs "voice_match" (raw underscored enum) in the same list.</p>
+</div>
+
+<div class="finding minor">
+<h3>F5 · No password policy (flag for review, not a defect)</h3>
+<p><span class="tag minor">minor</span><span class="tag cat">product</span></p>
+<p>Register accepts "abc" silently; no confirm field, no requirements shown. Confirmed by-design: <code>/api/register</code> (app.py:333) checks non-empty only. Flag for product decision, not a bug.</p>
+</div>
+
+<h2>Findings — accessibility / info exposure</h2>
+
+<div class="finding minor">
+<h3>F13 · Nixie "ghost" digits leak into the accessibility tree</h3>
+<p><span class="tag minor">minor</span><span class="tag cat">a11y</span></p>
+<p>Stat tiles, nav badges, and percent readouts expose ghost "8" segments to assistive tech: "Minutes transcribed" reads "80" when the value is 0; "100%" reads "8 1 8 0 8 0 8 %". Screen readers get garbage.</p>
+<p class="meta">Fix: <code>aria-hidden</code> on the ghost-digit spans.</p>
+</div>
+
+<div class="finding minor">
+<h3>F17 · Orphaned uploads are global across users (visible + deletable); absolute paths exposed</h3>
+<p><span class="tag minor">minor</span><span class="tag cat">data-isolation</span></p>
+<p><code>/api/files</code> (app.py:1022-1064) correctly scopes <em>referenced</em> files per user, but UPLOAD_DIR is one shared directory: the "orphaned" branch lists every unreferenced file regardless of uploader, and <code>/api/files/delete</code> lets any user delete them. A fresh account saw the prior user's orphaned live-capture .webm. Full absolute server paths are shown in the UI for every row.</p>
+<p class="meta">Related: open log Observation #11 (orphan classification). Confirm intended ownership model; if per-user, scope the orphan scan by owner. Narrowed from an earlier over-broad "sees another user's files" reading.</p>
+</div>
+
+<div class="finding minor">
+<h3>F12 · Console noise on every fresh load</h3>
+<p><span class="tag minor">minor</span><span class="tag cat">cosmetic</span></p>
+<p><code>favicon.ico</code> 404 and a pre-auth <code>/api/me</code> 401 are logged as console errors on load. Cosmetic, but reads as broken in devtools.</p>
+</div>
+
+<h2>Regressions checked (closed #4-#9 + #38) — all holding</h2>
+<div class="pos">
+<ul>
+<li><strong>#4</strong> nav label: "Tape library" is clear.</li>
+<li><strong>#5</strong> job-failure surfacing: present on tab + Queue (active toast still missing — see F6).</li>
+<li><strong>#6</strong> native dialogs → styled modals: rename, delete-confirm, roster-remove-confirm all themed.</li>
+<li><strong>#7</strong> exports: Copy + Download present on transcript, corrected, and summary (with content).</li>
+<li><strong>#8</strong> search / sort / per-row rename in Tape library: all work.</li>
+<li><strong>#9</strong> voice-match nudge banner: appears with enrolled-voice count and a working "Match now".</li>
+<li><strong>#38</strong> voice-ID backend: still MFCC/librosa fallback (backend surfaced honestly in roster); over-matching feeds F3.</li>
+</ul>
+</div>
+
+<h2>Positive notes</h2>
+<div class="pos">
+<ul>
+<li>Upload → deck feedback is strong: armed strip, meter, stage LEDs, queued-toast with a location hint.</li>
+<li>Empty states (F18): every page on a fresh account shows a clear empty state with a CTA.</li>
+<li>Live-capture consent modal copy is excellent; recovery after fixing a broken provider is clean.</li>
+<li>Voice roster: honest backend label, delete confirmation, good empty-state copy.</li>
+<li>Cancel-under-pressure: cancel control is discoverable in ~2s via the Queue and works.</li>
+</ul>
+</div>
+
+<p class="note" style="margin-top:2rem">Generated by the WhisperDeck deep UX audit (passes A-D). Behavioral claims verified against source. Issue filing was gated for review per request.</p>
+</body>
+</html>
