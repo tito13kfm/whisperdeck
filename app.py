@@ -735,7 +735,7 @@ async def _run_transcription_pipeline(
     if capture_source == "live_stereo":
         try:
             stereo_audio_path = await transcode_stereo_for_diarization(str(raw_path), str(UPLOAD_DIR))
-        except AudioPrepError as e:
+        except Exception as e:
             # Non-fatal: fall back to mixed-audio diarization rather than
             # failing the whole upload over the enhancement copy.
             print(f"[audio-prep] stereo copy failed, using mixed audio: {e}")
@@ -970,7 +970,7 @@ def _transcript_refs_by_realpath(db: Session) -> dict:
     file be deleted out from under the transcript that references it.
 
     Filtered at the query level to rows that actually hold a path — a
-    transcript with both columns NULL can never match a realpath lookup,
+    transcript with all three columns NULL can never match a realpath lookup,
     so excluding it up front (rather than after loading the full row)
     keeps the table scan cheap as it grows. Full Transcript ORM objects
     are still returned (not a column projection): delete_files mutates
@@ -1011,7 +1011,7 @@ async def delete_transcript(transcript_id: int, db: Session = Depends(get_db), c
     refs = _transcript_refs_by_realpath(db)
     for path in (t.audio_path, t.video_path, t.stereo_audio_path):
         if path and os.path.exists(path):
-            # Retranscribe carries video_path/audio_path forward verbatim, so
+            # Retranscribe carries video_path/audio_path/stereo_audio_path forward verbatim, so
             # sibling transcripts (same or different user) can reference the
             # exact same file. Removing it here would break their playback.
             real = os.path.realpath(path)
