@@ -1542,7 +1542,7 @@ function stopLiveCapture() {
 }
 
 function finishLiveCapture() {
-  const wasStereo = !!CAP.disp;
+  const wasStereo = !!CAP.disp; // capture before CAP.disp is nulled below
   const blob = new Blob(CAP.chunks, { type: 'audio/webm' });
   [CAP.mic, CAP.disp].forEach(s => s && s.getTracks().forEach(t => t.stop()));
   if (CAP.actx) CAP.actx.close();
