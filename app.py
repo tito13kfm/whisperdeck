@@ -813,6 +813,7 @@ async def _run_transcription_pipeline(
         transcript.processed_size_bytes = file_size
         transcript.source_transcript_id = source_transcript_id
         transcript.kind = kind
+        transcript.num_speakers = num_speakers
         db.commit()
 
         # Run diarization if requested
