@@ -93,8 +93,8 @@ async def transcode_stereo_for_diarization(input_path: str, output_dir: str) -> 
     FLAC because libsndfile reads it natively (it cannot open webm)."""
     if not ffmpeg_available():
         raise AudioPrepError(
-            "ffmpeg is not installed or not on PATH. It's required to prepare "
-            "audio/video uploads for cloud transcription providers. "
+            "ffmpeg is not installed or not on PATH. It's required to build "
+            "the stereo diagnostic copy used for channel-aware diarization. "
             "See INSTALL.md."
         )
 
