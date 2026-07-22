@@ -34,7 +34,7 @@ from services.settings import get_user_settings, update_user_settings
 from services.transcription import TranscriptionService
 from services.diarization import DiarizationService
 from services.voice_id import voice_id_service
-from services.audio_prep import transcode_for_upload, AudioPrepError, chunk_audio, get_audio_duration, extract_clips_concat, has_video_stream
+from services.audio_prep import transcode_for_upload, AudioPrepError, chunk_audio, get_audio_duration, extract_clips_concat, has_video_stream, transcode_stereo_for_diarization
 from services.queue import (
     create_chunk_jobs, retry_failed_chunks, queue_worker_loop, compute_queue_status,
     cancel_transcript_jobs, resume_cancelled_chunks, reset_stuck_transcription_jobs,
@@ -660,6 +660,7 @@ async def _run_transcription_pipeline(
     num_speakers: Optional[int],
     source_transcript_id: Optional[int] = None,
     kind: str = "meeting",
+    capture_source: Optional[str] = None,
 ) -> dict:
     """Everything after the source audio is on disk: transcode decision,
     chunk-vs-inline branch, inline diarization, auto-correct enqueue.
@@ -678,6 +679,8 @@ async def _run_transcription_pipeline(
     be bypassed by calling either entry point directly."""
     if kind == "dictation":
         diarize = False
+    if capture_source not in (None, "live_stereo"):
+        capture_source = None  # unknown values from stale clients are ignored, not errors
     user_settings = get_user_settings(db, current_user.id)
 
     # Normalize for cloud upload: strips video track, downsamples to 16kHz
@@ -699,9 +702,14 @@ async def _run_transcription_pipeline(
             Transcript.id == source_transcript_id, Transcript.user_id == current_user.id
         ).first()
         video_path = parent.video_path if parent else None
+        # A retranscribe re-enters the pipeline with the stored mono mp3 as
+        # input, so capture_source will be None and no new stereo copy would
+        # be produced below — carry the parent's forward instead.
+        stereo_audio_path_inherited = parent.stereo_audio_path if parent else None
     else:
         playable = raw_path.suffix.lower() in _VIDEO_MIME
         video_path = str(raw_path) if playable and has_video_stream(str(raw_path)) else None
+        stereo_audio_path_inherited = None
 
     try:
         raw_duration = get_audio_duration(str(save_path))
@@ -722,6 +730,15 @@ async def _run_transcription_pipeline(
             ))
         except AudioPrepError as e:
             raise HTTPException(status_code=500, detail=str(e))
+
+    stereo_audio_path = stereo_audio_path_inherited
+    if capture_source == "live_stereo":
+        try:
+            stereo_audio_path = await transcode_stereo_for_diarization(str(raw_path), str(UPLOAD_DIR))
+        except AudioPrepError as e:
+            # Non-fatal: fall back to mixed-audio diarization rather than
+            # failing the whole upload over the enhancement copy.
+            print(f"[audio-prep] stereo copy failed, using mixed audio: {e}")
 
     # Get provider config — decrypts API key transparently
     from services.settings import _decrypt_key_if_needed
@@ -789,6 +806,7 @@ async def _run_transcription_pipeline(
         # Real processed size, not the raw upload size — the sum of all
         # chunk files, since that's what actually gets sent to the provider.
         transcript.processed_size_bytes = sum(os.path.getsize(c["path"]) for c in chunks)
+        transcript.stereo_audio_path = stereo_audio_path
         # Known now from the ffprobe above — lets the UI say "48-min
         # recording" before the first chunk lands.
         transcript.duration_seconds = duration_seconds
@@ -814,6 +832,7 @@ async def _run_transcription_pipeline(
         transcript.source_transcript_id = source_transcript_id
         transcript.kind = kind
         transcript.num_speakers = num_speakers
+        transcript.stereo_audio_path = stereo_audio_path
         db.commit()
 
         # Run diarization if requested
@@ -858,6 +877,7 @@ async def transcribe_audio(
     num_speakers: Optional[int] = Form(None),
     context_doc: Optional[str] = Form(None),
     kind: str = Form("meeting"),
+    capture_source: Optional[str] = Form(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -899,6 +919,7 @@ async def transcribe_audio(
         diarize=diarize,
         num_speakers=num_speakers,
         kind=kind,
+        capture_source=capture_source,
     )
 
 
@@ -956,10 +977,10 @@ def _transcript_refs_by_realpath(db: Session) -> dict:
     and commits these same instances after removing a file."""
     refs = {}
     rows = db.query(Transcript).filter(
-        or_(Transcript.audio_path.isnot(None), Transcript.video_path.isnot(None))
+        or_(Transcript.audio_path.isnot(None), Transcript.video_path.isnot(None), Transcript.stereo_audio_path.isnot(None))
     ).all()
     for t in rows:
-        for field in ("audio_path", "video_path"):
+        for field in ("audio_path", "video_path", "stereo_audio_path"):
             p = getattr(t, field)
             if p:
                 refs.setdefault(os.path.realpath(p), []).append((t, field))
@@ -988,7 +1009,7 @@ async def delete_transcript(transcript_id: int, db: Session = Depends(get_db), c
     if not t:
         raise HTTPException(status_code=404, detail="Transcript not found")
     refs = _transcript_refs_by_realpath(db)
-    for path in (t.audio_path, t.video_path):
+    for path in (t.audio_path, t.video_path, t.stereo_audio_path):
         if path and os.path.exists(path):
             # Retranscribe carries video_path/audio_path forward verbatim, so
             # sibling transcripts (same or different user) can reference the
@@ -1116,8 +1137,8 @@ async def delete_files(data: dict = Body(...), db: Session = Depends(get_db), cu
             skipped.append({"path": raw_path, "reason": "remove_failed"})
             continue
         # entries all belong to one transcript here — null every field of
-        # its that pointed at this file (audio_path and video_path can in
-        # principle both reference the same path).
+        # its that pointed at this file (audio_path, video_path, and
+        # stereo_audio_path can in principle all reference the same path).
         for t, field in entries:
             setattr(t, field, None)
         if entries:
