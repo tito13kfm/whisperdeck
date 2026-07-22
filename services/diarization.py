@@ -54,11 +54,11 @@ class DiarizationService:
         num_speakers: Optional[int],
         segments: list[dict],
         hf_token: Optional[str] = None,
-    ) -> tuple[list[dict], int]:
+    ) -> tuple[list[dict], int, str]:
         """Best-available diarization (pyannote if installed, else the
         pause-gap heuristic) merged onto existing transcript segments.
         num_speakers=None lets pyannote auto-detect; the heuristic can't,
-        so it defaults to 2. Returns (merged_segments, speaker_count).
+        so it defaults to 2. Returns (merged_segments, speaker_count, method).
         Raises on failure — callers decide whether that's fatal."""
         if self._check_pyannote():
             result = await self.diarize_pyannote(
@@ -69,7 +69,7 @@ class DiarizationService:
                 audio_path, num_speakers=num_speakers or 2, segments=segments
             )
         merged = await self.combine_with_transcript(result, segments)
-        return merged, result.speaker_count
+        return merged, result.speaker_count, result.method
 
     async def diarize_heuristic(
         self,

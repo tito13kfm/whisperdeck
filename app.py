@@ -245,6 +245,7 @@ def _serialize_transcript(db: Session, t: Transcript) -> dict:
         "full_text": t.full_text,
         "segments": t.segments or [],
         "speaker_count": t.speaker_count,
+        "diarization_method": t.diarization_method,
         "error": t.error,
         "corrected_text": t.corrected_text,
         "correction_error": t.correction_error,
@@ -816,7 +817,7 @@ async def _run_transcription_pipeline(
         # Run diarization if requested
         if diarize and transcript.segments:
             try:
-                merged, speaker_count = await diarization_service.diarize_and_merge(
+                merged, speaker_count, diarization_method = await diarization_service.diarize_and_merge(
                     str(save_path),
                     num_speakers=num_speakers,
                     segments=transcript.segments,
@@ -824,6 +825,7 @@ async def _run_transcription_pipeline(
                 )
                 transcript.segments = merged
                 transcript.speaker_count = speaker_count
+                transcript.diarization_method = diarization_method
                 db.commit()
             except Exception as e:
                 # Non-fatal: diarization enhancement failed. Transcript still

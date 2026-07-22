@@ -325,7 +325,7 @@ async def run_llm_job(SessionLocal, job_id: int, transcription_service, diarizat
             from services.settings import get_user_settings
             user_settings = get_user_settings(db, job.user_id)
             try:
-                merged, speaker_count = await diarization_service.diarize_and_merge(
+                merged, speaker_count, diarization_method = await diarization_service.diarize_and_merge(
                     transcript.audio_path,
                     num_speakers=transcript.num_speakers,
                     segments=transcript.segments or [],
@@ -333,6 +333,7 @@ async def run_llm_job(SessionLocal, job_id: int, transcription_service, diarizat
                 )
                 transcript.segments = merged
                 transcript.speaker_count = speaker_count
+                transcript.diarization_method = diarization_method
                 transcript.updated_at = utcnow_naive()
                 job.progress_done = 1
                 job.result_json = {"segments": merged}
