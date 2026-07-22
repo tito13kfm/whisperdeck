@@ -246,6 +246,7 @@ def _serialize_transcript(db: Session, t: Transcript) -> dict:
         "segments": t.segments or [],
         "speaker_count": t.speaker_count,
         "diarization_method": t.diarization_method,
+        "num_speakers": t.num_speakers,
         "error": t.error,
         "corrected_text": t.corrected_text,
         "correction_error": t.correction_error,
