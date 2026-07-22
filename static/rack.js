@@ -2611,7 +2611,7 @@ function renderDetail() {
         <div style="font-size:12.5px"><div style="font-family:var(--f-mono);font-size:10px;text-transform:uppercase;letter-spacing:0.08em;color:var(--label-dim);margin-bottom:3px">Duration</div>${formatDur(t.duration_seconds)}</div>
         <div style="font-size:12.5px"><div style="font-family:var(--f-mono);font-size:10px;text-transform:uppercase;letter-spacing:0.08em;color:var(--label-dim);margin-bottom:3px">Provider</div>${escapeHtml((t.provider || '—') + (t.model ? ' · ' + t.model : ''))}</div>
         <div style="font-size:12.5px"><div style="font-family:var(--f-mono);font-size:10px;text-transform:uppercase;letter-spacing:0.08em;color:var(--label-dim);margin-bottom:3px">Status</div><span class="status-badge status-badge--${escapeHtml(sv.word)}" data-word="${escapeHtml(sv.word)}">${escapeHtml(sv.word)}</span></div>
-        <div style="font-size:12.5px"><div style="font-family:var(--f-mono);font-size:10px;text-transform:uppercase;letter-spacing:0.08em;color:var(--label-dim);margin-bottom:3px">Speakers</div>${t.speaker_count || '—'}</div>
+        <div style="font-size:12.5px"><div style="font-family:var(--f-mono);font-size:10px;text-transform:uppercase;letter-spacing:0.08em;color:var(--label-dim);margin-bottom:3px">Speakers</div>${t.speaker_count || '—'}${t.diarization_method ? ` <span style="font-size:10px;color:var(--label-dim)">${escapeHtml(t.diarization_method)}${t.num_speakers ? '' : ' (auto)'}</span>` : ''}</div>
         <div style="font-size:12.5px"><div style="font-family:var(--f-mono);font-size:10px;text-transform:uppercase;letter-spacing:0.08em;color:var(--label-dim);margin-bottom:3px">Segments</div>${(t.segments || []).length}</div>
       </div>
     </div>
@@ -2961,11 +2961,13 @@ async function toggleRediarizePicker() {
   const box = $('rediarize-picker');
   if (box.style.display !== 'none') { box.style.display = 'none'; return; }
   box.style.display = 'block';
+  const t = detailData;
   box.innerHTML = `
     <div class="unit" style="padding:12px 34px;display:flex;gap:12px;align-items:center;flex-wrap:wrap">
       <span class="t-unit">Re-diarize</span>
       <input id="rediar-speakers" class="inp" type="number" min="1" max="20" placeholder="auto"
-             title="Number of speakers — leave blank to auto-detect" style="padding:6px 8px;font-size:12px;width:90px">
+             value="${t && t.num_speakers ? t.num_speakers : ''}"
+             title="Number of speakers — clear the field to let pyannote auto-detect (auto-detect tends to over-split)" style="padding:6px 8px;font-size:12px;width:90px">
       <button id="rediar-go" class="btn btn--amber" style="font-size:12px;padding:7px 14px">Run</button>
       <span style="font-size:11px;color:var(--label-dim)">Updates speaker labels in place; re-run correction afterwards if you use the corrected text.</span>
     </div>`;
