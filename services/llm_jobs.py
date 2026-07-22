@@ -365,6 +365,7 @@ async def run_llm_job(SessionLocal, job_id: int, transcription_service, diarizat
             job.progress_done = 0
             db.commit()
             skipped = 0
+            changed = []
             new_segments = list(segments)
             for i, seg in enumerate(segments):
                 try:
@@ -389,11 +390,16 @@ async def run_llm_job(SessionLocal, job_id: int, transcription_service, diarizat
                         except OSError:
                             pass
                     if matches:
+                        changed.append((i, seg.get("speaker") or ""))
                         new_segments[i] = {**seg, "speaker": matches[0]["name"]}
                 except Exception:
                     skipped += 1
                 job.progress_done = i + 1
                 db.commit()
+            if changed:
+                from services.relabel import record_relabel
+                record_relabel(db, transcript, "voice_match", changed,
+                               description=f"voice match relabeled {len(changed)} lines")
             transcript.segments = new_segments
             transcript.updated_at = utcnow_naive()
             db.commit()
