@@ -21,6 +21,32 @@ async def test_diarize_and_merge_returns_method_heuristic(monkeypatch, tmp_path)
 
 
 @pytest.mark.asyncio
+async def test_diarize_and_merge_falls_through_to_heuristic_without_pyannote(monkeypatch, tmp_path):
+    """A stereo copy existing on disk doesn't matter if pyannote isn't
+    installed — diarize_live_stereo needs pyannote for the remote channel,
+    so the outer gate must route straight to the heuristic, never call it."""
+    svc = DiarizationService()
+    monkeypatch.setattr(svc, "_check_pyannote", lambda: False)
+
+    async def fail_stereo(*a, **k):
+        raise AssertionError("diarize_live_stereo must not run when pyannote is unavailable")
+
+    monkeypatch.setattr(svc, "diarize_live_stereo", fail_stereo)
+    stereo = tmp_path / "s.flac"
+    stereo.write_bytes(b"x")  # existence check only; must never be read
+    segments = [
+        {"start": 0.0, "end": 2.0, "text": "hello"},
+        {"start": 4.0, "end": 6.0, "text": "world"},
+    ]
+    merged, count, method = await svc.diarize_and_merge(
+        str(tmp_path / "missing.mp3"), num_speakers=2, segments=segments,
+        stereo_audio_path=str(stereo),
+    )
+    assert method == "heuristic"
+    assert count >= 1
+
+
+@pytest.mark.asyncio
 async def test_diarize_and_merge_returns_method_pyannote(monkeypatch, tmp_path):
     from services.diarization import DiarizationResult, DiarizationSegment
     svc = DiarizationService()
