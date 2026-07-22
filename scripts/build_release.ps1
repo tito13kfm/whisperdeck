@@ -89,14 +89,15 @@ Write-Host "[*] Cleaning __pycache__ and .pyc files..."
 Get-ChildItem -Recurse -Path $AppDest -Include __pycache__ -Directory | Remove-Item -Recurse -Force
 Get-ChildItem -Recurse -Path $AppDest -Include *.pyc -File | Remove-Item -Force
 
-Write-Host "[*] Writing launcher and README..."
-$LauncherTemplate = Get-Content (Join-Path $RepoRoot "scripts\portable-template\WhisperDeck.bat.template") -Raw
-$LauncherTemplate.Replace("__PORT__", "9781") | Set-Content -Path (Join-Path $BuildDir "WhisperDeck.bat") -NoNewline
-Copy-Item (Join-Path $RepoRoot "scripts\portable-template\README.txt") (Join-Path $BuildDir "README.txt")
-
-# --- Version + zip ---
 $VersionLine = Select-String -Path (Join-Path $RepoRoot "app.py") -Pattern 'version="([\d.]+)"' | Select-Object -First 1
 $Version = $VersionLine.Matches[0].Groups[1].Value
+
+Write-Host "[*] Writing launcher and README..."
+$LauncherTemplate = Get-Content (Join-Path $RepoRoot "scripts\portable-template\WhisperDeck.bat.template") -Raw
+$LauncherTemplate.Replace("__PORT__", "9781").Replace("__VERSION__", $Version) | Set-Content -Path (Join-Path $BuildDir "WhisperDeck.bat") -NoNewline
+Copy-Item (Join-Path $RepoRoot "scripts\portable-template\README.txt") (Join-Path $BuildDir "README.txt")
+
+# --- Zip ---
 $ZipPath = Join-Path $DistDir "WhisperDeck-portable-v$Version.zip"
 if (Test-Path $ZipPath) { Remove-Item -Force $ZipPath }
 

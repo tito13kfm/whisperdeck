@@ -12,7 +12,7 @@ rem PYTHONPATH entirely (isolation mode), so the app directory is instead
 rem added directly to that ._pth file at build time (see build_release.ps1).
 
 echo ==============================================
-echo          WhisperDeck (portable)
+echo          WhisperDeck v__VERSION__ (portable)
 echo   Transcribe - Diarize - Summarize - Identify
 echo ==============================================
 echo.

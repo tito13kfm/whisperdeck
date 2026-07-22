@@ -38,7 +38,14 @@ class VoiceIdentificationService:
         except ImportError:
             pass
         try:
-            import pyannote.audio  # noqa
+            import warnings
+            # pyannote.audio warns on import if torchcodec isn't installed —
+            # harmless, we hand it preloaded waveforms and never touch the
+            # torchcodec decoding path (same suppression as
+            # services/diarization.py _check_pyannote).
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", category=UserWarning)
+                import pyannote.audio  # noqa
             return "pyannote"
         except ImportError:
             pass
