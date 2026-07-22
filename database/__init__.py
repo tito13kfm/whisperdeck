@@ -105,6 +105,20 @@ class LlmJob(Base):
     updated_at = Column(DateTime, default=utcnow_naive, onupdate=utcnow_naive)
 
 
+class RelabelHistory(Base):
+    """Inverse patch for one bulk speaker-relabel action (rename, retag,
+    voice-match apply), newest-last. POST /relabel-undo pops the newest.
+    Capped per transcript in services/relabel.py; no schema-level cap."""
+    __tablename__ = "relabel_history"
+
+    id = Column(Integer, primary_key=True)
+    transcript_id = Column(Integer, ForeignKey("transcripts.id", ondelete="CASCADE"), nullable=False)
+    kind = Column(String(32), nullable=False)  # rename | retag | voice_match
+    inverse = Column(JSON, nullable=False)  # {"segments": [{"index": i, "speaker": old}], "corrected_text": str|None}
+    description = Column(String(255), default="")
+    created_at = Column(DateTime, default=utcnow_naive)
+
+
 class HotwordEntry(Base):
     __tablename__ = "hotword_entries"
 
@@ -330,6 +344,6 @@ def init_db(db_path: str = "data/whisperdesk.db") -> tuple:
 
 
 __all__ = [
-    "Base", "User", "Transcript", "Summary", "VoiceProfile", "VoiceClip", "ProviderConfig", "TranscriptionJob", "LlmJob", "HotwordEntry",
+    "Base", "User", "Transcript", "Summary", "VoiceProfile", "VoiceClip", "ProviderConfig", "TranscriptionJob", "LlmJob", "RelabelHistory", "HotwordEntry",
     "init_db", "migrate_schema", "backfill_user_id", "ensure_columns", "backfill_llm_job_result_snapshots",
 ]
