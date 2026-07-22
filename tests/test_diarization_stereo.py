@@ -71,7 +71,8 @@ async def test_live_stereo_mic_becomes_you_and_system_goes_to_pyannote(monkeypat
         # Content check, not just shape: confirms it's actually the system
         # channel (index 1) that got routed to pyannote, not the mic channel
         # (index 0) — a channel-assignment swap would still pass a shape-only
-        # check but fails this. Small tolerance for FLAC's lossy round-trip.
+        # check but fails this. Small tolerance for PCM_16 quantization on
+        # FLAC write/read (soundfile's default FLAC subtype), not exact bit-for-bit.
         assert np.allclose(waveform[0], system, atol=1e-3)
         return [DiarizationSegment(start=2.0, end=5.0, speaker="SPEAKER_00")]
 
