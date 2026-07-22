@@ -2599,7 +2599,8 @@ function renderDetail() {
         ${t.kind === 'dictation' ? '' : `
         <button class="btn" style="font-size:12px;padding:7px 14px;border-color:var(--inset-edge)" data-dact="rediarize" ${t.has_audio ? '' : 'disabled title="No stored audio for this transcript"'}>Re-diarize</button>
         <button class="btn" style="font-size:12px;padding:7px 14px;border-color:var(--inset-edge)" data-dact="rediarize-history">Rediarize history</button>
-        <button class="btn" style="font-size:12px;padding:7px 14px;border-color:var(--inset-edge)" data-dact="voicematch" ${!t.has_audio ? 'disabled title="No stored audio for this transcript"' : (llmJobActive(t.voice_match_job) ? 'disabled title="Voice match job already queued"' : '')}>Match against voice roster</button>`}
+        <button class="btn" style="font-size:12px;padding:7px 14px;border-color:var(--inset-edge)" data-dact="voicematch" ${!t.has_audio ? 'disabled title="No stored audio for this transcript"' : (llmJobActive(t.voice_match_job) ? 'disabled title="Voice match job already queued"' : '')}>Match against voice roster</button>
+        ${t.last_relabel ? `<button class="btn" style="font-size:12px;padding:7px 14px;border-color:var(--inset-edge)" data-dact="relabel-undo" title="${escapeHtml(t.last_relabel.description || '')}">Undo relabel</button>` : ''}`}
         <button class="btn" style="font-size:12px;padding:7px 14px;border-color:var(--inset-edge)" data-dact="context">Add context</button>
         <button class="btn" style="font-size:12px;padding:7px 14px;border-color:var(--inset-edge)" data-dact="summarize" ${llmJobActive(t.summary_job) ? 'disabled title="Summary job already queued"' : ''}>Summarize</button>
         <button class="btn" style="font-size:12px;padding:7px 14px;border-color:var(--inset-edge)" data-dact="summary-history">Summary history</button>
@@ -2795,6 +2796,12 @@ async function detailAction(act, btn) {
         result => result.segments || [],
         rediarizeDiffHtml,
       );
+      return;
+    }
+    if (act === 'relabel-undo') {
+      const res = await api('/api/transcripts/' + t.id + '/relabel-undo', { method: 'POST' });
+      toast('Undid ' + (res.description || res.undone), 'info');
+      await loadTranscriptDetail(t.id);
       return;
     }
     if (act === 'compare-versions') {
