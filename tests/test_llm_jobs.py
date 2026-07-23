@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, patch
 from database import LlmJob, Transcript, User, ProviderConfig, utcnow_naive
 from services.llm_jobs import (
     enqueue_llm_job, run_llm_job, cancel_llm_job, rerun_llm_job, llm_worker_tick,
-    reset_stuck_llm_jobs, dismiss_llm_job, clear_finished_llm_jobs,
+    reset_stuck_llm_jobs, dismiss_llm_job, clear_finished_llm_jobs, serialize_llm_job,
 )
 from services.queue import MAX_ATTEMPTS
 
@@ -681,6 +681,42 @@ def test_worker_tick_never_resurrects_non_auto_retry_kinds(db_session):
     db_session.refresh(job)
     assert job.status == "failed"
     assert job.attempts == 1  # never reclaimed by the sweep
+
+
+def test_serialize_will_retry_reflects_auto_retry_eligibility(db_session):
+    """The frontend's background-failure toast (#58) trusts will_retry as the
+    sole signal for 'this failure is terminal' — it must be False exactly
+    when the auto-retry sweep (llm_worker_tick) would leave the job alone."""
+    user, t = _make_user_and_transcript(db_session)
+
+    eligible = enqueue_llm_job(db_session, user.id, t.id, "correction", "groq", "m1")
+    eligible.status = "failed"
+    eligible.attempts = MAX_ATTEMPTS - 1
+    db_session.commit()
+    assert serialize_llm_job(eligible)["will_retry"] is True
+
+    exhausted = enqueue_llm_job(db_session, user.id, t.id, "correction", "groq", "m1")
+    exhausted.status = "failed"
+    exhausted.attempts = MAX_ATTEMPTS
+    db_session.commit()
+    assert serialize_llm_job(exhausted)["will_retry"] is False
+
+    non_retry_kind = enqueue_llm_job(db_session, user.id, t.id, "rediarize", "", "")
+    non_retry_kind.status = "failed"
+    non_retry_kind.attempts = 1
+    db_session.commit()
+    assert serialize_llm_job(non_retry_kind)["will_retry"] is False
+
+    still_running = enqueue_llm_job(db_session, user.id, t.id, "correction", "groq", "m1")
+    assert still_running.status in ("pending", "running")
+    assert serialize_llm_job(still_running)["will_retry"] is False
+
+    precondition_failed = enqueue_llm_job(
+        db_session, user.id, t.id, "summary", "openrouter", "m1",
+        error="no openrouter API key saved (see service panel)",
+    )
+    assert precondition_failed.status == "failed" and precondition_failed.attempts == 0
+    assert serialize_llm_job(precondition_failed)["will_retry"] is False
 
 
 def test_worker_tick_skips_resurrection_when_a_fresh_job_already_active(db_session):
