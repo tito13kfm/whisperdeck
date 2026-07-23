@@ -162,3 +162,33 @@ stays in the active log (never archived) until resolved to ACTIONED or DECLINED
 **Suggested improvement:** In the review skill (and any PR-authoring flow), run cheap mechanical gates before spawning finder agents: `node --check` (or eslint) on changed .js files, `python -m py_compile` on changed .py files. A parse failure short-circuits the review. For this repo: add a JS syntax check to CI so parse errors block merge.
 
 **Principle:** Run free mechanical validity checks (parse, compile) before spending model effort on semantic review; a file that does not parse makes most semantic findings moot and every finder rediscovers it redundantly.
+
+### Observation 22: Derived-field formula matched its own comment's intent but not the actual consuming query it was meant to mirror
+
+**Status:** OPEN
+**Date:** 2026-07-23
+**Session context:** Implementing #58 (background job failure toast); backend `will_retry` field on `serialize_llm_job`
+**Skill:** receiving-code-review / systematic-debugging
+**Type:** open-source
+**Phase/Area:** deriving a field meant to mirror another function's eligibility logic
+
+**Issue:** `will_retry` was written as `status=='failed' and kind in AUTO_RETRY_KINDS and attempts < MAX_ATTEMPTS`, intended to mirror exactly which jobs `llm_worker_tick`'s resurrection sweep would revive. It silently diverged: the sweep's query additionally requires `attempts >= 1` (a job that pre-fails at enqueue, e.g. missing API key, never ran and stays at attempts=0, so the sweep's `.filter(LlmJob.attempts >= 1)` never selects it). The formula read `0 < MAX_ATTEMPTS` as retry-eligible forever — exactly backwards for the single most common real failure (missing/misconfigured provider), and exactly the case the feature's own motivating scenario named. A live browser test against a *configured* stub didn't catch it because that path always has attempts>=1 by the time it fails; the untested branch was the zero-attempt precondition-failure path. A second advisor pass (not the test run) caught it by re-deriving the formula from the sweep's literal query instead of trusting the first pass's derivation.
+
+**Suggested improvement:** When writing a value meant to predict/mirror another function's behavior (a sweep, a scheduler, a cache-eligibility check), don't re-derive the condition from memory or from the field's docstring intent — open the actual consuming query/function and copy its filter predicates directly, or unit-test against the exact boundary case that predicate depends on (here: attempts==0 vs attempts==1). Runtime/browser verification only proves the paths actually exercised; a mirrored-logic bug at an untested boundary survives a passing manual test.
+
+**Principle:** "Mirrors X" is a claim to verify against X's literal implementation, not against your recollection of what X does — this is the same failure shape as the CLAUDE.md "mirror / round-trip paths" rule, just for a business-logic predicate instead of an export/render pair.
+
+### Observation 23: ScheduleWakeup used outside /loop context to wait on a background command
+
+**Status:** OPEN
+**Date:** 2026-07-23
+**Session context:** Waiting on a backgrounded PowerShell health-poll command while verifying #58's fix in a browser
+**Skill:** New skill candidate: none — tool-usage correction for whichever agent handles background-task waits
+**Type:** internal
+**Phase/Area:** tool selection when blocked on a background command
+
+**Issue:** Called ScheduleWakeup to "wait" for a `run_in_background` PowerShell command's completion notification, despite that tool's description stating it is for `/loop` dynamic-mode self-pacing and explicitly warning not to use it to poll for work the harness already tracks (a completion notification arrives automatically). Caught the misuse immediately after the call and issued `stop:true`, but the call itself was wasted.
+
+**Suggested improvement:** Before calling ScheduleWakeup, confirm the session is actually in a `/loop` dynamic-mode context. If just waiting on a `run_in_background` Bash/PowerShell command or a Monitor, do nothing — the notification arrives unprompted. If genuinely blocked with no tracked background signal, that is the narrow legitimate case.
+
+**Principle:** A tool's own description scoping ("use when the user invoked /loop") is a hard precondition, not a suggestion — reread it before reaching for a tool by vague name-association ("I need to wait" -> "there's a wait-related tool") when a simpler default (do nothing, the harness notifies you) already covers the situation.
