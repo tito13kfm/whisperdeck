@@ -1068,13 +1068,19 @@ async def delete_transcript(transcript_id: int, db: Session = Depends(get_db), c
     return {"ok": True}
 
 
-def _resolve_under_upload_dir(path_str: str) -> Optional[str]:
-    """Path-traversal guard: resolve to a real absolute path and confirm
-    it's inside UPLOAD_DIR before any filesystem operation touches it.
-    Returns None if the path escapes UPLOAD_DIR (including via symlink,
-    `..` traversal, or an unrelated absolute path)."""
+def _resolve_upload_name(name: str) -> Optional[str]:
+    """Resolve a bare filename to its real path inside UPLOAD_DIR. The client
+    never sees a server-side absolute path (list_files only returns
+    basenames) — a path separator or '..' component means the input isn't a
+    bare name at all, rejected up front. realpath is still checked for
+    containment afterward as defense in depth against a symlink placed
+    directly in UPLOAD_DIR. UPLOAD_DIR is flat (chunk_audio and the upload
+    endpoints never create subdirectories), so a basename is always a
+    unique, sufficient identifier for a file inside it."""
+    if not name or os.sep in name or (os.altsep and os.altsep in name) or name in (".", ".."):
+        return None
     try:
-        real = os.path.realpath(path_str)
+        real = os.path.realpath(os.path.join(str(UPLOAD_DIR), name))
         upload_real = os.path.realpath(str(UPLOAD_DIR))
         # Strictly inside — UPLOAD_DIR itself is not a deletable target.
         if real == upload_real or os.path.commonpath([real, upload_real]) != upload_real:
@@ -1112,15 +1118,21 @@ async def list_files(db: Session = Depends(get_db), current_user: User = Depends
             # once per reference in total_linked_bytes.
             for t, field in own_refs:
                 linked.append({"transcript_id": t.id, "transcript_title": t.title, "field": field,
-                                "path": full, "size_bytes": size, "modified_at": mtime})
+                                "name": name, "size_bytes": size, "modified_at": mtime})
                 total_linked += size
         elif real in live_job_paths or real in refs:
             # Live chunk (pending/running/failed/cancelled job), or referenced
             # only by another user's transcript — excluded from the response
             # entirely (shown as neither linked nor orphaned).
             continue
-        else:
-            orphaned.append({"path": full, "size_bytes": size, "modified_at": mtime})
+        elif current_user.is_admin:
+            # UPLOAD_DIR is shared across all users, and a truly orphaned
+            # file (no Transcript/TranscriptionJob row at all) carries no
+            # owner anywhere in the schema — unlike linked files, which stay
+            # scoped by own_refs above. Until upload-time ownership is
+            # tracked, only an admin (who already has cross-user visibility
+            # elsewhere in the app) sees the orphan list.
+            orphaned.append({"name": name, "size_bytes": size, "modified_at": mtime})
             total_orphaned += size
     linked.sort(key=lambda x: x["modified_at"])
     orphaned.sort(key=lambda x: x["modified_at"])
@@ -1131,28 +1143,28 @@ async def list_files(db: Session = Depends(get_db), current_user: User = Depends
 
 @app.post("/api/files/delete")
 async def delete_files(data: dict = Body(...), db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    paths = data.get("paths") or []
-    if not isinstance(paths, list):
-        raise HTTPException(status_code=400, detail="paths must be a list of strings")
-    # Validate every path up front — a traversal attempt anywhere in the
-    # batch aborts the whole request with no side effects, rather than
-    # partially deleting earlier entries before hitting the bad one.
+    names = data.get("names") or []
+    if not isinstance(names, list):
+        raise HTTPException(status_code=400, detail="names must be a list of strings")
+    # Validate every name up front — a bad entry anywhere in the batch aborts
+    # the whole request with no side effects, rather than partially deleting
+    # earlier entries before hitting the bad one.
     resolved = []
-    for raw_path in paths:
-        if not isinstance(raw_path, str):
-            raise HTTPException(status_code=400, detail="paths must be a list of strings")
-        real = _resolve_under_upload_dir(raw_path)
+    for raw_name in names:
+        if not isinstance(raw_name, str):
+            raise HTTPException(status_code=400, detail="names must be a list of strings")
+        real = _resolve_upload_name(raw_name)
         if real is None:
-            raise HTTPException(status_code=400, detail=f"Path not allowed: {raw_path}")
-        resolved.append((raw_path, real))
+            raise HTTPException(status_code=400, detail=f"Name not allowed: {raw_name}")
+        resolved.append((raw_name, real))
 
     live_job_paths = _live_job_paths(db)
     refs = _transcript_refs_by_realpath(db)
     deleted, skipped = [], []
     freed_bytes = 0
-    for raw_path, real in resolved:
+    for raw_name, real in resolved:
         if real in live_job_paths:
-            skipped.append({"path": raw_path, "reason": "in_use"})
+            skipped.append({"name": raw_name, "reason": "in_use"})
             continue
         entries = refs.get(real, [])
         if len({t.id for t, _ in entries}) > 1:
@@ -1160,21 +1172,31 @@ async def delete_files(data: dict = Body(...), db: Session = Depends(get_db), cu
             # chain, a cross-user collision, or both. Either way, deleting
             # would silently break playback for at least one other
             # transcript, so skip regardless of who owns which row.
-            skipped.append({"path": raw_path, "reason": "shared"})
+            skipped.append({"name": raw_name, "reason": "shared"})
             continue
         if entries:
             m = entries[0][0]
             if m.user_id != current_user.id:
-                skipped.append({"path": raw_path, "reason": "not_found_or_forbidden"})
+                skipped.append({"name": raw_name, "reason": "not_found_or_forbidden"})
                 continue
             if _transcript_pipeline_can_resume(db, m):
-                skipped.append({"path": raw_path, "reason": "in_use"})
+                skipped.append({"name": raw_name, "reason": "in_use"})
                 continue
+        elif not current_user.is_admin:
+            # No transcript reference at all — a true orphan with no
+            # recorded owner. Same admin-only rule as the listing endpoint
+            # (list_files): a non-admin can't prove this file is theirs, so
+            # it can't be treated as deletable by them either. Reuse the
+            # "not_found_or_forbidden" reason rather than a distinct one, so
+            # a non-admin probing arbitrary UPLOAD_DIR filenames can't use
+            # the response to tell an orphan apart from someone else's file.
+            skipped.append({"name": raw_name, "reason": "not_found_or_forbidden"})
+            continue
         try:
             size = os.path.getsize(real)  # captured before removal — gone from disk afterward
             os.remove(real)
         except OSError:
-            skipped.append({"path": raw_path, "reason": "remove_failed"})
+            skipped.append({"name": raw_name, "reason": "remove_failed"})
             continue
         # entries all belong to one transcript here — null every field of
         # its that pointed at this file (audio_path, video_path, and
@@ -1183,7 +1205,7 @@ async def delete_files(data: dict = Body(...), db: Session = Depends(get_db), cu
             setattr(t, field, None)
         if entries:
             db.commit()
-        deleted.append(raw_path)
+        deleted.append(raw_name)
         freed_bytes += size
     return {"deleted": deleted, "skipped": skipped, "freed_bytes": freed_bytes}
 
