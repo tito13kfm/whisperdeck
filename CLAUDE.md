@@ -15,5 +15,6 @@ Read `AGENTS.md` and follow **The Complement Rule** section — it exists becaus
 
 ## Testing
 
+- Match test cost to change blast radius; see AGENTS.md "Testing tiers" — don't run full browser e2e for every small change.
 - Any user-visible UI change (text, control, label, role) changes what e2e tests select by; grep the e2e/test directories for the old text or role and update selectors in the same change.
-- A green local run proves only the layer you ran. Do not claim behavior works from unit tests alone when the change has a runtime surface; drive the affected flow.
+- A green local run proves only the layer you ran. Do not claim behavior works from unit tests alone when the change has a runtime surface; drive the affected flow (scope the check to the changed flow, not the full suite).

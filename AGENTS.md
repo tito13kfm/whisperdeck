@@ -32,6 +32,27 @@ This project is configured with advisor subagents for plan validation and unstuc
 ### ClinePass limit fallback
 When ClinePass hits usage limits, switch the primary model via `/models` to `openrouter/deepseek/deepseek-v4-flash` (or `openrouter/deepseek/deepseek-chat`). Advisors already run on OpenRouter and don't need changes.
 
+## Worktree hygiene
+
+Remove merged or abandoned worktrees and their branches immediately, no exceptions. A worktree is stale once its branch is fully merged (PR state MERGED, or `git merge-base --is-ancestor <branch-sha> origin/<base>` succeeds) or the user says the work is abandoned. Do not leave it "just in case" — clean up in the same session you notice it:
+
+```
+git worktree remove <path>
+git branch -d <branch>
+```
+
+If the worktree has uncommitted or unmerged work, stop and confirm with the user before removing (`--force`/`-D` needs explicit sign-off, this is a destructive action).
+
+## Testing tiers: match test cost to change blast radius
+
+Don't run full browser-driven e2e audits for every small change; reserve them for milestones. Pick the tier by what the change actually touches:
+
+1. **Unit/integration test for the touched path** — default for any change. Fast, run every time, no exception.
+2. **`e2e-regression-http` (scripted HTTP, no browser)** — before merging anything that changes request/response contracts or cross-feature flow (queue/job routing, serializer shape, multi-step API behavior).
+3. **Full browser e2e (`e2e-ux-audit`, `e2e-ux-audit-deep`)** — reserve for pre-release checkpoints or after a batch of changes lands, not per-PR. Also required for any change with a runtime/UI surface per the Testing section below, but "drive the affected flow" there means a targeted manual/scripted check of that flow, not the full 6-journey or deep audit suite.
+
+Rule of thumb: a backend fix scoped to one module doesn't need a browser; a UI-visible or cross-cutting change does, but scope the runtime check to the flow that changed, not the whole app.
+
 ## The Complement Rule
 
 Your diff shows where you looked; before finishing, enumerate the complement. Whenever a change introduces a guard, a new enum/mode value, a threaded parameter, or a conditional UI affordance:
