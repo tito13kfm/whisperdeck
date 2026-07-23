@@ -32,7 +32,7 @@ file isn't touched in the same session, that's a bug — fix it before moving on
 
 ## In Progress
 
-- Diarization misidentification fixes, issue #67 (`docs/superpowers/plans/2026-07-22-issue-67-diarization.md`) — Phases 0-3 complete (dropped dead threshold override, `diarization_method`/`num_speakers` persistence fixes, channel-aware live-stereo diarization, undo for bulk speaker relabels — closes #55 for free), draft PR #69. Phases 4-5 (per-line confidence signal, contingent repro runbook) not started. Known gap: live-stereo pyannote path unverified on real hardware (dev machine has no pyannote/torch).
+- Diarization misidentification fixes, issue #67 (`docs/superpowers/plans/2026-07-22-issue-67-diarization.md`) — Phases 0-4 complete (dropped dead threshold override, `diarization_method`/`num_speakers` persistence fixes, channel-aware live-stereo diarization, undo for bulk speaker relabels — closes #55 for free, per-line speaker-confidence signal), draft PR #69. Phase 5 (contingent repro runbook) only runs if over-splitting persists in production. Known gaps: live-stereo pyannote path unverified on real hardware (dev machine has no pyannote/torch); confidence markers and undo button unit-correct but never driven in a real browser; confidence signal always reads 1.0 on heuristic-diarized transcripts by construction (only informative for pyannote/live_stereo).
 
 ## Parked (not designed yet)
 

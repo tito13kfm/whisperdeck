@@ -282,6 +282,10 @@ class DiarizationService:
                     per_speaker[dseg.speaker] = per_speaker.get(dseg.speaker, 0.0) + overlap
 
             if per_speaker:
+                # Heuristic-diarized transcripts always land here at 1.0: the
+                # heuristic's own turns are byte-identical to these transcript
+                # segments, so there is never a rival speaker to contest against.
+                # The signal is only informative for pyannote / live_stereo.
                 ranked = sorted(per_speaker.items(), key=lambda kv: kv[1], reverse=True)
                 best_speaker, best_total = ranked[0]
                 second_total = ranked[1][1] if len(ranked) > 1 else 0.0

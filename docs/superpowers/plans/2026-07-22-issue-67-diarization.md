@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-> **Status as of 2026-07-22, end of session:** Phase 0 through Phase 3 (Tasks 0-13) are complete, reviewed (spec compliance + code quality per task, plus a final whole-branch review across Phases 0-3), and pushed to branch `issue-67-diarization` on origin, folded into draft PR #69. Full suite: 316 passed, 2 deselected, no regressions. Whole-branch review: no Critical/Important findings, ready to merge; Minor items noted (no cascade relationship on `relabel_history`, stereo copy stored even when unused, VAD/bleed-filter heuristic blind spots — all documented in the review, none blocking). Known gaps, not yet closed: (1) Task 9 Step 5's real-pyannote runtime verification for live-stereo diarization has NOT been done (this dev machine has no pyannote/torch); (2) Task 13's "Undo relabel" button has not been driven in a real browser/e2e pass. Next up: Phase 4 (per-line confidence signal), starting at Task 14. Phase 5 is contingent (only run if over-splitting persists after Phases 1-2 ship).
+> **Status as of 2026-07-22, end of session:** Phase 0 through Phase 4 (Tasks 0-15) are complete, reviewed (spec compliance + code quality per task, plus a final whole-branch review after Phase 3 and again after Phase 4), and committed to branch `issue-67-diarization`. Full suite: 320 passed, 2 deselected, no regressions. Latest whole-branch review (Phases 0-4, ed455fe..3a2a3db): no Critical/Important findings, ready to merge; Minor items noted — heuristic-diarized transcripts always report `speaker_confidence` 1.0 by construction (no rival speaker to contest against, signal only informative for pyannote/live_stereo), live-stereo "You" lines can show spuriously low confidence when Whisper segment bounds extend past the VAD-trimmed interval, manual retag doesn't reset the pre-retag confidence value, plus the Phase 0-3 Minor items already on record. Known gaps, not yet closed: (1) Task 9 Step 5's real-pyannote runtime verification for live-stereo diarization has NOT been done (this dev machine has no pyannote/torch); (2) Task 13's "Undo relabel" button and Task 15's confidence markers have not been driven in a real browser/e2e pass — the confidence UI is unit-correct but runtime-unverified, and since heuristic transcripts always score 1.0, the markers cannot even be observed firing without a pyannote-equipped machine. Phase 5 is contingent (only run if over-splitting persists after Phases 1-2 ship in production).
 
 **Goal:** Stop diarization from splitting one real speaker across many labels (and merging distinct speakers), add undo for bulk speaker relabels, and surface a per-line confidence signal.
 
@@ -1434,7 +1434,7 @@ git commit -m "feat: undo-relabel button on transcript detail"
 
 Traps: T10, T11.
 
-- [ ] **Step 1: Failing tests**
+- [x] **Step 1: Failing tests**
 
 ```python
 """combine_with_transcript: per-speaker overlap totals and confidence."""
@@ -1500,7 +1500,7 @@ async def test_zero_overlap_keeps_prior_speaker_with_zero_confidence():
 Run: `python -m pytest tests/test_diarization_confidence.py -q`
 Expected: FAIL (KeyError speaker_confidence).
 
-- [ ] **Step 2: Rewrite combine_with_transcript**
+- [x] **Step 2: Rewrite combine_with_transcript**
 
 Replace the body (keep signature and the empty-diarization early return):
 
@@ -1544,12 +1544,12 @@ Replace the body (keep signature and the empty-diarization early return):
 
 Behavior note (deliberate, tested): assignment now uses max TOTAL overlap per speaker instead of max single turn; a speaker holding two short turns inside one Whisper segment now beats a speaker holding one slightly longer turn. This is an accuracy improvement, not an accident.
 
-- [ ] **Step 3: Run tests**
+- [x] **Step 3: Run tests**
 
 Run: `python -m pytest tests/test_diarization_confidence.py tests -q`
 Expected: new tests pass; if an existing combine test asserts the exact dict shape, update it to tolerate the added `speaker_confidence` key.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add services/diarization.py tests/test_diarization_confidence.py
@@ -1563,7 +1563,7 @@ git commit -m "feat: per-segment speaker confidence from diarization overlap"
 
 Traps: T7.
 
-- [ ] **Step 1: Line marker**
+- [x] **Step 1: Line marker**
 
 In the segment renderer (`static/rack.js:1960`), after the `speakerLabel` const (line 1973), add:
 
@@ -1577,7 +1577,7 @@ and in the speaker row div (line 1980-1983), after `${speakerLabel}`:
           ${lowConf ? '<span title="Low-confidence speaker assignment — the diarizer was unsure here" style="font-family:var(--f-mono);font-size:10px;color:var(--nixie);cursor:help">?</span>' : ''}
 ```
 
-- [ ] **Step 2: Header count**
+- [x] **Step 2: Header count**
 
 In the Speakers cell (extended in Task 3), append:
 
@@ -1585,11 +1585,11 @@ In the Speakers cell (extended in Task 3), append:
 ${(() => { const u = (t.segments || []).filter(s => s.speaker_confidence != null && s.speaker_confidence < 0.5).length; return u ? ` <span style="font-size:10px;color:var(--nixie)" title="Lines where the speaker assignment is uncertain">${u} uncertain</span>` : ''; })()}
 ```
 
-- [ ] **Step 3: Selector check (T7) and runtime check**
+- [x] **Step 3: Selector check (T7) and runtime check**
 
 Grep tests/e2e for Speakers-cell markup; then drive a diarized transcript in the browser and confirm markers render and old transcripts (no `speaker_confidence` key) render without markers or errors.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add static/rack.js
@@ -1611,7 +1611,7 @@ Not tasks; run only if over-splitting persists after Phases 1 and 2 are deployed
 
 ## Final verification (before PR)
 
-- [ ] `python -m pytest tests -q`: baseline pass count + all new tests, same single pre-existing voice_id failure.
-- [ ] Drive each changed UI surface in a real browser (re-diarize picker prefill, undo button, confidence markers).
-- [ ] `git log --oneline master..HEAD` reads as a clean conventional-commit sequence, no AI-authorship trailers (T14).
+- [x] `python -m pytest tests -q`: baseline pass count + all new tests, same single pre-existing voice_id failure. (320 passed, 2 deselected)
+- [ ] Drive each changed UI surface in a real browser (re-diarize picker prefill, undo button, confidence markers). Known gap: no browser access this session; deferred.
+- [x] `git log --oneline master..HEAD` reads as a clean conventional-commit sequence, no AI-authorship trailers (T14).
 - [ ] Open PR referencing #67 and #55 (undo), wait for green CI, merge with branch deletion.
