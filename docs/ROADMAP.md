@@ -32,6 +32,8 @@ file isn't touched in the same session, that's a bug — fix it before moving on
 
 ## In Progress
 
+- Diarization misidentification fixes, issue #67 (`docs/superpowers/plans/2026-07-22-issue-67-diarization.md`) — Phases 0-3 complete (dropped dead threshold override, `diarization_method`/`num_speakers` persistence fixes, channel-aware live-stereo diarization, undo for bulk speaker relabels — closes #55 for free), draft PR #69. Phases 4-5 (per-line confidence signal, contingent repro runbook) not started. Known gap: live-stereo pyannote path unverified on real hardware (dev machine has no pyannote/torch).
+
 ## Parked (not designed yet)
 
 - **Windows ML / native app pivot** — DirectML could unlock real AMD GPU use; needs ONNX conversion or a native-app rewrite, not a quick win.

@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-> **Status as of 2026-07-22, end of session:** Phase 0, Phase 1, and Phase 2 (Tasks 0-9) are complete, reviewed (spec compliance + code quality, per task, plus a final holistic pass across all of Phase 2), and pushed to branch `issue-67-diarization` on origin, folded into draft PR #69. Full suite: 309 passed, 1 pre-existing unrelated failure (`test_voice_id.py`, missing torch), 1 skipped. Known gap: Task 9 Step 5's real-pyannote runtime verification has NOT been done (this dev machine has no pyannote/torch) — see the note at that step. Next up: Phase 3 (undo for bulk relabels), starting at Task 10.
+> **Status as of 2026-07-22, end of session:** Phase 0 through Phase 3 (Tasks 0-13) are complete, reviewed (spec compliance + code quality per task, plus a final whole-branch review across Phases 0-3), and pushed to branch `issue-67-diarization` on origin, folded into draft PR #69. Full suite: 316 passed, 2 deselected, no regressions. Whole-branch review: no Critical/Important findings, ready to merge; Minor items noted (no cascade relationship on `relabel_history`, stereo copy stored even when unused, VAD/bleed-filter heuristic blind spots — all documented in the review, none blocking). Known gaps, not yet closed: (1) Task 9 Step 5's real-pyannote runtime verification for live-stereo diarization has NOT been done (this dev machine has no pyannote/torch); (2) Task 13's "Undo relabel" button has not been driven in a real browser/e2e pass. Next up: Phase 4 (per-line confidence signal), starting at Task 14. Phase 5 is contingent (only run if over-splitting persists after Phases 1-2 ship).
 
 **Goal:** Stop diarization from splitting one real speaker across many labels (and merging distinct speakers), add undo for bulk speaker relabels, and surface a per-line confidence signal.
 
@@ -993,7 +993,7 @@ git commit -m "feat: route live captures through channel-aware diarization"
 
 Traps: T1, T12.
 
-- [ ] **Step 1: Model**
+- [x] **Step 1: Model**
 
 Add to `database/__init__.py` after `LlmJob`:
 
@@ -1014,7 +1014,7 @@ class RelabelHistory(Base):
 
 New table: `Base.metadata.create_all` in `init_db` creates it automatically; no `ensure_columns` entry needed.
 
-- [ ] **Step 2: Failing tests for the helper**
+- [x] **Step 2: Failing tests for the helper**
 
 Create `tests/test_relabel_undo.py`:
 
@@ -1064,7 +1064,7 @@ def test_record_relabel_stores_inverse_and_prunes(db_session):
 Run: `python -m pytest tests/test_relabel_undo.py -q`
 Expected: FAIL (no `services.relabel`).
 
-- [ ] **Step 3: Implement the helper**
+- [x] **Step 3: Implement the helper**
 
 Create `services/relabel.py`:
 
@@ -1113,12 +1113,12 @@ def record_relabel(db, transcript, kind: str, changed: list[tuple[int, str]],
 
 Note the `MAX_HISTORY - 1`: the freshly added entry is in the session but not in query results until flush; the offset accounts for it. If the prune test fails off-by-one, check autoflush behavior first (the `db.query` triggers a flush, making the new row visible, in which case use `MAX_HISTORY` instead; the test pins the correct behavior either way).
 
-- [ ] **Step 4: Run the test, adjust the offset if the flush assumption was wrong**
+- [x] **Step 4: Run the test, adjust the offset if the flush assumption was wrong**
 
 Run: `python -m pytest tests/test_relabel_undo.py -q`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add database/__init__.py services/relabel.py tests/test_relabel_undo.py
@@ -1133,7 +1133,7 @@ git commit -m "feat: relabel history table and inverse-patch recorder"
 
 Traps: T1, T6, T12, T16.
 
-- [ ] **Step 1: Failing endpoint tests**
+- [x] **Step 1: Failing endpoint tests**
 
 ```python
 def test_rename_then_undo_restores_segments_and_corrected_text(client, db_session):
@@ -1186,7 +1186,7 @@ def test_two_undos_walk_back_two_actions(client, db_session):
 Run: `python -m pytest tests/test_relabel_undo.py -q`
 Expected: new tests FAIL (404 on the undo route, no recording).
 
-- [ ] **Step 2: Record in the rename endpoint**
+- [x] **Step 2: Record in the rename endpoint**
 
 In `rename_transcript_speaker` (`app.py:1290` area), collect old values and record. The loop becomes:
 
@@ -1214,7 +1214,7 @@ In `rename_transcript_speaker` (`app.py:1290` area), collect old values and reco
 
 (The corrected_text rewrite below it stays unchanged; the before-image was captured above it.)
 
-- [ ] **Step 3: Record in the retag endpoint**
+- [x] **Step 3: Record in the retag endpoint**
 
 In `retag_transcript_segments` (`app.py:1342` area), before building `new_segments`:
 
@@ -1226,7 +1226,7 @@ In `retag_transcript_segments` (`app.py:1342` area), before building `new_segmen
                    description=f"retag {len(index_set)} lines to {speaker}")
 ```
 
-- [ ] **Step 4: Undo endpoint**
+- [x] **Step 4: Undo endpoint**
 
 Add after the retag endpoint:
 
@@ -1272,7 +1272,7 @@ async def undo_last_relabel(
 
 Import `RelabelHistory` in `app.py`'s existing `from database import ...` line.
 
-- [ ] **Step 5: Expose the last entry to the UI without an N+1 (T16)**
+- [x] **Step 5: Expose the last entry to the UI without an N+1 (T16)**
 
 Give `_serialize_transcript` an opt-in keyword:
 
@@ -1297,12 +1297,12 @@ and inside, at the end before returning, when `include_relabel`:
 
 (adapt the variable name to whatever the function's return dict is called). Pass `include_relabel=True` from the single-transcript detail route and from the undo/rename/retag endpoints' responses only; find them with `grep -n "_serialize_transcript(db, t)" app.py` and change only the detail-view and relabel-related call sites, not list views.
 
-- [ ] **Step 6: Run tests**
+- [x] **Step 6: Run tests**
 
 Run: `python -m pytest tests/test_relabel_undo.py tests/test_speaker_naming.py -q`
 Expected: all pass (speaker_naming still green proves rename behavior unchanged).
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add app.py tests/test_relabel_undo.py
@@ -1317,7 +1317,7 @@ git commit -m "feat: undo endpoint for bulk speaker relabels"
 
 Traps: T1, T6.
 
-- [ ] **Step 1: Failing test**
+- [x] **Step 1: Failing test**
 
 The voice-match job harness already exists in `tests/test_voice_match_job.py` (it stubs `extract_clips_concat` and `voice_id_service.identify`, builds a transcript with `SPEAKER_00`/`SPEAKER_01` segments, then awaits `run_llm_job`). Do this exactly:
 
@@ -1336,7 +1336,7 @@ The voice-match job harness already exists in `tests/test_voice_match_job.py` (i
 Run: `python -m pytest tests/test_relabel_undo.py -q`
 Expected: FAIL (no history row).
 
-- [ ] **Step 2: Implement**
+- [x] **Step 2: Implement**
 
 In the voice_match block of `services/llm_jobs.py`, thread a `changed` list:
 
@@ -1363,12 +1363,12 @@ and before `transcript.segments = new_segments` (line 395):
                                description=f"voice match relabeled {len(changed)} lines")
 ```
 
-- [ ] **Step 3: Run tests**
+- [x] **Step 3: Run tests**
 
 Run: `python -m pytest tests/test_relabel_undo.py tests/test_voice_match_job.py -q`
 Expected: PASS.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add services/llm_jobs.py tests/test_relabel_undo.py
@@ -1382,7 +1382,7 @@ git commit -m "feat: voice-match relabels are undoable"
 
 Traps: T7.
 
-- [ ] **Step 1: Button**
+- [x] **Step 1: Button**
 
 In the detail actions row (next to the Re-diarize button block at `static/rack.js:2594`), add inside the non-dictation template section:
 
@@ -1390,7 +1390,7 @@ In the detail actions row (next to the Re-diarize button block at `static/rack.j
         ${t.last_relabel ? `<button class="btn" style="font-size:12px;padding:7px 14px;border-color:var(--inset-edge)" data-dact="relabel-undo" title="${escapeHtml(t.last_relabel.description || '')}">Undo relabel</button>` : ''}
 ```
 
-- [ ] **Step 2: Handler**
+- [x] **Step 2: Handler**
 
 In the same click dispatcher that handles `rediarize-history` (`static/rack.js:2778` area), add:
 
@@ -1407,15 +1407,15 @@ In the same click dispatcher that handles `rediarize-history` (`static/rack.js:2
 
 (match the exact `withBusy`/`api` idiom of the neighboring handlers; if neighbors wrap in `withBusy(e.currentTarget, async () => ...)`, do the same.)
 
-- [ ] **Step 3: Selector check (T7)**
+- [x] **Step 3: Selector check (T7)**
 
 `grep -rn "Undo relabel\|relabel-undo" tests/` plus e2e dirs; add/update selectors as needed.
 
-- [ ] **Step 4: Runtime check**
+- [x] **Step 4: Runtime check**
 
 Drive it: rename a speaker in the UI, confirm the Undo button appears with the action description in its tooltip, click it, confirm labels revert and the button disappears (history empty) or shows the previous action.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add static/rack.js
