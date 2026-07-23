@@ -17,6 +17,7 @@ const S = {
   tapeLoaded: false,
   tapeName: '',
   tapeFile: null,
+  tapeIsLiveStereo: false,
   running: false,
   runningId: null,
   pct: 0,
@@ -1275,10 +1276,11 @@ function wireTranscribeDrop() {
   });
 }
 
-function loadTape(file) {
+function loadTape(file, isLiveStereo = false) {
   S.tapeFile = file;
   S.tapeName = file.name;
   S.tapeLoaded = true;
+  S.tapeIsLiveStereo = isLiveStereo;
   S.jobDone = false;
   S.pct = 0;
   syncTranscribe();
@@ -1288,6 +1290,7 @@ function ejectTape() {
   S.tapeFile = null;
   S.tapeName = '';
   S.tapeLoaded = false;
+  S.tapeIsLiveStereo = false;
   S.jobDone = false;
   S.pct = 0;
   syncTranscribe();
@@ -1315,6 +1318,7 @@ async function startJob() {
   if (!S.tapeLoaded || S.running || !prov.ready || !S.tapeFile) return;
   const form = new FormData();
   form.append('file', S.tapeFile);
+  if (S.tapeIsLiveStereo) form.append('capture_source', 'live_stereo');
   form.append('provider', prov.id);
   form.append('model', curModel());
   const lang = LANGUAGES[S.langIdx];
@@ -1365,6 +1369,7 @@ async function startJob() {
     S.tapeLoaded = false;
     S.tapeFile = null;
     S.tapeName = '';
+    S.tapeIsLiveStereo = false;
     syncTranscribe();
   } catch (e) {
     S.running = false;
@@ -1537,6 +1542,7 @@ function stopLiveCapture() {
 }
 
 function finishLiveCapture() {
+  const wasStereo = !!CAP.disp; // capture before CAP.disp is nulled below
   const blob = new Blob(CAP.chunks, { type: 'audio/webm' });
   [CAP.mic, CAP.disp].forEach(s => s && s.getTracks().forEach(t => t.stop()));
   if (CAP.actx) CAP.actx.close();
@@ -1549,7 +1555,7 @@ function finishLiveCapture() {
   const now = new Date();
   const stamp = String(now.getHours()).padStart(2, '0') + String(now.getMinutes()).padStart(2, '0');
   if (blob.size > 0) {
-    loadTape(new File([blob], 'live_capture_' + stamp + '.webm', { type: 'audio/webm' }));
+    loadTape(new File([blob], 'live_capture_' + stamp + '.webm', { type: 'audio/webm' }), wasStereo);
     toast('Capture loaded onto Deck A — press START to transcribe');
   } else {
     toast('Nothing was recorded', 'info');
@@ -1971,6 +1977,7 @@ function segmentsHtml(t) {
     const speakerLabel = sg.speaker
       ? `<span data-seg-rename="${escapeHtml(sg.speaker)}" title="Rename this speaker everywhere" style="font-family:var(--f-cond);font-weight:600;font-size:12.5px;text-transform:uppercase;letter-spacing:0.05em;cursor:pointer;border-bottom:1px dotted var(--label-dim)">${escapeHtml(sg.speaker)}</span>`
       : `<span style="font-family:var(--f-cond);font-weight:600;font-size:12.5px;text-transform:uppercase;letter-spacing:0.05em">Speaker</span>`;
+    const lowConf = sg.speaker_confidence != null && sg.speaker_confidence < 0.5;
     return `
     <div style="display:flex;gap:16px;padding:12px 0;border-bottom:1px solid var(--seg-edge)">
       ${checkbox}
@@ -1980,6 +1987,7 @@ function segmentsHtml(t) {
         <div style="display:flex;align-items:center;gap:7px;margin-bottom:3px">
           <span style="width:7px;height:7px;border-radius:50%;background:${dot};box-shadow:0 0 4px ${dot}"></span>
           ${speakerLabel}
+          ${lowConf ? '<span title="Low-confidence speaker assignment — the diarizer was unsure here" style="font-family:var(--f-mono);font-size:10px;color:var(--nixie);cursor:help">?</span>' : ''}
         </div>
         <div style="font-size:13.5px;line-height:1.55;color:var(--body)">${escapeHtml(sg.text || '')}</div>
       </div>
@@ -2593,7 +2601,8 @@ function renderDetail() {
         ${t.kind === 'dictation' ? '' : `
         <button class="btn" style="font-size:12px;padding:7px 14px;border-color:var(--inset-edge)" data-dact="rediarize" ${t.has_audio ? '' : 'disabled title="No stored audio for this transcript"'}>Re-diarize</button>
         <button class="btn" style="font-size:12px;padding:7px 14px;border-color:var(--inset-edge)" data-dact="rediarize-history">Rediarize history</button>
-        <button class="btn" style="font-size:12px;padding:7px 14px;border-color:var(--inset-edge)" data-dact="voicematch" ${!t.has_audio ? 'disabled title="No stored audio for this transcript"' : (llmJobActive(t.voice_match_job) ? 'disabled title="Voice match job already queued"' : '')}>Match against voice roster</button>`}
+        <button class="btn" style="font-size:12px;padding:7px 14px;border-color:var(--inset-edge)" data-dact="voicematch" ${!t.has_audio ? 'disabled title="No stored audio for this transcript"' : (llmJobActive(t.voice_match_job) ? 'disabled title="Voice match job already queued"' : '')}>Match against voice roster</button>
+        ${t.last_relabel ? `<button class="btn" style="font-size:12px;padding:7px 14px;border-color:var(--inset-edge)" data-dact="relabel-undo" title="${escapeHtml(t.last_relabel.description || '')}">Undo relabel</button>` : ''}`}
         <button class="btn" style="font-size:12px;padding:7px 14px;border-color:var(--inset-edge)" data-dact="context">Add context</button>
         <button class="btn" style="font-size:12px;padding:7px 14px;border-color:var(--inset-edge)" data-dact="summarize" ${llmJobActive(t.summary_job) ? 'disabled title="Summary job already queued"' : ''}>Summarize</button>
         <button class="btn" style="font-size:12px;padding:7px 14px;border-color:var(--inset-edge)" data-dact="summary-history">Summary history</button>
@@ -2611,7 +2620,7 @@ function renderDetail() {
         <div style="font-size:12.5px"><div style="font-family:var(--f-mono);font-size:10px;text-transform:uppercase;letter-spacing:0.08em;color:var(--label-dim);margin-bottom:3px">Duration</div>${formatDur(t.duration_seconds)}</div>
         <div style="font-size:12.5px"><div style="font-family:var(--f-mono);font-size:10px;text-transform:uppercase;letter-spacing:0.08em;color:var(--label-dim);margin-bottom:3px">Provider</div>${escapeHtml((t.provider || '—') + (t.model ? ' · ' + t.model : ''))}</div>
         <div style="font-size:12.5px"><div style="font-family:var(--f-mono);font-size:10px;text-transform:uppercase;letter-spacing:0.08em;color:var(--label-dim);margin-bottom:3px">Status</div><span class="status-badge status-badge--${escapeHtml(sv.word)}" data-word="${escapeHtml(sv.word)}">${escapeHtml(sv.word)}</span></div>
-        <div style="font-size:12.5px"><div style="font-family:var(--f-mono);font-size:10px;text-transform:uppercase;letter-spacing:0.08em;color:var(--label-dim);margin-bottom:3px">Speakers</div>${t.speaker_count || '—'}</div>
+        <div style="font-size:12.5px"><div style="font-family:var(--f-mono);font-size:10px;text-transform:uppercase;letter-spacing:0.08em;color:var(--label-dim);margin-bottom:3px">Speakers</div>${t.speaker_count || '—'}${t.diarization_method ? ` <span style="font-size:10px;color:var(--label-dim)">${escapeHtml(t.diarization_method)}${t.num_speakers ? '' : ' (auto)'}</span>` : ''}${(() => { const u = (t.segments || []).filter(s => s.speaker_confidence != null && s.speaker_confidence < 0.5).length; return u ? ` <span style="font-size:10px;color:var(--nixie)" title="Lines where the speaker assignment is uncertain">${u} uncertain</span>` : ''; })()}</div>
         <div style="font-size:12.5px"><div style="font-family:var(--f-mono);font-size:10px;text-transform:uppercase;letter-spacing:0.08em;color:var(--label-dim);margin-bottom:3px">Segments</div>${(t.segments || []).length}</div>
       </div>
     </div>
@@ -2791,6 +2800,12 @@ async function detailAction(act, btn) {
       );
       return;
     }
+    if (act === 'relabel-undo') {
+      const res = await api('/api/transcripts/' + t.id + '/relabel-undo', { method: 'POST' });
+      toast('Undid ' + (res.description || res.undone), 'info');
+      await loadTranscriptDetail(t.id);
+      return;
+    }
     if (act === 'compare-versions') {
       await openCompareModal(
         'Compare transcript versions',
@@ -2961,11 +2976,13 @@ async function toggleRediarizePicker() {
   const box = $('rediarize-picker');
   if (box.style.display !== 'none') { box.style.display = 'none'; return; }
   box.style.display = 'block';
+  const t = detailData;
   box.innerHTML = `
     <div class="unit" style="padding:12px 34px;display:flex;gap:12px;align-items:center;flex-wrap:wrap">
       <span class="t-unit">Re-diarize</span>
       <input id="rediar-speakers" class="inp" type="number" min="1" max="20" placeholder="auto"
-             title="Number of speakers — leave blank to auto-detect" style="padding:6px 8px;font-size:12px;width:90px">
+             value="${t && t.num_speakers ? t.num_speakers : ''}"
+             title="Number of speakers — clear the field to let pyannote auto-detect (auto-detect tends to over-split)" style="padding:6px 8px;font-size:12px;width:90px">
       <button id="rediar-go" class="btn btn--amber" style="font-size:12px;padding:7px 14px">Run</button>
       <span style="font-size:11px;color:var(--label-dim)">Updates speaker labels in place; re-run correction afterwards if you use the corrected text.</span>
     </div>`;
