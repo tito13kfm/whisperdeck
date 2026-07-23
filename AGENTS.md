@@ -3,7 +3,7 @@
 This project uses Serena, an MCP server providing symbol-aware code retrieval, editing, and refactoring tools.
 Serena runs in `--context=ide` mode, which excludes its file-reading and shell tools (Opencode provides those) but keeps all symbolic and editing tools.
 
-## Serena Usage
+## Serena Usage (Opencode-only — Claude Code: skip this section, use your own configured tools)
 
 - **Prefer Serena over built-in tools** for: finding symbol definitions, symbol overview/file outline, finding references to a symbol, renaming symbols, replacing symbol bodies, inserting before/after symbols, safe deletes, `replace_content` (regex or literal file edits), and `replace_in_files` (bulk edits across files).
 - **Search order:** `find_symbol` first, then `search_for_pattern`, then built-in `grep` as last resort.
@@ -11,7 +11,7 @@ Serena runs in `--context=ide` mode, which excludes its file-reading and shell t
 - **Parallel calls:** batch independent Serena operations in a single turn to minimize round-trips.
 - If Serena tools are not visible, run `serena start-mcp-server --context=ide --project=WhisperDeck` manually or use the `/mcp` command.
 
-## Advisor Escalation
+## Advisor Escalation (Opencode-only — Claude Code: skip, @advisor-pro/@advisor-qwen are not reachable here, use your own advisor tool instead)
 
 This project is configured with advisor subagents for plan validation and unstucking. The primary model runs DeepSeek V4 Flash (ClinePass).
 
