@@ -86,6 +86,40 @@ async def transcode_for_upload(input_path: str, output_dir: str, bitrate_kbps: i
     return await asyncio.to_thread(_run)
 
 
+async def transcode_stereo_for_diarization(input_path: str, output_dir: str) -> str:
+    """16 kHz 2-channel FLAC copy of a live-capture recording, kept solely
+    for channel-aware diarization (mic = channel 0, system audio = channel 1).
+    The mono mp3 from transcode_for_upload stays the transcription source;
+    FLAC because libsndfile reads it natively (it cannot open webm)."""
+    if not ffmpeg_available():
+        raise AudioPrepError(
+            "ffmpeg is not installed or not on PATH. It's required to build "
+            "the stereo diagnostic copy used for channel-aware diarization. "
+            "See INSTALL.md."
+        )
+
+    base = os.path.splitext(os.path.basename(input_path))[0]
+    output_path = os.path.join(output_dir, f"{base}_16k_stereo.flac")
+
+    cmd = [
+        _ffmpeg_bin(), "-y",
+        "-i", input_path,
+        "-vn",
+        "-ac", "2",
+        "-ar", "16000",
+        "-c:a", "flac",
+        output_path,
+    ]
+
+    def _run():
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            raise AudioPrepError(f"ffmpeg stereo transcode failed: {result.stderr[-2000:]}")
+        return output_path
+
+    return await asyncio.to_thread(_run)
+
+
 def get_audio_duration(audio_path: str) -> float:
     """Return the audio file's duration in seconds via ffprobe."""
     result = subprocess.run(
