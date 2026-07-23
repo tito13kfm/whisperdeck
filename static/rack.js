@@ -3352,14 +3352,16 @@ async function renderFilesPage() {
 
   const fileRow = (f, group) => `
     <div style="display:flex;align-items:center;gap:12px;padding:9px 22px 9px 34px;border-bottom:1px solid var(--seg-edge)">
-      <input type="checkbox" data-file-select="${group}" data-path="${escapeHtml(f.path)}" style="flex-shrink:0">
+      <input type="checkbox" data-file-select="${group}" data-name="${escapeHtml(f.name)}" style="flex-shrink:0">
       <div style="flex:1;min-width:0">
         <div style="font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${
           f.transcript_title
             ? escapeHtml(f.transcript_title) + ' <span style="color:var(--label-dim)">(' + escapeHtml(f.field === 'video_path' ? 'video' : 'audio') + ')</span>'
-            : escapeHtml(f.path.split(/[\\/]/).pop())
+            : escapeHtml(f.name)
         }</div>
-        <div style="font-family:var(--f-mono);font-size:10.5px;color:var(--label-dim);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(f.path)}</div>
+        ${f.transcript_title
+          ? `<div style="font-family:var(--f-mono);font-size:10.5px;color:var(--label-dim);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(f.name)}</div>`
+          : ''}
       </div>
       <div style="font-family:var(--f-mono);font-size:11px;color:var(--label-dim);flex-shrink:0">${fmtBytes(f.size_bytes)}</div>
       <div style="font-family:var(--f-mono);font-size:10px;color:var(--label-faint);flex-shrink:0;width:90px;text-align:right">${f.modified_at ? timeAgo(f.modified_at) : ''}</div>
@@ -3414,14 +3416,14 @@ async function renderFilesPage() {
 
 async function deleteSelectedFiles(group) {
   const root = $('page-files');
-  const paths = [...root.querySelectorAll('[data-file-select="' + group + '"]:checked')].map(el => el.dataset.path);
-  if (!paths.length) { toast('No files selected', 'error'); return; }
-  if (!(await styledConfirm('Delete ' + paths.length + ' file(s)? This cannot be undone.'))) return;
+  const names = [...root.querySelectorAll('[data-file-select="' + group + '"]:checked')].map(el => el.dataset.name);
+  if (!names.length) { toast('No files selected', 'error'); return; }
+  if (!(await styledConfirm('Delete ' + names.length + ' file(s)? This cannot be undone.'))) return;
   try {
     const r = await api('/api/files/delete', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ paths }),
+      body: JSON.stringify({ names }),
     });
     const msg = [];
     if (r.deleted.length) msg.push(r.deleted.length + ' deleted');

@@ -1,5 +1,11 @@
 """GET /api/files inventory and POST /api/files/delete cleanup — the file
-never takes the transcript down with it, only the path/file it targets."""
+never takes the transcript down with it, only the path/file it targets.
+
+The client never sees a server-side absolute path: list_files returns a bare
+basename ("name"), and delete_files resolves a bare basename back to a real
+path under UPLOAD_DIR (UPLOAD_DIR is flat, so a basename is always unique and
+sufficient). Tests below identify files by `.name` (pathlib's basename),
+matching that contract."""
 import os
 
 from database import Transcript, TranscriptionJob, User
@@ -10,6 +16,20 @@ def _other_user(db_session):
     db_session.add(u)
     db_session.commit()
     return u
+
+
+def _non_admin_client():
+    """Register a second, non-first (non-admin) user with their own session.
+    testuser is always the first user in a fresh test DB, so it's auto-admin
+    (services/auth.py create_user) — orphan-visibility tests need a client
+    that is genuinely not an admin."""
+    from fastapi.testclient import TestClient
+    import app as app_module
+    fresh = TestClient(app_module.app)
+    csrf_token = fresh.get("/api/csrf-token").json()["token"]
+    fresh.headers["X-CSRF-Token"] = csrf_token
+    fresh.post("/api/register", json={"username": "nonadmin", "password": "pass123"})
+    return fresh
 
 
 def test_list_files_classifies_linked_and_orphaned(client, db_session, tmp_path, monkeypatch):
@@ -29,11 +49,11 @@ def test_list_files_classifies_linked_and_orphaned(client, db_session, tmp_path,
     r = client.get("/api/files")
     assert r.status_code == 200
     body = r.json()
-    linked_paths = [f["path"] for f in body["linked"]]
-    orphan_paths = [f["path"] for f in body["orphaned"]]
-    assert str(linked_file) in linked_paths
-    assert str(orphan_file) in orphan_paths
-    assert str(linked_file) not in orphan_paths
+    linked_names = [f["name"] for f in body["linked"]]
+    orphan_names = [f["name"] for f in body["orphaned"]]
+    assert linked_file.name in linked_names
+    assert orphan_file.name in orphan_names
+    assert linked_file.name not in orphan_names
 
 
 def test_list_files_excludes_other_users_linked_file_from_both_lists(client, db_session, tmp_path, monkeypatch):
@@ -49,8 +69,8 @@ def test_list_files_excludes_other_users_linked_file_from_both_lists(client, db_
 
     r = client.get("/api/files")
     body = r.json()
-    all_paths = [f["path"] for f in body["linked"]] + [f["path"] for f in body["orphaned"]]
-    assert str(other_file) not in all_paths
+    all_names = [f["name"] for f in body["linked"]] + [f["name"] for f in body["orphaned"]]
+    assert other_file.name not in all_names
 
 
 def test_list_files_excludes_in_flight_job_chunk_from_orphaned(client, db_session, tmp_path, monkeypatch):
@@ -68,20 +88,44 @@ def test_list_files_excludes_in_flight_job_chunk_from_orphaned(client, db_sessio
     db_session.commit()
 
     r = client.get("/api/files")
-    orphan_paths = [f["path"] for f in r.json()["orphaned"]]
-    assert str(chunk_file) not in orphan_paths
+    orphan_names = [f["name"] for f in r.json()["orphaned"]]
+    assert chunk_file.name not in orphan_names
 
 
-def test_delete_rejects_path_outside_upload_dir(client, db_session, tmp_path, monkeypatch):
+def test_delete_rejects_traversal_name(client, db_session, tmp_path, monkeypatch):
     import app as app_module
     monkeypatch.setattr(app_module, "UPLOAD_DIR", tmp_path / "uploads")
     (tmp_path / "uploads").mkdir()
     outside = tmp_path / "outside.txt"
     outside.write_bytes(b"do not delete me")
 
-    r = client.post("/api/files/delete", json={"paths": [str(outside)]})
+    r = client.post("/api/files/delete", json={"names": ["../outside.txt"]})
     assert r.status_code == 400
     assert outside.exists()
+
+
+def test_delete_rejects_absolute_path_as_name(client, db_session, tmp_path, monkeypatch):
+    """A client sending a full path instead of a bare name (old contract, or
+    an attacker probing) is rejected outright — names must not contain path
+    separators at all."""
+    import app as app_module
+    monkeypatch.setattr(app_module, "UPLOAD_DIR", tmp_path / "uploads")
+    (tmp_path / "uploads").mkdir()
+    outside = tmp_path / "outside.txt"
+    outside.write_bytes(b"do not delete me")
+
+    r = client.post("/api/files/delete", json={"names": [str(outside)]})
+    assert r.status_code == 400
+    assert outside.exists()
+
+
+def test_delete_rejects_dot_as_name(client, db_session, tmp_path, monkeypatch):
+    """UPLOAD_DIR itself must never be a deletable target — "." resolves to
+    UPLOAD_DIR when joined onto it, so it's rejected explicitly."""
+    import app as app_module
+    monkeypatch.setattr(app_module, "UPLOAD_DIR", tmp_path)
+    r = client.post("/api/files/delete", json={"names": ["."]})
+    assert r.status_code == 400
 
 
 def test_delete_linked_file_nulls_column_keeps_transcript(client, db_session, tmp_path, monkeypatch):
@@ -95,9 +139,9 @@ def test_delete_linked_file_nulls_column_keeps_transcript(client, db_session, tm
     db_session.add(t)
     db_session.commit()
 
-    r = client.post("/api/files/delete", json={"paths": [str(linked_file)]})
+    r = client.post("/api/files/delete", json={"names": [linked_file.name]})
     assert r.status_code == 200
-    assert str(linked_file) in r.json()["deleted"]
+    assert linked_file.name in r.json()["deleted"]
     assert not linked_file.exists()
 
     db_session.expire_all()
@@ -119,10 +163,10 @@ def test_delete_skips_other_users_linked_file(client, db_session, tmp_path, monk
     db_session.add(t)
     db_session.commit()
 
-    r = client.post("/api/files/delete", json={"paths": [str(other_file)]})
+    r = client.post("/api/files/delete", json={"names": [other_file.name]})
     assert r.status_code == 200
     body = r.json()
-    assert any(s["path"] == str(other_file) and s["reason"] == "not_found_or_forbidden" for s in body["skipped"])
+    assert any(s["name"] == other_file.name and s["reason"] == "not_found_or_forbidden" for s in body["skipped"])
     assert other_file.exists()
 
 
@@ -145,11 +189,11 @@ def test_delete_shared_path_skips_and_preserves_both_transcripts(client, db_sess
     db_session.add_all([mine, theirs])
     db_session.commit()
 
-    r = client.post("/api/files/delete", json={"paths": [str(shared_file)]})
+    r = client.post("/api/files/delete", json={"names": [shared_file.name]})
     assert r.status_code == 200
     body = r.json()
-    assert any(s["path"] == str(shared_file) and s["reason"] == "shared" for s in body["skipped"])
-    assert str(shared_file) not in body["deleted"]
+    assert any(s["name"] == shared_file.name and s["reason"] == "shared" for s in body["skipped"])
+    assert shared_file.name not in body["deleted"]
     assert shared_file.exists()
 
     db_session.expire_all()
@@ -165,10 +209,50 @@ def test_delete_orphan_removes_outright(client, db_session, tmp_path, monkeypatc
     orphan_file = tmp_path / "orphan.mp3"
     orphan_file.write_bytes(b"orphan")
 
-    r = client.post("/api/files/delete", json={"paths": [str(orphan_file)]})
+    r = client.post("/api/files/delete", json={"names": [orphan_file.name]})
     assert r.status_code == 200
-    assert str(orphan_file) in r.json()["deleted"]
+    assert orphan_file.name in r.json()["deleted"]
     assert not orphan_file.exists()
+
+
+def test_list_files_hides_orphaned_from_non_admin(client, db_session, tmp_path, monkeypatch):
+    """Orphaned files have no per-user owner recorded anywhere (a truly
+    orphaned upload has no Transcript/TranscriptionJob row at all), so an
+    unreferenced file left by any user is indistinguishable from one left by
+    another. Until ownership is tracked at upload time (a separate concern),
+    only an admin — who already has cross-user visibility elsewhere in this
+    app — may see the orphan list. A non-admin must see none of it, even
+    though the file physically exists on shared UPLOAD_DIR."""
+    import app as app_module
+    monkeypatch.setattr(app_module, "UPLOAD_DIR", tmp_path)
+    orphan_file = tmp_path / "orphan.mp3"
+    orphan_file.write_bytes(b"orphan")
+
+    non_admin = _non_admin_client()
+    r = non_admin.get("/api/files")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["orphaned"] == []
+    assert body["total_orphaned_bytes"] == 0
+
+    # An admin (testuser, auto-admin as the first registered user) still sees it.
+    r_admin = client.get("/api/files")
+    assert orphan_file.name in [f["name"] for f in r_admin.json()["orphaned"]]
+
+
+def test_delete_orphan_forbidden_for_non_admin(client, db_session, tmp_path, monkeypatch):
+    import app as app_module
+    monkeypatch.setattr(app_module, "UPLOAD_DIR", tmp_path)
+    orphan_file = tmp_path / "orphan.mp3"
+    orphan_file.write_bytes(b"orphan")
+
+    non_admin = _non_admin_client()
+    r = non_admin.post("/api/files/delete", json={"names": [orphan_file.name]})
+    assert r.status_code == 200
+    body = r.json()
+    assert any(s["name"] == orphan_file.name and s["reason"] == "not_found_or_forbidden" for s in body["skipped"])
+    assert orphan_file.name not in body["deleted"]
+    assert orphan_file.exists()
 
 
 def test_delete_transcript_removes_its_media_files(client, db_session, tmp_path):
@@ -234,11 +318,11 @@ def test_delete_files_shared_same_user_path_skips_and_preserves_both_transcripts
     db_session.add_all([original, retranscribed])
     db_session.commit()
 
-    r = client.post("/api/files/delete", json={"paths": [str(shared_file)]})
+    r = client.post("/api/files/delete", json={"names": [shared_file.name]})
     assert r.status_code == 200
     body = r.json()
-    assert any(s["path"] == str(shared_file) and s["reason"] == "shared" for s in body["skipped"])
-    assert str(shared_file) not in body["deleted"]
+    assert any(s["name"] == shared_file.name and s["reason"] == "shared" for s in body["skipped"])
+    assert shared_file.name not in body["deleted"]
     assert shared_file.exists()
 
     db_session.expire_all()
@@ -268,7 +352,7 @@ def test_list_files_shows_one_linked_entry_per_transcript_for_shared_path(client
     r = client.get("/api/files")
     assert r.status_code == 200
     body = r.json()
-    matching = [f for f in body["linked"] if f["path"] == str(shared_file)]
+    matching = [f for f in body["linked"] if f["name"] == shared_file.name]
     assert len(matching) == 2
     transcript_ids = {f["transcript_id"] for f in matching}
     assert transcript_ids == {original.id, retranscribed.id}
@@ -297,8 +381,8 @@ def test_list_files_excludes_failed_chunk_from_orphaned(client, db_session, tmp_
     chunk_file, _ = _chunk_with_status(db_session, tmp_path, "failed", transcript_status="partial")
 
     r = client.get("/api/files")
-    orphan_paths = [f["path"] for f in r.json()["orphaned"]]
-    assert str(chunk_file) not in orphan_paths
+    orphan_names = [f["name"] for f in r.json()["orphaned"]]
+    assert chunk_file.name not in orphan_names
 
 
 def test_list_files_excludes_cancelled_chunk_from_orphaned(client, db_session, tmp_path, monkeypatch):
@@ -309,8 +393,8 @@ def test_list_files_excludes_cancelled_chunk_from_orphaned(client, db_session, t
     chunk_file, _ = _chunk_with_status(db_session, tmp_path, "cancelled", transcript_status="cancelled")
 
     r = client.get("/api/files")
-    orphan_paths = [f["path"] for f in r.json()["orphaned"]]
-    assert str(chunk_file) not in orphan_paths
+    orphan_names = [f["name"] for f in r.json()["orphaned"]]
+    assert chunk_file.name not in orphan_names
 
 
 def test_delete_skips_failed_chunk_as_in_use(client, db_session, tmp_path, monkeypatch):
@@ -318,9 +402,9 @@ def test_delete_skips_failed_chunk_as_in_use(client, db_session, tmp_path, monke
     monkeypatch.setattr(app_module, "UPLOAD_DIR", tmp_path)
     chunk_file, _ = _chunk_with_status(db_session, tmp_path, "failed", transcript_status="partial")
 
-    r = client.post("/api/files/delete", json={"paths": [str(chunk_file)]})
+    r = client.post("/api/files/delete", json={"names": [chunk_file.name]})
     assert r.status_code == 200
-    assert any(s["path"] == str(chunk_file) and s["reason"] == "in_use" for s in r.json()["skipped"])
+    assert any(s["name"] == chunk_file.name and s["reason"] == "in_use" for s in r.json()["skipped"])
     assert chunk_file.exists()
 
 
@@ -329,9 +413,9 @@ def test_delete_skips_cancelled_chunk_as_in_use(client, db_session, tmp_path, mo
     monkeypatch.setattr(app_module, "UPLOAD_DIR", tmp_path)
     chunk_file, _ = _chunk_with_status(db_session, tmp_path, "cancelled", transcript_status="cancelled")
 
-    r = client.post("/api/files/delete", json={"paths": [str(chunk_file)]})
+    r = client.post("/api/files/delete", json={"names": [chunk_file.name]})
     assert r.status_code == 200
-    assert any(s["path"] == str(chunk_file) and s["reason"] == "in_use" for s in r.json()["skipped"])
+    assert any(s["name"] == chunk_file.name and s["reason"] == "in_use" for s in r.json()["skipped"])
     assert chunk_file.exists()
 
 
@@ -350,9 +434,9 @@ def test_delete_skips_processing_transcripts_source_audio(client, db_session, tm
     db_session.add(t)
     db_session.commit()
 
-    r = client.post("/api/files/delete", json={"paths": [str(source)]})
+    r = client.post("/api/files/delete", json={"names": [source.name]})
     assert r.status_code == 200
-    assert any(s["path"] == str(source) and s["reason"] == "in_use" for s in r.json()["skipped"])
+    assert any(s["name"] == source.name and s["reason"] == "in_use" for s in r.json()["skipped"])
     assert source.exists()
     db_session.expire_all()
     assert db_session.query(Transcript).filter(Transcript.id == t.id).first().audio_path == str(source)
@@ -378,9 +462,9 @@ def test_delete_skips_source_audio_of_transcript_with_retryable_chunks(client, d
     db_session.add(job)
     db_session.commit()
 
-    r = client.post("/api/files/delete", json={"paths": [str(source)]})
+    r = client.post("/api/files/delete", json={"names": [source.name]})
     assert r.status_code == 200
-    assert any(s["path"] == str(source) and s["reason"] == "in_use" for s in r.json()["skipped"])
+    assert any(s["name"] == source.name and s["reason"] == "in_use" for s in r.json()["skipped"])
     assert source.exists()
 
 
@@ -402,9 +486,9 @@ def test_delete_completed_transcripts_media_is_allowed(client, db_session, tmp_p
     db_session.add(job)
     db_session.commit()
 
-    r = client.post("/api/files/delete", json={"paths": [str(source)]})
+    r = client.post("/api/files/delete", json={"names": [source.name]})
     assert r.status_code == 200
-    assert str(source) in r.json()["deleted"]
+    assert source.name in r.json()["deleted"]
     assert not source.exists()
     db_session.expire_all()
     assert db_session.query(Transcript).filter(Transcript.id == t.id).first().audio_path is None
@@ -427,9 +511,9 @@ def test_delete_matches_db_reference_by_realpath_not_string(client, db_session, 
     db_session.add(t)
     db_session.commit()
 
-    r = client.post("/api/files/delete", json={"paths": [str(f)]})
+    r = client.post("/api/files/delete", json={"names": [f.name]})
     assert r.status_code == 200
-    assert str(f) in r.json()["deleted"]
+    assert f.name in r.json()["deleted"]
     db_session.expire_all()
     assert db_session.query(Transcript).filter(Transcript.id == t.id).first().audio_path is None
 
@@ -455,13 +539,6 @@ def test_delete_transcript_keeps_file_referenced_by_sibling_under_textual_path_v
     assert shared.exists()
 
 
-def test_delete_rejects_upload_dir_itself(client, db_session, tmp_path, monkeypatch):
-    import app as app_module
-    monkeypatch.setattr(app_module, "UPLOAD_DIR", tmp_path)
-    r = client.post("/api/files/delete", json={"paths": [str(tmp_path)]})
-    assert r.status_code == 400
-
-
 def test_list_files_survives_file_vanishing_between_listdir_and_stat(client, db_session, tmp_path, monkeypatch):
     """A file deleted by another actor between os.listdir and the stat
     calls must be skipped, not 500 the whole inventory."""
@@ -479,8 +556,8 @@ def test_list_files_survives_file_vanishing_between_listdir_and_stat(client, db_
     monkeypatch.setattr(app_module.os.path, "getsize", flaky_getsize)
     r = client.get("/api/files")
     assert r.status_code == 200
-    all_paths = [f["path"] for f in r.json()["linked"]] + [f["path"] for f in r.json()["orphaned"]]
-    assert str(ghost) not in all_paths
+    all_names = [f["name"] for f in r.json()["linked"]] + [f["name"] for f in r.json()["orphaned"]]
+    assert ghost.name not in all_names
 
 
 def test_list_files_modified_at_is_naive_utc_isoformat(client, db_session, tmp_path, monkeypatch):
