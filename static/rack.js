@@ -26,6 +26,7 @@ const S = {
   indeterminate: false,       // running with no chunk data — show elapsed, not %
   jobDone: false,
   doneId: null,
+  doneDuration: null,
   // settings state (persisted server-side)
   providers: [],
   providerIdx: 0,
@@ -924,7 +925,7 @@ async function renderTranscribe() {
             ${deckKey('key-play-b', '▶', 'Play', 'disabled', 'Preview voice sample — available in Voice roster')}
             ${deckKey('key-ff-b', '▶▶', 'FF', 'inert', 'Fast-forward — no mapped action')}
             <div style="visibility:hidden"><button tabindex="-1" aria-hidden="true" class="key"></button></div>
-            ${deckKey('key-open-done', '⏹', 'Stop/Eject', 'active', 'Open finished transcript')}
+            ${deckKey('key-open-done', '⏹', 'Open', 'active', 'Open finished transcript')}
           </div>
         </div>
       </div>
@@ -1037,13 +1038,13 @@ async function renderTranscribe() {
       </div>
     </details>
 
-    <!-- start strip -->
+    <!-- status strip (arm state + done navigation) -->
     <div class="unit" style="border-radius:3px">
       <div style="display:flex;justify-content:space-between;align-items:center;padding:12px 22px;gap:16px">
         <div id="tx-arm-text" style="font-family:var(--f-mono);font-size:10.5px;color:var(--label-dim);text-transform:uppercase;letter-spacing:0.08em"></div>
         <div style="display:flex;align-items:center;gap:10px">
-          <div class="led-dot" id="tx-start-led"></div>
-          <button class="key key--wide" id="tx-start" disabled>▶ Start transcription</button>
+          <div class="led-dot" id="tx-status-led"></div>
+          <button class="key key--wide" id="tx-view-results" style="display:none">☰ View transcript</button>
         </div>
       </div>
     </div>`;
@@ -1065,10 +1066,9 @@ function wireTranscribe() {
     if (S.capturing) stopLiveCapture();
     else if (!S.running) openRecModal();
   });
-  $('key-open-done').addEventListener('click', () => {
-    if (S.doneId) navigate('detail', S.doneId);
-  });
-  $('tx-start').addEventListener('click', startJob);
+  const openDone = () => { if (S.doneId) navigate('detail', S.doneId); };
+  $('key-open-done').addEventListener('click', openDone);
+  $('tx-view-results').addEventListener('click', openDone);
   $('tx-cancel').addEventListener('click', (e) => withBusy(e.currentTarget, cancelJob));
   $('ctl-provider').addEventListener('click', (e) => withBusy(e.currentTarget, async () => {
     if (S.running) return;
@@ -1179,7 +1179,7 @@ function syncTranscribe() {
       : 'Reading (' + S.pct + '%): ' + S.tapeName;
     dA.style.color = AMBER;
   } else if (S.tapeLoaded) {
-    const mb = S.tapeFile ? ' · ' + (S.tapeFile.size / 1048576).toFixed(1) + ' MB' : '';
+    const mb = S.tapeFile ? ' · ' + fmtBytes(S.tapeFile.size) : '';
     dA.textContent = S.tapeName + mb + ' · loaded';
     dA.style.color = AMBER;
   } else {
@@ -1198,28 +1198,33 @@ function syncTranscribe() {
     dB.style.color = 'var(--label-dim)';
   }
 
-  // play key + start key + LEDs
-  const playKey = $('key-play-a'), startKey = $('tx-start');
+  // play key + status LED
+  const playKey = $('key-play-a');
   playKey.disabled = !canStart;
   playKey.title = canStart ? 'Start transcription' : S.running ? 'Job running' : !S.tapeLoaded ? 'Load media first' : 'Provider needs a key — see service panel';
-  startKey.disabled = !canStart;
   const ledColor = (S.running || canStart) ? GREEN : null;
-  ['key-play-a-led', 'tx-start-led'].forEach(id => {
-    const el = $(id);
-    el.style.background = ledColor || 'var(--edge)';
-    el.style.boxShadow = ledColor ? '0 0 5px ' + GREEN : 'none';
-  });
+  const statusLed = $('tx-status-led');
+  statusLed.style.background = ledColor || 'var(--edge)';
+  statusLed.style.boxShadow = ledColor ? '0 0 5px ' + GREEN : 'none';
   const recLed = $('key-rec-led');
   recLed.style.background = S.capturing ? RED : 'var(--edge)';
   recLed.style.boxShadow = S.capturing ? '0 0 5px ' + RED : 'none';
   $('key-rec').title = S.capturing ? 'Stop recording' : 'Live capture — asks before recording';
 
-  // arm strip
-  $('tx-arm-text').textContent = S.running
-    ? 'Job in progress — settings locked'
-    : S.tapeLoaded
-      ? 'Armed — ' + prov.name + ' · ' + curModel() + ' · ' + LANGUAGES[S.langIdx]
-      : 'Load a tape to arm the transport';
+  // status strip
+  const armText = $('tx-arm-text');
+  const viewBtn = $('tx-view-results');
+  if (S.jobDone && S.doneId) {
+    armText.textContent = 'Transcription complete — ' + formatDur(S.doneDuration);
+    viewBtn.style.display = '';
+  } else {
+    viewBtn.style.display = 'none';
+    armText.textContent = S.running
+      ? 'Job in progress — settings locked'
+      : S.tapeLoaded
+        ? 'Armed — ' + prov.name + ' · ' + curModel() + ' · ' + LANGUAGES[S.langIdx]
+        : 'Load a tape to arm the transport';
+  }
 
   // meter row
   $('tx-meter').style.display = S.running ? '' : 'none';
@@ -1367,10 +1372,12 @@ async function startJob() {
       toast('Partially complete — some sections failed; retry from the channel bank', 'error');
       S.jobDone = true;
       S.doneId = finalData.id;
+      S.doneDuration = finalData.duration_seconds;
     } else {
       toast('Transcription complete');
       S.jobDone = true;
       S.doneId = finalData.id;
+      S.doneDuration = finalData.duration_seconds;
       S.pct = 100;
     }
     S.tapeLoaded = false;
@@ -1629,7 +1636,12 @@ async function loadTranscripts() {
     </div>
     <div id="bank-rows"></div>`;
 
-  renderBankRows(openIds);
+  try {
+    renderBankRows(openIds);
+  } catch (e) {
+    console.error('renderBankRows error:', e);
+    root.insertAdjacentHTML('beforeend', '<div class="empty-unit">Error rendering tape library: ' + escapeHtml(e.message) + '</div>');
+  }
 
   $('bank-search').addEventListener('input', () => {
     S.bankQuery = $('bank-search').value;
@@ -2584,6 +2596,8 @@ function renderDetail() {
   if (!t) return;
   const root = $('page-detail');
   const sv = statusView(t);
+  const kind = t.kind || 'meeting';
+  const kindLabel = kind.charAt(0).toUpperCase() + kind.slice(1);
   const extraActs = [];
   if (t.status === 'partial')
     extraActs.push('<button class="btn" style="font-size:12px;padding:7px 14px;border-color:var(--inset-edge)" data-dact="retry">Retry failed sections</button>');
@@ -2629,6 +2643,7 @@ function renderDetail() {
         <div style="font-size:12.5px"><div style="font-family:var(--f-mono);font-size:10px;text-transform:uppercase;letter-spacing:0.08em;color:var(--label-dim);margin-bottom:3px">Status</div><span class="status-badge status-badge--${escapeHtml(sv.word)}" data-word="${escapeHtml(sv.word)}">${escapeHtml(sv.word)}</span></div>
         <div style="font-size:12.5px"><div style="font-family:var(--f-mono);font-size:10px;text-transform:uppercase;letter-spacing:0.08em;color:var(--label-dim);margin-bottom:3px">Speakers</div>${t.speaker_count || '—'}${t.diarization_method ? ` <span style="font-size:10px;color:var(--label-dim)">${escapeHtml(t.diarization_method)}${t.num_speakers ? '' : ' (auto)'}</span>` : ''}${(() => { const u = (t.segments || []).filter(isLowConfidence).length; return u ? ` <span style="font-size:10px;color:var(--nixie)" title="Lines where the speaker assignment is uncertain">${u} uncertain</span>` : ''; })()}</div>
         <div style="font-size:12.5px"><div style="font-family:var(--f-mono);font-size:10px;text-transform:uppercase;letter-spacing:0.08em;color:var(--label-dim);margin-bottom:3px">Segments</div>${(t.segments || []).length}</div>
+        <div style="font-size:12.5px"><div style="font-family:var(--f-mono);font-size:10px;text-transform:uppercase;letter-spacing:0.08em;color:var(--label-dim);margin-bottom:3px">Mode</div><button class="btn" style="font-size:11px;padding:2px 10px;border-color:var(--inset-edge);cursor:pointer" title="Switch between meeting and dictation mode" data-dact="toggle-kind">${escapeHtml(kindLabel)}</button></div>
       </div>
     </div>
     ${videoHtml}
@@ -2714,6 +2729,18 @@ async function detailAction(act, btn) {
       await api('/api/transcripts/' + t.id, { method: 'DELETE' });
       toast('Transcript deleted');
       navigate('transcripts');
+      return;
+    }
+    if (act === 'toggle-kind') {
+      const newKind = t.kind === 'dictation' ? 'meeting' : 'dictation';
+      await api('/api/transcripts/' + t.id, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ kind: newKind }),
+      });
+      toast('Switched to ' + newKind + ' mode', 'info');
+      S.detailTab = 'transcript';
+      await loadTranscriptDetail(t.id);
       return;
     }
     if (act === 'retry') {
@@ -2865,13 +2892,35 @@ function normalizeLlmProvider(id) {
 }
 
 // Populate a model <select> from the curated catalog (labels carry live
-// pricing for OpenRouter). local has no catalog — swap to free text.
+// pricing for OpenRouter). local_llm fetches live models from the configured
+// endpoint and shows a dropdown; free text remains the fallback when the
+// endpoint is unconfigured or unreachable.
 async function fillModelPicker(selectId, textId, provider, preferred) {
   const sel = $(selectId), txt = $(textId);
   const isLocal = provider === 'local_llm';
   sel.style.display = isLocal ? 'none' : '';
   txt.style.display = isLocal ? '' : 'none';
   if (isLocal) {
+    // Fetch models from the local endpoint; fall back to free text when the
+    // endpoint is unconfigured/unreachable (backend returns an empty list).
+    sel.innerHTML = '<option>Loading…</option>';
+    try {
+      const r = await api('/api/correction-models/local_llm');
+      const models = r.models || [];
+      if (models.length) {
+        // A previously saved custom id may not be in the live list; keep it
+        // selectable rather than silently swapping to the first live model.
+        if (preferred && !models.some(m => m.id === preferred)) {
+          models.unshift({ id: preferred, label: preferred + ' (saved)' });
+        }
+        sel.style.display = '';
+        txt.style.display = 'none';
+        sel.innerHTML = models.map(m =>
+          '<option value="' + escapeHtml(m.id) + '">' + escapeHtml(m.label || m.id) + '</option>').join('');
+        if (preferred) sel.value = preferred;
+        return;
+      }
+    } catch { /* fall through to free text */ }
     if (preferred) txt.value = preferred;
     return;
   }
@@ -2889,7 +2938,12 @@ async function fillModelPicker(selectId, textId, provider, preferred) {
 }
 
 function llmPickerValue(selectId, textId, provider) {
-  return provider === 'local_llm' ? $(textId).value.trim() : $(selectId).value;
+  // local_llm shows either the live-model dropdown or the free-text input
+  // (fillModelPicker decides); read whichever control is visible.
+  if (provider === 'local_llm' && $(selectId).style.display === 'none') {
+    return $(textId).value.trim();
+  }
+  return $(selectId).value;
 }
 
 async function toggleRerunPicker() {
@@ -3284,17 +3338,17 @@ async function runIdentify() {
 }
 
 /* ══════════════════ files: linked / orphaned inventory ══════════════════ */
+function fmtBytes(n) {
+  if (n >= 1e9) return (n / 1e9).toFixed(2) + ' GB';
+  if (n >= 1e6) return (n / 1e6).toFixed(1) + ' MB';
+  if (n >= 1e3) return (n / 1e3).toFixed(0) + ' KB';
+  return n + ' B';
+}
+
 async function renderFilesPage() {
   const root = $('page-files');
   let data;
   try { data = await api('/api/files'); } catch (e) { toast(e.message, 'error'); return; }
-
-  const fmtBytes = (n) => {
-    if (n >= 1e9) return (n / 1e9).toFixed(2) + ' GB';
-    if (n >= 1e6) return (n / 1e6).toFixed(1) + ' MB';
-    if (n >= 1e3) return (n / 1e3).toFixed(0) + ' KB';
-    return n + ' B';
-  };
 
   const fileRow = (f, group) => `
     <div style="display:flex;align-items:center;gap:12px;padding:9px 22px 9px 34px;border-bottom:1px solid var(--seg-edge)">
@@ -3359,7 +3413,8 @@ async function renderFilesPage() {
 }
 
 async function deleteSelectedFiles(group) {
-  const paths = [...document.querySelectorAll('[data-file-select="' + group + '"]:checked')].map(el => el.dataset.path);
+  const root = $('page-files');
+  const paths = [...root.querySelectorAll('[data-file-select="' + group + '"]:checked')].map(el => el.dataset.path);
   if (!paths.length) { toast('No files selected', 'error'); return; }
   if (!(await styledConfirm('Delete ' + paths.length + ' file(s)? This cannot be undone.'))) return;
   try {
@@ -3368,9 +3423,13 @@ async function deleteSelectedFiles(group) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ paths }),
     });
-    toast('Deleted ' + r.deleted.length + ', skipped ' + r.skipped.length, r.skipped.length ? 'info' : 'ok');
+    const msg = [];
+    if (r.deleted.length) msg.push(r.deleted.length + ' deleted');
+    if (r.skipped.length) msg.push(r.skipped.length + ' skipped (' + r.skipped.map(s => s.reason).join(', ') + ')');
+    if (r.freed_bytes) msg.push('freed ' + fmtBytes(r.freed_bytes));
+    toast(msg.join(' · ') || 'Nothing to delete', r.skipped.length ? 'info' : 'ok');
     renderFilesPage();
-  } catch (e) { toast(e.message, 'error'); }
+  } catch (e) { toast('Delete failed: ' + e.message, 'error'); }
 }
 /* ══════════════════ rear service panel ══════════════════ */
 const JACK_DEFS = [

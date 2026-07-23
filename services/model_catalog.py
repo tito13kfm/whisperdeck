@@ -26,10 +26,26 @@ CORRECTION_MODELS: dict[str, list[dict]] = {
         {"id": "meta-llama/llama-3.3-70b-instruct", "label": "Llama 3.3 70B"},
         {"id": "openai/gpt-4o-mini", "label": "GPT-4o mini"},
     ],
-    # local/local_llm: whatever the endpoint serves — the UI offers free text instead.
     "local": [],
     "local_llm": [],
 }
+
+# Small models worth recommending for local inference. These are annotations,
+# not selectable entries: a model only appears in the picker when the live
+# endpoint actually serves it (offering an unserved id would 404 at chat time).
+_LOCAL_LLM_RECOMMENDATIONS = [
+    {"id": "llama3.2", "label": "Llama 3.2 3B — recommended for most hardware"},
+    {"id": "llama3.1", "label": "Llama 3.1 8B — stronger, needs ~8 GB VRAM"},
+    {"id": "phi3", "label": "Phi-3 Mini 3.8B — lightweight, good on CPU"},
+    {"id": "qwen2.5", "label": "Qwen 2.5 7B — strong instruction following"},
+    {"id": "mistral", "label": "Mistral 7B — solid general purpose"},
+]
+
+# Must match resolve_api_base's local fallback in services/llm_client.py so
+# the picker lists models from the same endpoint chat requests will hit.
+_LOCAL_LLM_DEFAULT_API_URL = "http://localhost:11434/v1"
+_LOCAL_LLM_CACHE_TTL_SECONDS = 60
+_local_llm_cache: dict = {"at": 0.0, "base": None, "models": None}
 
 _OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models"
 _CACHE_TTL_SECONDS = 3600
@@ -67,10 +83,62 @@ def _price_note(model_info: dict) -> str:
     return f"${prompt:.2f}/M in · ${completion:.2f}/M out"
 
 
-async def get_correction_models(provider: str) -> list[dict]:
+def _recommendation_label(live_id: str) -> str | None:
+    """Starred label when a live model id matches a recommendation, either
+    exactly or as an Ollama-style tag ('llama3.2:latest'). None otherwise."""
+    for rec in _LOCAL_LLM_RECOMMENDATIONS:
+        if live_id == rec["id"] or live_id.startswith(rec["id"] + ":"):
+            return f"{rec['label']} ★"
+    return None
+
+
+async def _local_llm_models(api_url: str | None, api_key: str | None = None) -> list[dict]:
+    """Live models from the local OpenAI-compatible endpoint (defaulting to
+    the same endpoint the chat path uses), with recommended small models
+    starred and listed first. Returns [] when the endpoint is unreachable,
+    which tells the UI to fall back to free-text model entry. Cached briefly:
+    the settings panel fires three picker fills per open."""
+    base = (api_url or _LOCAL_LLM_DEFAULT_API_URL).rstrip("/")
+    now = time.monotonic()
+    if (
+        _local_llm_cache["models"] is not None
+        and _local_llm_cache["base"] == base
+        and now - _local_llm_cache["at"] < _LOCAL_LLM_CACHE_TTL_SECONDS
+    ):
+        return _local_llm_cache["models"]
+    headers = {}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(f"{base}/models", headers=headers)
+        resp.raise_for_status()
+        live = [m["id"] for m in resp.json().get("data", []) if m.get("id")]
+    except Exception:
+        return []
+    starred, rest = [], []
+    for m_id in live:
+        label = _recommendation_label(m_id)
+        (starred if label else rest).append({"id": m_id, "label": label or m_id})
+    models = starred + rest
+    _local_llm_cache.update(at=now, base=base, models=models)
+    return models
+
+
+async def get_correction_models(
+    provider: str,
+    local_llm_api_url: str | None = None,
+    local_llm_api_key: str | None = None,
+) -> list[dict]:
     """Curated list for the provider as [{id, label}]. For OpenRouter the
     labels gain live pricing and ids missing from the live catalog are
-    dropped (they would 404 at request time anyway)."""
+    dropped (they would 404 at request time anyway).
+
+    For local_llm, fetches live models from the configured endpoint's /models
+    route (recommended small models starred). Returns [] when the endpoint is
+    unreachable so the UI can fall back to free-text entry."""
+    if provider == "local_llm":
+        return await _local_llm_models(local_llm_api_url, local_llm_api_key)
     curated = [dict(m) for m in CORRECTION_MODELS.get(provider, [])]
     if provider != "openrouter":
         return curated

@@ -1,0 +1,49 @@
+"""PATCH /api/transcripts/{id} kind field: validation, the processing guard
+(the pipeline reads kind mid-job to decide diarization), and serialization."""
+from database import Transcript, User
+
+
+def _testuser(db_session):
+    return db_session.query(User).filter(User.username == "testuser").first()
+
+
+def _make_transcript(db_session, **overrides):
+    user = _testuser(db_session)
+    fields = dict(user_id=user.id, title="t", filename="t.mp3",
+                  status="completed", full_text="x", kind="meeting")
+    fields.update(overrides)
+    t = Transcript(**fields)
+    db_session.add(t)
+    db_session.commit()
+    return t
+
+
+def test_patch_kind_toggles_and_serializes(client, db_session):
+    t = _make_transcript(db_session, kind="meeting")
+    r = client.patch(f"/api/transcripts/{t.id}", json={"kind": "dictation"})
+    assert r.status_code == 200
+    assert r.json()["kind"] == "dictation"
+    db_session.refresh(t)
+    assert t.kind == "dictation"
+
+
+def test_patch_kind_rejects_unknown_value(client, db_session):
+    t = _make_transcript(db_session)
+    r = client.patch(f"/api/transcripts/{t.id}", json={"kind": "podcast"})
+    assert r.status_code == 400
+    db_session.refresh(t)
+    assert t.kind == "meeting"
+
+
+def test_patch_kind_rejected_while_processing(client, db_session):
+    t = _make_transcript(db_session, status="processing")
+    r = client.patch(f"/api/transcripts/{t.id}", json={"kind": "dictation"})
+    assert r.status_code == 409
+    db_session.refresh(t)
+    assert t.kind == "meeting"
+
+
+def test_patch_same_kind_allowed_while_processing(client, db_session):
+    t = _make_transcript(db_session, status="processing", kind="meeting")
+    r = client.patch(f"/api/transcripts/{t.id}", json={"kind": "meeting"})
+    assert r.status_code == 200

@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, patch
 
 from database import Transcript, User
 from services.correction import correct_transcript, _batch_lines, _transcript_lines
-from services.model_catalog import get_correction_models, _openrouter_cache
+from services.model_catalog import get_correction_models, _local_llm_cache, _openrouter_cache
 from services.settings import get_user_settings, resolve_provider_key
 
 
@@ -210,3 +210,49 @@ def test_catalog_openrouter_network_failure_falls_back_to_curated():
         models = asyncio.run(get_correction_models("openrouter"))
     _reset_openrouter_cache()
     assert any(m["id"] == "deepseek/deepseek-v4-flash" for m in models)
+
+
+def _reset_local_llm_cache():
+    _local_llm_cache.update(at=0.0, base=None, models=None)
+
+
+def test_catalog_local_llm_lists_live_models_and_stars_recommended():
+    _reset_local_llm_cache()
+    live = _FakeResponse(200, {"data": [
+        {"id": "gemma2"},
+        {"id": "llama3.2:latest"},
+    ]})
+    with patch("httpx.AsyncClient.get", AsyncMock(return_value=live)):
+        models = asyncio.run(get_correction_models("local_llm", "http://box:1234/v1"))
+    _reset_local_llm_cache()
+    ids = [m["id"] for m in models]
+    # recommended (tag-matched) model sorts first with a starred label
+    assert ids == ["llama3.2:latest", "gemma2"]
+    assert "★" in models[0]["label"] and "Llama 3.2" in models[0]["label"]
+    assert models[1]["label"] == "gemma2"
+
+
+def test_catalog_local_llm_unreachable_returns_empty_for_free_text_fallback():
+    _reset_local_llm_cache()
+    with patch("httpx.AsyncClient.get", AsyncMock(side_effect=RuntimeError("offline"))):
+        models = asyncio.run(get_correction_models("local_llm", "http://box:1234/v1"))
+    _reset_local_llm_cache()
+    assert models == []
+
+
+def test_catalog_local_llm_unconfigured_queries_chat_default_endpoint():
+    _reset_local_llm_cache()
+    fake_get = AsyncMock(return_value=_FakeResponse(200, {"data": []}))
+    with patch("httpx.AsyncClient.get", fake_get):
+        asyncio.run(get_correction_models("local_llm", None))
+    _reset_local_llm_cache()
+    assert fake_get.call_args.args[0] == "http://localhost:11434/v1/models"
+
+
+def test_catalog_local_llm_sends_bearer_when_key_configured():
+    _reset_local_llm_cache()
+    fake_get = AsyncMock(return_value=_FakeResponse(200, {"data": []}))
+    with patch("httpx.AsyncClient.get", fake_get):
+        asyncio.run(get_correction_models("local_llm", "http://box:1234/v1", "sekrit"))
+    _reset_local_llm_cache()
+    assert fake_get.call_args.kwargs["headers"] == {"Authorization": "Bearer sekrit"}
