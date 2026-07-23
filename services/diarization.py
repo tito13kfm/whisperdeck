@@ -54,13 +54,25 @@ class DiarizationService:
         num_speakers: Optional[int],
         segments: list[dict],
         hf_token: Optional[str] = None,
-    ) -> tuple[list[dict], int]:
-        """Best-available diarization (pyannote if installed, else the
-        pause-gap heuristic) merged onto existing transcript segments.
-        num_speakers=None lets pyannote auto-detect; the heuristic can't,
-        so it defaults to 2. Returns (merged_segments, speaker_count).
+        stereo_audio_path: Optional[str] = None,
+    ) -> tuple[list[dict], int, str]:
+        """Best-available diarization merged onto existing transcript
+        segments: channel-aware live-stereo when a stereo copy exists and
+        pyannote is installed, else pyannote on the mixed audio, else the
+        pause-gap heuristic (which can't auto-detect, so it defaults to 2).
+        Returns (merged_segments, speaker_count, method).
         Raises on failure — callers decide whether that's fatal."""
-        if self._check_pyannote():
+        if stereo_audio_path and os.path.exists(stereo_audio_path) and self._check_pyannote():
+            try:
+                result = await self.diarize_live_stereo(
+                    stereo_audio_path, num_speakers=num_speakers, hf_token=hf_token
+                )
+            except Exception as e:
+                print(f"[diarization] live-stereo path failed ({e}); falling back to mixed audio")
+                result = await self.diarize_pyannote(
+                    audio_path, num_speakers=num_speakers, hf_token=hf_token
+                )
+        elif self._check_pyannote():
             result = await self.diarize_pyannote(
                 audio_path, num_speakers=num_speakers, hf_token=hf_token
             )
@@ -69,7 +81,7 @@ class DiarizationService:
                 audio_path, num_speakers=num_speakers or 2, segments=segments
             )
         merged = await self.combine_with_transcript(result, segments)
-        return merged, result.speaker_count
+        return merged, result.speaker_count, result.method
 
     async def diarize_heuristic(
         self,
@@ -171,6 +183,36 @@ class DiarizationService:
 
         return pseudo_segments
 
+    def _run_pyannote_sync(
+        self,
+        waveform,
+        sample_rate: int,
+        num_speakers: Optional[int],
+        hf_token: Optional[str],
+    ) -> list[DiarizationSegment]:
+        """Blocking pyannote inference on a (channel, time) audio buffer —
+        either a torch tensor or a plain numpy array. Callers wrap this in
+        run_in_executor; imports stay inside so machines without torch can
+        still import this module. A plain numpy array (e.g. from
+        diarize_live_stereo, which never needs torch on the async side) is
+        converted to a tensor here, keeping the torch dependency confined to
+        this one method."""
+        import torch
+        from pyannote.audio import Pipeline
+
+        if not isinstance(waveform, torch.Tensor):
+            waveform = torch.from_numpy(waveform)
+
+        pipeline = Pipeline.from_pretrained(
+            "pyannote/speaker-diarization-3.1",
+            token=hf_token or os.environ.get("HUGGINGFACE_TOKEN", None),
+        )
+        output = pipeline({"waveform": waveform, "sample_rate": sample_rate}, num_speakers=num_speakers)
+        return [
+            DiarizationSegment(start=turn.start, end=turn.end, speaker=speaker)
+            for turn, _, speaker in output.speaker_diarization.itertracks(yield_label=True)
+        ]
+
     async def diarize_pyannote(
         self,
         audio_path: str,
@@ -191,15 +233,6 @@ class DiarizationService:
         def _run() -> list[DiarizationSegment]:
             import torch
             import soundfile as sf
-            from pyannote.audio import Pipeline
-
-            pipeline = Pipeline.from_pretrained(
-                "pyannote/speaker-diarization-3.1",
-                token=hf_token or os.environ.get("HUGGINGFACE_TOKEN", None),
-            )
-
-            if num_speakers:
-                pipeline.instantiate({"clustering": {"threshold": 0.7}})
 
             # Load audio ourselves and hand pyannote a waveform tensor rather
             # than a file path — pyannote's built-in decoder requires torchcodec,
@@ -208,17 +241,7 @@ class DiarizationService:
             # fails to load its native DLLs.
             data, sample_rate = sf.read(audio_path, dtype="float32", always_2d=True)
             waveform = torch.from_numpy(data.T)  # (channel, time)
-
-            output = pipeline({"waveform": waveform, "sample_rate": sample_rate}, num_speakers=num_speakers)
-
-            segments = []
-            for turn, _, speaker in output.speaker_diarization.itertracks(yield_label=True):
-                segments.append(DiarizationSegment(
-                    start=turn.start,
-                    end=turn.end,
-                    speaker=speaker,
-                ))
-            return segments
+            return self._run_pyannote_sync(waveform, sample_rate, num_speakers, hf_token)
 
         # Model load + inference are synchronous/blocking (no internal await) —
         # run off the event loop so one diarize call doesn't stall every other
@@ -247,22 +270,165 @@ class DiarizationService:
         for seg in transcript_segments:
             seg_start = seg.get("start", 0)
             seg_end = seg.get("end", 0)
+            duration = max(seg_end - seg_start, 1e-6)
 
-            # Find which diarization segment overlaps most with this transcript segment
-            best_speaker = None
-            best_overlap = 0
-
+            # Total overlap per SPEAKER, not per turn: one speaker usually
+            # owns several adjacent diarization turns, and treating those as
+            # competing would mark nearly every line uncertain.
+            per_speaker: dict[str, float] = {}
             for dseg in diarization.segments:
-                overlap_start = max(seg_start, dseg.start)
-                overlap_end = min(seg_end, dseg.end)
-                overlap = max(0, overlap_end - overlap_start)
-                if overlap > best_overlap:
-                    best_overlap = overlap
-                    best_speaker = dseg.speaker
+                overlap = max(0.0, min(seg_end, dseg.end) - max(seg_start, dseg.start))
+                if overlap > 0:
+                    per_speaker[dseg.speaker] = per_speaker.get(dseg.speaker, 0.0) + overlap
+
+            if per_speaker:
+                # Heuristic-diarized transcripts always land here at 1.0: the
+                # heuristic's own turns are byte-identical to these transcript
+                # segments, so there is never a rival speaker to contest against.
+                # The signal is only informative for pyannote / live_stereo.
+                ranked = sorted(per_speaker.items(), key=lambda kv: kv[1], reverse=True)
+                best_speaker, best_total = ranked[0]
+                second_total = ranked[1][1] if len(ranked) > 1 else 0.0
+                coverage = min(best_total / duration, 1.0)
+                margin = (best_total - second_total) / best_total  # 1.0 when uncontested
+                confidence = round(coverage * margin, 3)
+            else:
+                best_speaker, confidence = None, 0.0
 
             merged.append({
                 **seg,
                 "speaker": best_speaker or seg.get("speaker", "Unknown"),
+                "speaker_confidence": confidence,
             })
 
         return merged
+
+    @staticmethod
+    def _active_intervals(
+        channel,
+        sample_rate: int,
+        frame_ms: int = 30,
+        threshold_ratio: float = 4.0,
+        min_speech_s: float = 0.25,
+        max_gap_s: float = 0.6,
+    ) -> list[tuple[float, float]]:
+        """Energy VAD over one channel: frames whose RMS exceeds
+        threshold_ratio times the noise floor (10th-percentile frame RMS)
+        count as speech; speech runs closer than max_gap_s merge; runs
+        shorter than min_speech_s drop. Returns [(start_s, end_s), ...].
+
+        Uses the 10th percentile rather than a higher one so the floor
+        estimate stays anchored to true background noise even on clips
+        that are mostly speech (e.g. a near-continuous single-speaker
+        turn) rather than drifting up into the signal itself.
+
+        Known blind spot: this is a purely relative-floor VAD, so a channel
+        with zero internal silence (fully continuous energy, no pauses at
+        all) has no low-RMS frames to anchor the floor to and will not be
+        detected as speech. Real microphone audio always has some pause
+        structure, so this hasn't been worth fixing with an absolute floor
+        (which would need calibrating against real room-tone levels, not
+        the digital-zero silence typical of unit-test fixtures)."""
+        import numpy as np
+
+        frame = int(sample_rate * frame_ms / 1000)
+        n = len(channel) // frame
+        if n == 0:
+            return []
+        rms = np.sqrt((channel[: n * frame].reshape(n, frame) ** 2).mean(axis=1))
+        floor = float(np.percentile(rms, 10)) + 1e-8
+        speech = rms > threshold_ratio * floor
+
+        intervals: list[tuple[float, float]] = []
+        start = None
+        for i, flag in enumerate(speech):
+            t = i * frame / sample_rate
+            if flag and start is None:
+                start = t
+            elif not flag and start is not None:
+                intervals.append((start, t))
+                start = None
+        if start is not None:
+            intervals.append((start, n * frame / sample_rate))
+
+        merged: list[tuple[float, float]] = []
+        for s, e in intervals:
+            if merged and s - merged[-1][1] <= max_gap_s:
+                merged[-1] = (merged[-1][0], e)
+            else:
+                merged.append((s, e))
+        return [(s, e) for s, e in merged if e - s >= min_speech_s]
+
+    async def diarize_live_stereo(
+        self,
+        stereo_path: str,
+        num_speakers: Optional[int] = None,
+        hf_token: Optional[str] = None,
+    ) -> DiarizationResult:
+        """Channel-aware diarization for live captures (mic on channel 0,
+        system audio on channel 1, see static/rack.js live capture). The mic
+        channel needs no clustering: any speech there is the local user.
+        Remote speakers exist only on the system channel, so pyannote runs
+        on that channel alone with one fewer expected speaker."""
+        import numpy as np
+        import soundfile as sf
+
+        data, sample_rate = sf.read(stereo_path, dtype="float32", always_2d=True)
+        if data.shape[1] < 2:
+            raise ValueError(f"{stereo_path} has fewer than 2 channels — cannot channel-split")
+        mic, system = data[:, 0], data[:, 1]
+
+        mic_intervals = self._drop_bleed(
+            self._active_intervals(mic, sample_rate), mic, system, sample_rate
+        )
+        segments = [
+            DiarizationSegment(start=s, end=e, speaker="You") for s, e in mic_intervals
+        ]
+
+        remote_count = (num_speakers - 1) if num_speakers else None
+        system_intervals = self._active_intervals(system, sample_rate)
+        # Degrade to mic-only "You" segments rather than raising when pyannote
+        # isn't installed — unlike diarize_pyannote (a direct, user-invoked
+        # entry point where a friendly ImportError is the right feedback),
+        # this is meant to sit in diarize_and_merge's fallback chain, where a
+        # raised error would be more disruptive than just returning what the
+        # mic channel already found.
+        if remote_count != 0 and system_intervals and self.pyannote_available:
+            # Hand _run_pyannote_sync a plain numpy array rather than a torch
+            # tensor — it converts internally, so this async method (and its
+            # tests, which monkeypatch _run_pyannote_sync entirely) never
+            # need torch importable.
+            waveform = np.ascontiguousarray(system[np.newaxis, :])
+            loop = asyncio.get_event_loop()
+            remote = await loop.run_in_executor(
+                None, self._run_pyannote_sync, waveform, sample_rate, remote_count, hf_token
+            )
+            segments.extend(remote)
+
+        segments.sort(key=lambda s: s.start)
+        speaker_set = set(s.speaker for s in segments)
+        return DiarizationResult(
+            segments=segments, speaker_count=len(speaker_set), method="live_stereo"
+        )
+
+    @staticmethod
+    def _drop_bleed(
+        intervals: list[tuple[float, float]],
+        mic,
+        system,
+        sample_rate: int,
+        dominance: float = 1.2,
+    ) -> list[tuple[float, float]]:
+        """Remote voices leak into the mic through speakers. A genuine local
+        utterance is louder on the mic channel than on the system channel
+        over the same span; bleed is the reverse. Keep mic-dominant spans."""
+        import numpy as np
+
+        kept = []
+        for s, e in intervals:
+            a, b = int(s * sample_rate), int(e * sample_rate)
+            rms_mic = float(np.sqrt((mic[a:b] ** 2).mean() + 1e-12))
+            rms_sys = float(np.sqrt((system[a:b] ** 2).mean() + 1e-12))
+            if rms_mic > rms_sys * dominance:
+                kept.append((s, e))
+        return kept

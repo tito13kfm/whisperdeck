@@ -242,7 +242,7 @@ def test_run_llm_job_rediarize_saves_result_snapshot(db_session, tmp_path):
 
     class _FakeDiarizationService:
         async def diarize_and_merge(self, *args, **kwargs):
-            return new_segments, 1
+            return new_segments, 1, "pyannote"
 
     factory = lambda: _NoCloseSession(db_session)
     asyncio.run(run_llm_job(factory, job.id, transcription_service=None, diarization_service=_FakeDiarizationService()))
