@@ -2,7 +2,7 @@
 import datetime
 from sqlalchemy import (
     Column, Integer, String, Text, Float, DateTime, ForeignKey,
-    JSON, Boolean, UniqueConstraint, create_engine, inspect, text
+    JSON, Boolean, UniqueConstraint, create_engine, event, inspect, text
 )
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker
 
@@ -319,7 +319,26 @@ def init_db(db_path: str = "data/whisperdesk.db") -> tuple:
     the first startup against a pre-existing pre-auth database. Callers
     use it to trigger the one-time fallback-user backfill.
     """
-    engine = create_engine(f"sqlite:///{db_path}", connect_args={"check_same_thread": False})
+    engine = create_engine(
+        f"sqlite:///{db_path}",
+        connect_args={"check_same_thread": False},
+        pool_size=10,
+        max_overflow=20,
+    )
+
+    @event.listens_for(engine, "connect")
+    def _set_sqlite_pragmas(dbapi_connection, connection_record):
+        # WAL removes reader/writer blocking (issue #66: worker ticks and
+        # per-request sessions were exhausting the default 15-connection
+        # pool during bursty HTTP traffic). Must run as a PRAGMA on the raw
+        # connection, before any transaction — journal_mode=WAL can't be
+        # set via connect_args or inside a BEGIN.
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute("PRAGMA busy_timeout=5000")
+        cursor.execute("PRAGMA synchronous=NORMAL")
+        cursor.close()
+
     migrated_tables = migrate_schema(engine)
     Base.metadata.create_all(engine)
     ensure_columns(engine, "users", {"settings": "JSON"})
