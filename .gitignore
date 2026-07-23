@@ -27,6 +27,7 @@ scripts/settings_payload.json
 
 # OpenCode project-level config (agents use global ~/.config/opencode/agents/)
 .opencode/
+!.opencode/oh-my-openagent.jsonc
 
 # Local unsloth studio scratch/working dir (machine-local, unrelated to this project)
 unsloth_compiled_cache/
