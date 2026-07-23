@@ -3,7 +3,7 @@
 This project uses Serena, an MCP server providing symbol-aware code retrieval, editing, and refactoring tools.
 Serena runs in `--context=ide` mode, which excludes its file-reading and shell tools (Opencode provides those) but keeps all symbolic and editing tools.
 
-## Serena Usage
+## Serena Usage (Opencode-only — Claude Code: skip this section, use your own configured tools)
 
 - **Prefer Serena over built-in tools** for: finding symbol definitions, symbol overview/file outline, finding references to a symbol, renaming symbols, replacing symbol bodies, inserting before/after symbols, safe deletes, `replace_content` (regex or literal file edits), and `replace_in_files` (bulk edits across files).
 - **Search order:** `find_symbol` first, then `search_for_pattern`, then built-in `grep` as last resort.
@@ -11,7 +11,7 @@ Serena runs in `--context=ide` mode, which excludes its file-reading and shell t
 - **Parallel calls:** batch independent Serena operations in a single turn to minimize round-trips.
 - If Serena tools are not visible, run `serena start-mcp-server --context=ide --project=WhisperDeck` manually or use the `/mcp` command.
 
-## Advisor Escalation
+## Advisor Escalation (Opencode-only — Claude Code: skip, @advisor-pro/@advisor-qwen are not reachable here, use your own advisor tool instead)
 
 This project is configured with advisor subagents for plan validation and unstucking. The primary model runs DeepSeek V4 Flash (ClinePass).
 
@@ -31,6 +31,27 @@ This project is configured with advisor subagents for plan validation and unstuc
 
 ### ClinePass limit fallback
 When ClinePass hits usage limits, switch the primary model via `/models` to `openrouter/deepseek/deepseek-v4-flash` (or `openrouter/deepseek/deepseek-chat`). Advisors already run on OpenRouter and don't need changes.
+
+## Worktree hygiene
+
+Remove merged or abandoned worktrees and their branches immediately, no exceptions. A worktree is stale once its branch is fully merged (PR state MERGED, or `git merge-base --is-ancestor <branch-sha> origin/<base>` succeeds) or the user says the work is abandoned. Do not leave it "just in case" — clean up in the same session you notice it:
+
+```
+git worktree remove <path>
+git branch -d <branch>
+```
+
+If the worktree has uncommitted or unmerged work, stop and confirm with the user before removing (`--force`/`-D` needs explicit sign-off, this is a destructive action).
+
+## Testing tiers: match test cost to change blast radius
+
+Don't run full browser-driven e2e audits for every small change; reserve them for milestones. Pick the tier by what the change actually touches:
+
+1. **Unit/integration test for the touched path** — default for any change. Fast, run every time, no exception.
+2. **`e2e-regression-http` (scripted HTTP, no browser)** — before merging anything that changes request/response contracts or cross-feature flow (queue/job routing, serializer shape, multi-step API behavior).
+3. **Full browser e2e (`e2e-ux-audit`, `e2e-ux-audit-deep`)** — reserve for pre-release checkpoints or after a batch of changes lands, not per-PR. Also required for any change with a runtime/UI surface per the Testing section below, but "drive the affected flow" there means a targeted manual/scripted check of that flow, not the full 6-journey or deep audit suite.
+
+Rule of thumb: a backend fix scoped to one module doesn't need a browser; a UI-visible or cross-cutting change does, but scope the runtime check to the flow that changed, not the whole app.
 
 ## The Complement Rule
 
