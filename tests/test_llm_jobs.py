@@ -711,6 +711,13 @@ def test_serialize_will_retry_reflects_auto_retry_eligibility(db_session):
     assert still_running.status in ("pending", "running")
     assert serialize_llm_job(still_running)["will_retry"] is False
 
+    precondition_failed = enqueue_llm_job(
+        db_session, user.id, t.id, "summary", "openrouter", "m1",
+        error="no openrouter API key saved (see service panel)",
+    )
+    assert precondition_failed.status == "failed" and precondition_failed.attempts == 0
+    assert serialize_llm_job(precondition_failed)["will_retry"] is False
+
 
 def test_worker_tick_skips_resurrection_when_a_fresh_job_already_active(db_session):
     """A manual rerun creates a NEW row rather than reusing the failed one

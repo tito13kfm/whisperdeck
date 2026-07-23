@@ -480,6 +480,10 @@ async function pollBackgroundJobs() {
       // will_retry is only set on LLM job entries (services/llm_jobs.py); it's
       // undefined on transcription queue entries, so they never match here —
       // transcription failures are surfaced elsewhere, out of scope for #58.
+      // rediarize/voice_match are LLM jobs but not in AUTO_RETRY_KINDS, so
+      // will_retry is always false for them — a single failed attempt is
+      // already terminal, and toasting it is correct (no other passive
+      // surface exists for those two kinds).
       const terminalFailure = j.status === 'failed' && j.will_retry === false;
       const wasTerminalFailure = bgJobStatusSeen.get(j.id) === 'terminalFailed';
       // The very first tick after login/registration just establishes a

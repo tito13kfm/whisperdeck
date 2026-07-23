@@ -57,7 +57,12 @@ def serialize_llm_job(job: LlmJob) -> dict:
         "will_retry": bool(
             job.status == "failed"
             and job.kind in AUTO_RETRY_KINDS
-            and (job.attempts or 0) < MAX_ATTEMPTS
+            # attempts increments at claim time, before the run — a job that
+            # never ran (a precondition failure, e.g. "no API key saved") has
+            # attempts=0 and the resurrection sweep's own query requires
+            # attempts >= 1, so it's never retried despite this kind being
+            # in AUTO_RETRY_KINDS. See llm_worker_tick's eligible_failed query.
+            and 1 <= (job.attempts or 0) < MAX_ATTEMPTS
         ),
         "created_at": job.created_at.isoformat() if job.created_at else None,
         "updated_at": job.updated_at.isoformat() if job.updated_at else None,
