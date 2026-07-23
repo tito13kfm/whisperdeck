@@ -270,22 +270,31 @@ class DiarizationService:
         for seg in transcript_segments:
             seg_start = seg.get("start", 0)
             seg_end = seg.get("end", 0)
+            duration = max(seg_end - seg_start, 1e-6)
 
-            # Find which diarization segment overlaps most with this transcript segment
-            best_speaker = None
-            best_overlap = 0
-
+            # Total overlap per SPEAKER, not per turn: one speaker usually
+            # owns several adjacent diarization turns, and treating those as
+            # competing would mark nearly every line uncertain.
+            per_speaker: dict[str, float] = {}
             for dseg in diarization.segments:
-                overlap_start = max(seg_start, dseg.start)
-                overlap_end = min(seg_end, dseg.end)
-                overlap = max(0, overlap_end - overlap_start)
-                if overlap > best_overlap:
-                    best_overlap = overlap
-                    best_speaker = dseg.speaker
+                overlap = max(0.0, min(seg_end, dseg.end) - max(seg_start, dseg.start))
+                if overlap > 0:
+                    per_speaker[dseg.speaker] = per_speaker.get(dseg.speaker, 0.0) + overlap
+
+            if per_speaker:
+                ranked = sorted(per_speaker.items(), key=lambda kv: kv[1], reverse=True)
+                best_speaker, best_total = ranked[0]
+                second_total = ranked[1][1] if len(ranked) > 1 else 0.0
+                coverage = min(best_total / duration, 1.0)
+                margin = (best_total - second_total) / best_total  # 1.0 when uncontested
+                confidence = round(coverage * margin, 3)
+            else:
+                best_speaker, confidence = None, 0.0
 
             merged.append({
                 **seg,
                 "speaker": best_speaker or seg.get("speaker", "Unknown"),
+                "speaker_confidence": confidence,
             })
 
         return merged
