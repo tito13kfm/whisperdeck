@@ -132,3 +132,33 @@ stays in the active log (never archived) until resolved to ACTIONED or DECLINED
 **Suggested improvement:** When a plan adds derived/snapshot state (history, cache, undo patch, denormalized field) keyed to mutable parent data, enumerate BOTH sibling sets: (a) writers that must produce the derived state, and (b) rewriters/deleters of the parent data that must invalidate it. Review finders should explicitly ask "who rewrites the data this snapshot indexes into, and do they invalidate it?"
 
 **Principle:** Index-or-snapshot-based derived state has two complement sets, producers and invalidators; covering only producers yields silent corruption when any parent rewriter fires.
+
+### Observation 20: Concurrent agent in same checkout reverted an in-flight edit; adapt fix placement instead of re-applying
+
+**Status:** OPEN
+**Date:** 2026-07-22
+**Session context:** Implementing PR #72 review fixes while opencode ran config work in the same directory
+**Skill:** task-observer (workflow-level; also relevant to any implementation skill)
+**Type:** internal
+**Phase/Area:** multi-agent coexistence in one working tree
+
+**Issue:** Mid-implementation, services/audio_prep.py lost an edit (mono-channel ffprobe guard) between my write and the next read; harness flagged the external change as intentional. Another agent (opencode) was active in the same checkout. The finding the edit served (mono upmix defeating live-stereo diarization) had a second viable enforcement point (dual-mono detection in diarize_live_stereo), so the fix survived by relocating rather than re-applying and fighting over the file.
+
+**Suggested improvement:** When a co-located agent (or the user) reverts an in-flight edit: (1) never silently re-apply; (2) check whether the underlying requirement has an alternative enforcement layer and move the fix there; (3) state the relocation explicitly in the summary and PR so the layer choice reads as deliberate. Before destructive git ops (checkout, clean, branch delete) in a shared checkout, treat every untracked/modified path you didn't create as another agent's live work.
+
+**Principle:** In a shared working tree, a disappearing edit is a signal, not an error; requirements usually have more than one valid enforcement layer, and moving beats overwriting.
+
+### Observation 21: Draft PR shipped a parse-broken JS file; no syntax gate exists before review
+
+**Status:** OPEN
+**Date:** 2026-07-23
+**Session context:** Review of draft PR #71 (reasoning output, local LLM models, mode toggle, UI cleanup)
+**Skill:** review (also verify, and CI setup for this repo)
+**Type:** open-source
+**Phase/Area:** Pre-review mechanical gates
+
+**Issue:** PR #71's rack.js failed `node --check` (a diff hunk deleted an `if` guard line but kept its body and closing brace, unbalancing the try block). The entire frontend was dead on the branch, proving it was never loaded in a browser before the draft PR was opened. Five of nine independent review angles each independently rediscovered the same parse error, spending verification effort a one-line mechanical check would have caught first.
+
+**Suggested improvement:** In the review skill (and any PR-authoring flow), run cheap mechanical gates before spawning finder agents: `node --check` (or eslint) on changed .js files, `python -m py_compile` on changed .py files. A parse failure short-circuits the review. For this repo: add a JS syntax check to CI so parse errors block merge.
+
+**Principle:** Run free mechanical validity checks (parse, compile) before spending model effort on semantic review; a file that does not parse makes most semantic findings moot and every finder rediscovers it redundantly.
