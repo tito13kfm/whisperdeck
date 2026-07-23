@@ -124,6 +124,74 @@ def test_audio_only_upload_has_no_video_path(client, db_session):
     assert saved.video_path is None
 
 
+def test_inline_upload_persists_requested_num_speakers(client, db_session):
+    """Regression test: the inline (non-chunked) branch of
+    _run_transcription_pipeline must persist the user's requested
+    num_speakers onto the transcript row, mirroring what the chunked branch
+    already does via create_transcript_stub (app.py ~line 785). Without the
+    fix, num_speakers stayed None even when the form explicitly requested a
+    count, so the re-diarize picker had nothing to prefill."""
+    fake_transcode = _transcode_mock()
+    with patch("app.transcode_for_upload", fake_transcode), \
+         patch("app.transcription_service.transcribe", AsyncMock(side_effect=_stub_transcribe)):
+        response = client.post(
+            "/api/transcribe",
+            files={"file": ("meeting.wav", io.BytesIO(b"fake wav bytes"), "audio/wav")},
+            data={"provider": "moonshine", "diarize": "true", "num_speakers": "2"},
+        )
+    assert response.status_code == 200
+    from database import Transcript
+    saved = db_session.query(Transcript).order_by(Transcript.id.desc()).first()
+    assert saved.num_speakers == 2
+
+
+def test_failed_upload_discards_fresh_stereo_copy(client, tmp_path):
+    """When the upload fails after the stereo FLAC is produced but before
+    any transcript row references it, the FLAC must be removed — otherwise
+    every failed live-stereo upload strands an orphan in the upload dir."""
+    flac = tmp_path / "cap_16k_stereo.flac"
+
+    async def fake_stereo(path, outdir):
+        flac.write_bytes(b"fake flac")
+        return str(flac)
+
+    fake_transcode = _transcode_mock()
+    with patch("app.transcode_for_upload", fake_transcode), \
+         patch("app.transcode_stereo_for_diarization", fake_stereo), \
+         patch("app.transcription_service.transcribe",
+               AsyncMock(side_effect=RuntimeError("provider exploded"))):
+        response = client.post(
+            "/api/transcribe",
+            files={"file": ("live_capture.webm", io.BytesIO(b"fake webm"), "audio/webm")},
+            data={"provider": "moonshine", "capture_source": "live_stereo"},
+        )
+    assert response.status_code == 500
+    assert not flac.exists()
+
+
+def test_successful_upload_keeps_stereo_copy(client, db_session, tmp_path):
+    flac = tmp_path / "cap2_16k_stereo.flac"
+
+    async def fake_stereo(path, outdir):
+        flac.write_bytes(b"fake flac")
+        return str(flac)
+
+    fake_transcode = _transcode_mock()
+    with patch("app.transcode_for_upload", fake_transcode), \
+         patch("app.transcode_stereo_for_diarization", fake_stereo), \
+         patch("app.transcription_service.transcribe", AsyncMock(side_effect=_stub_transcribe)):
+        response = client.post(
+            "/api/transcribe",
+            files={"file": ("live_capture.webm", io.BytesIO(b"fake webm"), "audio/webm")},
+            data={"provider": "moonshine", "capture_source": "live_stereo"},
+        )
+    assert response.status_code == 200
+    assert flac.exists()
+    from database import Transcript
+    saved = db_session.query(Transcript).order_by(Transcript.id.desc()).first()
+    assert saved.stereo_audio_path == str(flac)
+
+
 def test_retranscribe_carries_forward_parent_video_path(client, db_session, tmp_path):
     """Parent's stored audio must actually exist on disk and transcode must
     be mocked — _run_transcription_pipeline probes duration and file size

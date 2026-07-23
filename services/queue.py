@@ -497,6 +497,7 @@ async def _finalize_if_done(db, transcript_id: int, diarization_service) -> None
         new_status = "partial"
 
     speaker_count = None
+    diarization_method = None
     if transcript.diarize_requested and segments and transcript.audio_path:
         # IMPORTANT: nothing above this point may leave a dirty write on
         # `transcript` — diarization result, segments, and the new status
@@ -513,25 +514,19 @@ async def _finalize_if_done(db, transcript_id: int, diarization_service) -> None
         db.rollback()
         transcript_user_id = transcript.user_id
         audio_path = transcript.audio_path
+        stereo_audio_path = transcript.stereo_audio_path
         num_speakers = transcript.num_speakers
         try:
-            if diarization_service._check_pyannote():
-                from services.settings import get_user_settings  # local import avoids a module-load cycle with app.py
-                user_settings = get_user_settings(db, transcript_user_id)
-                # num_speakers=None lets pyannote auto-detect the count.
-                result = await diarization_service.diarize_pyannote(
-                    audio_path, num_speakers=num_speakers,
-                    hf_token=user_settings.get("hf_token"),
-                )
-            else:
-                # Heuristic fallback can't auto-detect — needs a real
-                # count, default to 2 if the user left it blank.
-                result = await diarization_service.diarize_heuristic(
-                    audio_path, num_speakers=num_speakers or 2, segments=segments,
-                )
-            merged = await diarization_service.combine_with_transcript(result, segments)
+            from services.settings import get_user_settings  # local import avoids a module-load cycle with app.py
+            user_settings = get_user_settings(db, transcript_user_id)
+            # diarize_and_merge picks pyannote when installed, else the
+            # pause-gap heuristic (which needs a real count, default 2 inside).
+            merged, speaker_count, diarization_method = await diarization_service.diarize_and_merge(
+                audio_path, num_speakers=num_speakers, segments=segments,
+                hf_token=user_settings.get("hf_token"),
+                stereo_audio_path=stereo_audio_path,
+            )
             segments = merged
-            speaker_count = result.speaker_count
         except Exception as e:
             print(f"[queue] non-fatal diarization failure for transcript {transcript_id}: {e}")
 
@@ -548,12 +543,19 @@ async def _finalize_if_done(db, transcript_id: int, diarization_service) -> None
         if not transcript or transcript.status == "cancelled":
             return
 
+    # Finalize replaces segments wholesale. Normally there is no relabel
+    # history yet (first completion), but on a resume/retry re-finalize any
+    # entries recorded against the previous segmentation are index-stale —
+    # clear them so undo can't stamp old labels onto the new lines.
+    from services.relabel import clear_relabel_history
+    clear_relabel_history(db, transcript.id)
     transcript.segments = segments
     transcript.full_text = full_text
     transcript.duration_seconds = duration_seconds
     transcript.status = new_status
     if speaker_count is not None:
         transcript.speaker_count = speaker_count
+        transcript.diarization_method = diarization_method
     transcript.updated_at = utcnow_naive()
     db.commit()
 

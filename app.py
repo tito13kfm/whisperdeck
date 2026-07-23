@@ -34,7 +34,7 @@ from services.settings import get_user_settings, update_user_settings
 from services.transcription import TranscriptionService
 from services.diarization import DiarizationService
 from services.voice_id import voice_id_service
-from services.audio_prep import transcode_for_upload, AudioPrepError, chunk_audio, get_audio_duration, extract_clips_concat, has_video_stream
+from services.audio_prep import transcode_for_upload, AudioPrepError, chunk_audio, get_audio_duration, extract_clips_concat, has_video_stream, transcode_stereo_for_diarization
 from services.queue import (
     create_chunk_jobs, retry_failed_chunks, queue_worker_loop, compute_queue_status,
     cancel_transcript_jobs, resume_cancelled_chunks, reset_stuck_transcription_jobs,
@@ -48,6 +48,7 @@ from services.llm_jobs import (
     cancel_llm_job, rerun_llm_job, llm_worker_loop, reset_stuck_llm_jobs,
     dismiss_llm_job, clear_finished_llm_jobs,
 )
+from services.relabel import record_relabel, latest_relabel
 from backends import list_providers, get_provider, LOCAL_PROVIDERS
 from services.security import (
     generate_csrf_token, validate_csrf_token,
@@ -222,7 +223,7 @@ def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
     return user
 
 
-def _serialize_transcript(db: Session, t: Transcript) -> dict:
+def _serialize_transcript(db: Session, t: Transcript, include_relabel: bool = False) -> dict:
     jobs = t.jobs or []
     job_progress = None
     if jobs:
@@ -231,7 +232,7 @@ def _serialize_transcript(db: Session, t: Transcript) -> dict:
             "completed": sum(1 for j in jobs if j.status == "completed"),
             "failed": sum(1 for j in jobs if j.status == "failed"),
         }
-    return {
+    data = {
         "id": t.id,
         "source_transcript_id": t.source_transcript_id,
         "kind": t.kind or "meeting",
@@ -245,6 +246,8 @@ def _serialize_transcript(db: Session, t: Transcript) -> dict:
         "full_text": t.full_text,
         "segments": t.segments or [],
         "speaker_count": t.speaker_count,
+        "diarization_method": t.diarization_method,
+        "num_speakers": t.num_speakers,
         "error": t.error,
         "corrected_text": t.corrected_text,
         "correction_error": t.correction_error,
@@ -266,6 +269,12 @@ def _serialize_transcript(db: Session, t: Transcript) -> dict:
         "voice_match_job": serialize_llm_job(vj) if (vj := latest_job(db, t.id, "voice_match")) else None,
         **_dictation_job_fields(db, t),
     }
+    if include_relabel:
+        last = latest_relabel(db, t.id)
+        data["last_relabel"] = (
+            {"kind": last.kind, "description": last.description} if last else None
+        )
+    return data
 
 
 def _dictation_job_fields(db: Session, t: Transcript) -> dict:
@@ -658,6 +667,7 @@ async def _run_transcription_pipeline(
     num_speakers: Optional[int],
     source_transcript_id: Optional[int] = None,
     kind: str = "meeting",
+    capture_source: Optional[str] = None,
 ) -> dict:
     """Everything after the source audio is on disk: transcode decision,
     chunk-vs-inline branch, inline diarization, auto-correct enqueue.
@@ -676,6 +686,8 @@ async def _run_transcription_pipeline(
     be bypassed by calling either entry point directly."""
     if kind == "dictation":
         diarize = False
+    if capture_source not in (None, "live_stereo"):
+        capture_source = None  # unknown values from stale clients are ignored, not errors
     user_settings = get_user_settings(db, current_user.id)
 
     # Normalize for cloud upload: strips video track, downsamples to 16kHz
@@ -697,9 +709,14 @@ async def _run_transcription_pipeline(
             Transcript.id == source_transcript_id, Transcript.user_id == current_user.id
         ).first()
         video_path = parent.video_path if parent else None
+        # A retranscribe re-enters the pipeline with the stored mono mp3 as
+        # input, so capture_source will be None and no new stereo copy would
+        # be produced below — carry the parent's forward instead.
+        stereo_audio_path_inherited = parent.stereo_audio_path if parent else None
     else:
         playable = raw_path.suffix.lower() in _VIDEO_MIME
         video_path = str(raw_path) if playable and has_video_stream(str(raw_path)) else None
+        stereo_audio_path_inherited = None
 
     try:
         raw_duration = get_audio_duration(str(save_path))
@@ -720,6 +737,33 @@ async def _run_transcription_pipeline(
             ))
         except AudioPrepError as e:
             raise HTTPException(status_code=500, detail=str(e))
+
+    stereo_audio_path = stereo_audio_path_inherited
+    if capture_source == "live_stereo":
+        try:
+            stereo_audio_path = await transcode_stereo_for_diarization(str(raw_path), str(UPLOAD_DIR))
+        except Exception as e:
+            # Non-fatal: fall back to mixed-audio diarization rather than
+            # failing the whole upload over the enhancement copy.
+            print(f"[audio-prep] stereo copy failed, using mixed audio: {e}")
+
+    stereo_persisted = False
+
+    def _discard_stereo_copy():
+        # A failure below, before the path is persisted onto a transcript
+        # row, would otherwise strand the FLAC as an orphan in the upload
+        # dir. Only remove a copy created by THIS request (an inherited
+        # path belongs to the source transcript of a re-transcribe) and
+        # only while no committed row references it yet.
+        if (
+            not stereo_persisted
+            and stereo_audio_path
+            and stereo_audio_path != stereo_audio_path_inherited
+        ):
+            try:
+                os.remove(stereo_audio_path)
+            except OSError:
+                pass
 
     # Get provider config — decrypts API key transparently
     from services.settings import _decrypt_key_if_needed
@@ -768,30 +812,40 @@ async def _run_transcription_pipeline(
         try:
             chunks = await chunk_audio(str(save_path), str(UPLOAD_DIR), target_chunk_bytes=target_chunk_bytes)
         except AudioPrepError as e:
+            _discard_stereo_copy()
             raise HTTPException(status_code=500, detail=str(e))
+        except Exception:
+            _discard_stereo_copy()
+            raise
 
-        transcript = transcription_service.create_transcript_stub(
-            db,
-            current_user.id,
-            filename=filename,
-            provider_name=provider,
-            model=model or provider_config.get("default_model") or "",
-            language=language,
-            audio_path=str(save_path),
-            diarize_requested=diarize,
-            title=title or filename,
-            num_speakers=num_speakers,
-            video_path=video_path,
-            kind=kind,
-        )
-        # Real processed size, not the raw upload size — the sum of all
-        # chunk files, since that's what actually gets sent to the provider.
-        transcript.processed_size_bytes = sum(os.path.getsize(c["path"]) for c in chunks)
-        # Known now from the ffprobe above — lets the UI say "48-min
-        # recording" before the first chunk lands.
-        transcript.duration_seconds = duration_seconds
-        transcript.source_transcript_id = source_transcript_id
-        db.commit()
+        try:
+            transcript = transcription_service.create_transcript_stub(
+                db,
+                current_user.id,
+                filename=filename,
+                provider_name=provider,
+                model=model or provider_config.get("default_model") or "",
+                language=language,
+                audio_path=str(save_path),
+                diarize_requested=diarize,
+                title=title or filename,
+                num_speakers=num_speakers,
+                video_path=video_path,
+                kind=kind,
+            )
+            # Real processed size, not the raw upload size — the sum of all
+            # chunk files, since that's what actually gets sent to the provider.
+            transcript.processed_size_bytes = sum(os.path.getsize(c["path"]) for c in chunks)
+            transcript.stereo_audio_path = stereo_audio_path
+            # Known now from the ffprobe above — lets the UI say "48-min
+            # recording" before the first chunk lands.
+            transcript.duration_seconds = duration_seconds
+            transcript.source_transcript_id = source_transcript_id
+            db.commit()
+        except Exception:
+            _discard_stereo_copy()
+            raise
+        stereo_persisted = True
         create_chunk_jobs(db, transcript.id, chunks)
         return _serialize_transcript(db, transcript)
 
@@ -811,19 +865,24 @@ async def _run_transcription_pipeline(
         transcript.processed_size_bytes = file_size
         transcript.source_transcript_id = source_transcript_id
         transcript.kind = kind
+        transcript.num_speakers = num_speakers
+        transcript.stereo_audio_path = stereo_audio_path
         db.commit()
+        stereo_persisted = True
 
         # Run diarization if requested
         if diarize and transcript.segments:
             try:
-                merged, speaker_count = await diarization_service.diarize_and_merge(
+                merged, speaker_count, diarization_method = await diarization_service.diarize_and_merge(
                     str(save_path),
                     num_speakers=num_speakers,
                     segments=transcript.segments,
                     hf_token=user_settings.get("hf_token"),
+                    stereo_audio_path=transcript.stereo_audio_path,
                 )
                 transcript.segments = merged
                 transcript.speaker_count = speaker_count
+                transcript.diarization_method = diarization_method
                 db.commit()
             except Exception as e:
                 # Non-fatal: diarization enhancement failed. Transcript still
@@ -839,6 +898,10 @@ async def _run_transcription_pipeline(
         return _serialize_transcript(db, transcript)
 
     except Exception as e:
+        # transcribe() marked its row failed without ever persisting
+        # stereo_audio_path (that happens post-success), so the FLAC is
+        # unreferenced — remove it rather than leaving an orphan.
+        _discard_stereo_copy()
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -854,6 +917,7 @@ async def transcribe_audio(
     num_speakers: Optional[int] = Form(None),
     context_doc: Optional[str] = Form(None),
     kind: str = Form("meeting"),
+    capture_source: Optional[str] = Form(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -895,6 +959,7 @@ async def transcribe_audio(
         diarize=diarize,
         num_speakers=num_speakers,
         kind=kind,
+        capture_source=capture_source,
     )
 
 
@@ -918,7 +983,7 @@ async def get_transcript(transcript_id: int, db: Session = Depends(get_db), curr
     ).first()
     if not t:
         raise HTTPException(status_code=404, detail="Transcript not found")
-    return _serialize_transcript(db, t)
+    return _serialize_transcript(db, t, include_relabel=True)
 
 
 # Job states whose chunk files are still needed: pending/running are
@@ -945,17 +1010,17 @@ def _transcript_refs_by_realpath(db: Session) -> dict:
     file be deleted out from under the transcript that references it.
 
     Filtered at the query level to rows that actually hold a path — a
-    transcript with both columns NULL can never match a realpath lookup,
+    transcript with all three columns NULL can never match a realpath lookup,
     so excluding it up front (rather than after loading the full row)
     keeps the table scan cheap as it grows. Full Transcript ORM objects
     are still returned (not a column projection): delete_files mutates
     and commits these same instances after removing a file."""
     refs = {}
     rows = db.query(Transcript).filter(
-        or_(Transcript.audio_path.isnot(None), Transcript.video_path.isnot(None))
+        or_(Transcript.audio_path.isnot(None), Transcript.video_path.isnot(None), Transcript.stereo_audio_path.isnot(None))
     ).all()
     for t in rows:
-        for field in ("audio_path", "video_path"):
+        for field in ("audio_path", "video_path", "stereo_audio_path"):
             p = getattr(t, field)
             if p:
                 refs.setdefault(os.path.realpath(p), []).append((t, field))
@@ -984,9 +1049,9 @@ async def delete_transcript(transcript_id: int, db: Session = Depends(get_db), c
     if not t:
         raise HTTPException(status_code=404, detail="Transcript not found")
     refs = _transcript_refs_by_realpath(db)
-    for path in (t.audio_path, t.video_path):
+    for path in (t.audio_path, t.video_path, t.stereo_audio_path):
         if path and os.path.exists(path):
-            # Retranscribe carries video_path/audio_path forward verbatim, so
+            # Retranscribe carries video_path/audio_path/stereo_audio_path forward verbatim, so
             # sibling transcripts (same or different user) can reference the
             # exact same file. Removing it here would break their playback.
             real = os.path.realpath(path)
@@ -1112,8 +1177,8 @@ async def delete_files(data: dict = Body(...), db: Session = Depends(get_db), cu
             skipped.append({"path": raw_path, "reason": "remove_failed"})
             continue
         # entries all belong to one transcript here — null every field of
-        # its that pointed at this file (audio_path and video_path can in
-        # principle both reference the same path).
+        # its that pointed at this file (audio_path, video_path, and
+        # stereo_audio_path can in principle all reference the same path).
         for t, field in entries:
             setattr(t, field, None)
         if entries:
@@ -1288,14 +1353,22 @@ async def rename_transcript_speaker(
     # New list, not in-place mutation — SQLAlchemy doesn't change-track
     # in-place edits on a JSON column.
     renamed = 0
+    changed = []
     new_segments = []
-    for seg in t.segments or []:
+    for idx, seg in enumerate(t.segments or []):
         if (seg.get("speaker") or "") == old:
+            changed.append((idx, seg.get("speaker") or ""))
             seg = {**seg, "speaker": new}
             renamed += 1
         new_segments.append(seg)
     if renamed == 0:
         raise HTTPException(status_code=400, detail=f"No segments have speaker '{old}'")
+
+    entry = record_relabel(
+        db, t, "rename", changed,
+        corrected_text_before=t.corrected_text if t.corrected_text else None,
+        description=f"rename {old} to {new} ({renamed} lines)",
+    )
     t.segments = new_segments
 
     if t.corrected_text:
@@ -1306,10 +1379,15 @@ async def rename_transcript_speaker(
             (new + line[len(old):]) if line.startswith(prefix) else line
             for line in t.corrected_text.splitlines()
         )
+    if entry is not None and entry.inverse.get("corrected_text") is not None:
+        # After-image stamp: undo restores the before-image only while
+        # corrected_text still equals what this rename produced. A JSON
+        # column doesn't change-track in-place edits — assign a new dict.
+        entry.inverse = {**entry.inverse, "corrected_text_after": t.corrected_text}
 
     t.updated_at = utcnow_naive()
     db.commit()
-    return {"renamed": renamed, "transcript": _serialize_transcript(db, t)}
+    return {"renamed": renamed, "transcript": _serialize_transcript(db, t, include_relabel=True)}
 
 
 @app.post("/api/transcripts/{transcript_id}/segments/retag")
@@ -1340,6 +1418,9 @@ async def retag_transcript_segments(
             raise HTTPException(status_code=400, detail=f"Segment index {i} is out of range")
 
     index_set = set(indices)
+    changed = [(i, segments[i].get("speaker") or "") for i in sorted(index_set)]
+    record_relabel(db, t, "retag", changed,
+                   description=f"retag {len(index_set)} lines to {speaker}")
     new_segments = [
         {**seg, "speaker": speaker} if i in index_set else seg
         for i, seg in enumerate(segments)
@@ -1347,7 +1428,48 @@ async def retag_transcript_segments(
     t.segments = new_segments
     t.updated_at = utcnow_naive()
     db.commit()
-    return {"retagged": len(index_set), "transcript": _serialize_transcript(db, t)}
+    return {"retagged": len(index_set), "transcript": _serialize_transcript(db, t, include_relabel=True)}
+
+
+@app.post("/api/transcripts/{transcript_id}/relabel-undo")
+async def undo_last_relabel(
+    transcript_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Revert the most recent bulk relabel (rename / retag / voice match) by
+    applying its stored inverse patch. Per-line manual edits are not bulk
+    actions and are not tracked here."""
+    t = db.query(Transcript).filter(
+        Transcript.id == transcript_id, Transcript.user_id == current_user.id
+    ).first()
+    if not t:
+        raise HTTPException(status_code=404, detail="Transcript not found")
+    entry = latest_relabel(db, t.id)
+    if not entry:
+        raise HTTPException(status_code=404, detail="Nothing to undo")
+
+    segments = list(t.segments or [])
+    for patch in entry.inverse.get("segments", []):
+        i = patch.get("index")
+        if isinstance(i, int) and 0 <= i < len(segments):
+            segments[i] = {**segments[i], "speaker": patch.get("speaker") or ""}
+    t.segments = segments
+    if (
+        entry.inverse.get("corrected_text") is not None
+        and entry.inverse.get("corrected_text_after") == t.corrected_text
+    ):
+        # Restore the before-image only if corrected_text is still exactly
+        # what the rename produced. If a correction pass ran in between,
+        # the snapshot is stale — reverting it would silently discard the
+        # newer LLM output, which is worth more than the label prefix.
+        t.corrected_text = entry.inverse["corrected_text"]
+    undone_kind, undone_desc = entry.kind, entry.description
+    db.delete(entry)
+    t.updated_at = utcnow_naive()
+    db.commit()
+    return {"undone": undone_kind, "description": undone_desc,
+            "transcript": _serialize_transcript(db, t, include_relabel=True)}
 
 
 @app.post("/api/transcripts/{transcript_id}/enroll-speaker")

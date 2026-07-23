@@ -325,14 +325,22 @@ async def run_llm_job(SessionLocal, job_id: int, transcription_service, diarizat
             from services.settings import get_user_settings
             user_settings = get_user_settings(db, job.user_id)
             try:
-                merged, speaker_count = await diarization_service.diarize_and_merge(
+                merged, speaker_count, diarization_method = await diarization_service.diarize_and_merge(
                     transcript.audio_path,
                     num_speakers=transcript.num_speakers,
                     segments=transcript.segments or [],
                     hf_token=user_settings.get("hf_token"),
+                    stereo_audio_path=transcript.stereo_audio_path,
                 )
+                # Rediarize regenerates the segmentation wholesale, so every
+                # stored inverse patch (index-based, recorded against the OLD
+                # segments) is now meaningless — undo would stamp stale labels
+                # onto unrelated lines. Invalidate in the same commit.
+                from services.relabel import clear_relabel_history
+                clear_relabel_history(db, transcript.id)
                 transcript.segments = merged
                 transcript.speaker_count = speaker_count
+                transcript.diarization_method = diarization_method
                 transcript.updated_at = utcnow_naive()
                 job.progress_done = 1
                 job.result_json = {"segments": merged}
@@ -363,6 +371,7 @@ async def run_llm_job(SessionLocal, job_id: int, transcription_service, diarizat
             job.progress_done = 0
             db.commit()
             skipped = 0
+            changed = []
             new_segments = list(segments)
             for i, seg in enumerate(segments):
                 try:
@@ -387,11 +396,16 @@ async def run_llm_job(SessionLocal, job_id: int, transcription_service, diarizat
                         except OSError:
                             pass
                     if matches:
+                        changed.append((i, seg.get("speaker") or ""))
                         new_segments[i] = {**seg, "speaker": matches[0]["name"]}
                 except Exception:
                     skipped += 1
                 job.progress_done = i + 1
                 db.commit()
+            if changed:
+                from services.relabel import record_relabel
+                record_relabel(db, transcript, "voice_match", changed,
+                               description=f"voice match relabeled {len(changed)} lines")
             transcript.segments = new_segments
             transcript.updated_at = utcnow_naive()
             db.commit()
