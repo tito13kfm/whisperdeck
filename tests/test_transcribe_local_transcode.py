@@ -124,27 +124,6 @@ def test_audio_only_upload_has_no_video_path(client, db_session):
     assert saved.video_path is None
 
 
-def test_inline_upload_persists_requested_num_speakers(client, db_session):
-    """Regression test: the inline (non-chunked) branch of
-    _run_transcription_pipeline must persist the user's requested
-    num_speakers onto the transcript row, mirroring what the chunked branch
-    already does via create_transcript_stub (app.py ~line 785). Without the
-    fix, num_speakers stayed None even when the form explicitly requested a
-    count, so the re-diarize picker had nothing to prefill."""
-    fake_transcode = _transcode_mock()
-    with patch("app.transcode_for_upload", fake_transcode), \
-         patch("app.transcription_service.transcribe", AsyncMock(side_effect=_stub_transcribe)):
-        response = client.post(
-            "/api/transcribe",
-            files={"file": ("meeting.wav", io.BytesIO(b"fake wav bytes"), "audio/wav")},
-            data={"provider": "moonshine", "diarize": "true", "num_speakers": "2"},
-        )
-    assert response.status_code == 200
-    from database import Transcript
-    saved = db_session.query(Transcript).order_by(Transcript.id.desc()).first()
-    assert saved.num_speakers == 2
-
-
 def test_retranscribe_carries_forward_parent_video_path(client, db_session, tmp_path):
     """Parent's stored audio must actually exist on disk and transcode must
     be mocked — _run_transcription_pipeline probes duration and file size

@@ -276,7 +276,7 @@ def test_run_llm_job_rediarize_merges_in_place_without_key(db_session, tmp_path)
 
     merged = [{"start": 0, "end": 1, "text": "a b", "speaker": "SPEAKER_01"}]
     fake_diar = AsyncMock()
-    fake_diar.diarize_and_merge = AsyncMock(return_value=(merged, 2, "pyannote"))
+    fake_diar.diarize_and_merge = AsyncMock(return_value=(merged, 2))
 
     factory = lambda: _NoCloseSession(db_session)
     asyncio.run(run_llm_job(factory, job.id, transcription_service=None,
