@@ -543,6 +543,12 @@ async def _finalize_if_done(db, transcript_id: int, diarization_service) -> None
         if not transcript or transcript.status == "cancelled":
             return
 
+    # Finalize replaces segments wholesale. Normally there is no relabel
+    # history yet (first completion), but on a resume/retry re-finalize any
+    # entries recorded against the previous segmentation are index-stale —
+    # clear them so undo can't stamp old labels onto the new lines.
+    from services.relabel import clear_relabel_history
+    clear_relabel_history(db, transcript.id)
     transcript.segments = segments
     transcript.full_text = full_text
     transcript.duration_seconds = duration_seconds

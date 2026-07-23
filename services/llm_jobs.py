@@ -332,6 +332,12 @@ async def run_llm_job(SessionLocal, job_id: int, transcription_service, diarizat
                     hf_token=user_settings.get("hf_token"),
                     stereo_audio_path=transcript.stereo_audio_path,
                 )
+                # Rediarize regenerates the segmentation wholesale, so every
+                # stored inverse patch (index-based, recorded against the OLD
+                # segments) is now meaningless — undo would stamp stale labels
+                # onto unrelated lines. Invalidate in the same commit.
+                from services.relabel import clear_relabel_history
+                clear_relabel_history(db, transcript.id)
                 transcript.segments = merged
                 transcript.speaker_count = speaker_count
                 transcript.diarization_method = diarization_method

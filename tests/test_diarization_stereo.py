@@ -132,3 +132,19 @@ async def test_live_stereo_rejects_mono_file(tmp_path):
     svc = DiarizationService()
     with pytest.raises(ValueError):
         await svc.diarize_live_stereo(str(path), num_speakers=2, hf_token=None)
+
+
+@pytest.mark.asyncio
+async def test_live_stereo_rejects_dual_mono(tmp_path):
+    """A mono capture upmixed to 2 identical channels (e.g. MediaRecorder
+    encoding mono opus despite the frontend's 2-channel merger graph, then
+    ffmpeg's forced -ac 2) must raise rather than proceed: the bleed
+    filter's mic-dominance test can never pass on identical channels, so
+    the path would silently emit zero "You" segments while still shrinking
+    pyannote's expected speaker count. Raising lets diarize_and_merge fall
+    back to ordinary mixed-audio diarization."""
+    channel = np.concatenate([_tone(1), _silence(1)])
+    path = _stereo_flac(tmp_path, channel, channel)
+    svc = DiarizationService()
+    with pytest.raises(ValueError, match="identical"):
+        await svc.diarize_live_stereo(path, num_speakers=2, hf_token=None)

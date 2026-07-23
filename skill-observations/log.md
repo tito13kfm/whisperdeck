@@ -117,3 +117,18 @@ stays in the active log (never archived) until resolved to ACTIONED or DECLINED
 **Suggested improvement:** No new rule needed; the task-observer skill already mandates scanning archive/*.md in the pre-logging max-number step and moving (not copying) entries on archival. This entry records the collision resolution: CLAUDE.md tags wd#15 and wd#16 belong to the duplicate-numbered 2026-07-20 Observations 11 and 12 respectively; observation numbers 15 and 16 are therefore retired. (Post-merge correction: this entry itself collided with origin's real Observation 15/16/17 from a concurrent session and was renumbered 17→18; the next observation number is 19.)
 
 **Principle:** An append-only ID scheme survives archival only if the max-scan covers every location IDs can live; any copy-without-remove archival turns "move" into silent duplication.
+
+### Observation 19: Complement Rule needs the inverse direction: state readers must be invalidated by every state rewriter
+
+**Status:** OPEN
+**Date:** 2026-07-22
+**Session context:** Multi-agent review of PR #72 (issue #67 diarization, Phases 1-4)
+**Skill:** review (also writing-plans; relates to AGENTS.md Complement Rule)
+**Type:** internal
+**Phase/Area:** cross-file tracing / plan design
+
+**Issue:** The PR carefully applied the Complement Rule in the forward direction: all three relabel writers (rename, retag, voice-match) record RelabelHistory. But the review found the inverse miss: RelabelHistory entries are index-based snapshots of transcript.segments, and the sibling set of *segments rewriters* (rediarize job, queue finalize, inline diarize) never invalidates that history. Undo after rediarize stamps stale labels onto a new segmentation. Same shape: relabel_history rows are never cascaded on transcript delete (SQLite FK cascade inert, no ORM relationship), so SQLite id reuse can resurrect a dead transcript's undo onto a new one.
+
+**Suggested improvement:** When a plan adds derived/snapshot state (history, cache, undo patch, denormalized field) keyed to mutable parent data, enumerate BOTH sibling sets: (a) writers that must produce the derived state, and (b) rewriters/deleters of the parent data that must invalidate it. Review finders should explicitly ask "who rewrites the data this snapshot indexes into, and do they invalidate it?"
+
+**Principle:** Index-or-snapshot-based derived state has two complement sets, producers and invalidators; covering only producers yields silent corruption when any parent rewriter fires.

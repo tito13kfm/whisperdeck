@@ -377,6 +377,16 @@ class DiarizationService:
         if data.shape[1] < 2:
             raise ValueError(f"{stereo_path} has fewer than 2 channels — cannot channel-split")
         mic, system = data[:, 0], data[:, 1]
+        # Dual-mono defense: a mono source upmixed somewhere along the chain
+        # yields two identical channels. The bleed filter's mic-dominance
+        # test can never pass on those (rms_mic == rms_sys), so we'd silently
+        # emit zero "You" segments while still shrinking pyannote's expected
+        # count. Raising instead lets diarize_and_merge fall back to the
+        # ordinary mixed-audio path.
+        if np.array_equal(mic, system):
+            raise ValueError(
+                f"{stereo_path} channels are identical (dual-mono) — no channel separation to exploit"
+            )
 
         mic_intervals = self._drop_bleed(
             self._active_intervals(mic, sample_rate), mic, system, sample_rate
@@ -387,12 +397,13 @@ class DiarizationService:
 
         remote_count = (num_speakers - 1) if num_speakers else None
         system_intervals = self._active_intervals(system, sample_rate)
-        # Degrade to mic-only "You" segments rather than raising when pyannote
-        # isn't installed — unlike diarize_pyannote (a direct, user-invoked
-        # entry point where a friendly ImportError is the right feedback),
-        # this is meant to sit in diarize_and_merge's fallback chain, where a
-        # raised error would be more disruptive than just returning what the
-        # mic channel already found.
+        # The remote channel runs through pyannote only when there is work
+        # for it (remote speakers expected, system channel not silent). In
+        # production the pyannote_available leg never gates anything —
+        # diarize_and_merge only routes here when pyannote is installed, and
+        # falls through to the heuristic otherwise (a deliberate, test-pinned
+        # choice) — it is defense-in-depth for direct callers, degrading to
+        # mic-only "You" segments rather than crashing in _run_pyannote_sync.
         if remote_count != 0 and system_intervals and self.pyannote_available:
             # Hand _run_pyannote_sync a plain numpy array rather than a torch
             # tensor — it converts internally, so this async method (and its

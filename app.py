@@ -24,7 +24,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
-from database import init_db, backfill_user_id, Transcript, Summary, VoiceProfile, VoiceClip, ProviderConfig, User, LlmJob, TranscriptionJob, RelabelHistory, utcnow_naive
+from database import init_db, backfill_user_id, Transcript, Summary, VoiceProfile, VoiceClip, ProviderConfig, User, LlmJob, TranscriptionJob, utcnow_naive
 from services.auth import (
     get_or_create_fallback_user, create_user, authenticate_user,
     list_usernames, generate_reset_token, reset_password,
@@ -48,6 +48,7 @@ from services.llm_jobs import (
     cancel_llm_job, rerun_llm_job, llm_worker_loop, reset_stuck_llm_jobs,
     dismiss_llm_job, clear_finished_llm_jobs,
 )
+from services.relabel import record_relabel, latest_relabel
 from backends import list_providers, get_provider, LOCAL_PROVIDERS
 from services.security import (
     generate_csrf_token, validate_csrf_token,
@@ -269,12 +270,7 @@ def _serialize_transcript(db: Session, t: Transcript, include_relabel: bool = Fa
         **_dictation_job_fields(db, t),
     }
     if include_relabel:
-        last = (
-            db.query(RelabelHistory)
-            .filter(RelabelHistory.transcript_id == t.id)
-            .order_by(RelabelHistory.id.desc())
-            .first()
-        )
+        last = latest_relabel(db, t.id)
         data["last_relabel"] = (
             {"kind": last.kind, "description": last.description} if last else None
         )
@@ -751,6 +747,24 @@ async def _run_transcription_pipeline(
             # failing the whole upload over the enhancement copy.
             print(f"[audio-prep] stereo copy failed, using mixed audio: {e}")
 
+    stereo_persisted = False
+
+    def _discard_stereo_copy():
+        # A failure below, before the path is persisted onto a transcript
+        # row, would otherwise strand the FLAC as an orphan in the upload
+        # dir. Only remove a copy created by THIS request (an inherited
+        # path belongs to the source transcript of a re-transcribe) and
+        # only while no committed row references it yet.
+        if (
+            not stereo_persisted
+            and stereo_audio_path
+            and stereo_audio_path != stereo_audio_path_inherited
+        ):
+            try:
+                os.remove(stereo_audio_path)
+            except OSError:
+                pass
+
     # Get provider config — decrypts API key transparently
     from services.settings import _decrypt_key_if_needed
     prov_cfg = db.query(ProviderConfig).filter(
@@ -798,31 +812,40 @@ async def _run_transcription_pipeline(
         try:
             chunks = await chunk_audio(str(save_path), str(UPLOAD_DIR), target_chunk_bytes=target_chunk_bytes)
         except AudioPrepError as e:
+            _discard_stereo_copy()
             raise HTTPException(status_code=500, detail=str(e))
+        except Exception:
+            _discard_stereo_copy()
+            raise
 
-        transcript = transcription_service.create_transcript_stub(
-            db,
-            current_user.id,
-            filename=filename,
-            provider_name=provider,
-            model=model or provider_config.get("default_model") or "",
-            language=language,
-            audio_path=str(save_path),
-            diarize_requested=diarize,
-            title=title or filename,
-            num_speakers=num_speakers,
-            video_path=video_path,
-            kind=kind,
-        )
-        # Real processed size, not the raw upload size — the sum of all
-        # chunk files, since that's what actually gets sent to the provider.
-        transcript.processed_size_bytes = sum(os.path.getsize(c["path"]) for c in chunks)
-        transcript.stereo_audio_path = stereo_audio_path
-        # Known now from the ffprobe above — lets the UI say "48-min
-        # recording" before the first chunk lands.
-        transcript.duration_seconds = duration_seconds
-        transcript.source_transcript_id = source_transcript_id
-        db.commit()
+        try:
+            transcript = transcription_service.create_transcript_stub(
+                db,
+                current_user.id,
+                filename=filename,
+                provider_name=provider,
+                model=model or provider_config.get("default_model") or "",
+                language=language,
+                audio_path=str(save_path),
+                diarize_requested=diarize,
+                title=title or filename,
+                num_speakers=num_speakers,
+                video_path=video_path,
+                kind=kind,
+            )
+            # Real processed size, not the raw upload size — the sum of all
+            # chunk files, since that's what actually gets sent to the provider.
+            transcript.processed_size_bytes = sum(os.path.getsize(c["path"]) for c in chunks)
+            transcript.stereo_audio_path = stereo_audio_path
+            # Known now from the ffprobe above — lets the UI say "48-min
+            # recording" before the first chunk lands.
+            transcript.duration_seconds = duration_seconds
+            transcript.source_transcript_id = source_transcript_id
+            db.commit()
+        except Exception:
+            _discard_stereo_copy()
+            raise
+        stereo_persisted = True
         create_chunk_jobs(db, transcript.id, chunks)
         return _serialize_transcript(db, transcript)
 
@@ -845,6 +868,7 @@ async def _run_transcription_pipeline(
         transcript.num_speakers = num_speakers
         transcript.stereo_audio_path = stereo_audio_path
         db.commit()
+        stereo_persisted = True
 
         # Run diarization if requested
         if diarize and transcript.segments:
@@ -874,6 +898,10 @@ async def _run_transcription_pipeline(
         return _serialize_transcript(db, transcript)
 
     except Exception as e:
+        # transcribe() marked its row failed without ever persisting
+        # stereo_audio_path (that happens post-success), so the FLAC is
+        # unreferenced — remove it rather than leaving an orphan.
+        _discard_stereo_copy()
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -1336,8 +1364,7 @@ async def rename_transcript_speaker(
     if renamed == 0:
         raise HTTPException(status_code=400, detail=f"No segments have speaker '{old}'")
 
-    from services.relabel import record_relabel
-    record_relabel(
+    entry = record_relabel(
         db, t, "rename", changed,
         corrected_text_before=t.corrected_text if t.corrected_text else None,
         description=f"rename {old} to {new} ({renamed} lines)",
@@ -1352,6 +1379,11 @@ async def rename_transcript_speaker(
             (new + line[len(old):]) if line.startswith(prefix) else line
             for line in t.corrected_text.splitlines()
         )
+    if entry is not None and entry.inverse.get("corrected_text") is not None:
+        # After-image stamp: undo restores the before-image only while
+        # corrected_text still equals what this rename produced. A JSON
+        # column doesn't change-track in-place edits — assign a new dict.
+        entry.inverse = {**entry.inverse, "corrected_text_after": t.corrected_text}
 
     t.updated_at = utcnow_naive()
     db.commit()
@@ -1387,7 +1419,6 @@ async def retag_transcript_segments(
 
     index_set = set(indices)
     changed = [(i, segments[i].get("speaker") or "") for i in sorted(index_set)]
-    from services.relabel import record_relabel
     record_relabel(db, t, "retag", changed,
                    description=f"retag {len(index_set)} lines to {speaker}")
     new_segments = [
@@ -1414,12 +1445,7 @@ async def undo_last_relabel(
     ).first()
     if not t:
         raise HTTPException(status_code=404, detail="Transcript not found")
-    entry = (
-        db.query(RelabelHistory)
-        .filter(RelabelHistory.transcript_id == t.id)
-        .order_by(RelabelHistory.id.desc())
-        .first()
-    )
+    entry = latest_relabel(db, t.id)
     if not entry:
         raise HTTPException(status_code=404, detail="Nothing to undo")
 
@@ -1429,7 +1455,14 @@ async def undo_last_relabel(
         if isinstance(i, int) and 0 <= i < len(segments):
             segments[i] = {**segments[i], "speaker": patch.get("speaker") or ""}
     t.segments = segments
-    if entry.inverse.get("corrected_text") is not None:
+    if (
+        entry.inverse.get("corrected_text") is not None
+        and entry.inverse.get("corrected_text_after") == t.corrected_text
+    ):
+        # Restore the before-image only if corrected_text is still exactly
+        # what the rename produced. If a correction pass ran in between,
+        # the snapshot is stale — reverting it would silently discard the
+        # newer LLM output, which is worth more than the label prefix.
         t.corrected_text = entry.inverse["corrected_text"]
     undone_kind, undone_desc = entry.kind, entry.description
     db.delete(entry)

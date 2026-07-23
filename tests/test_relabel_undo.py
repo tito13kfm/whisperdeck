@@ -81,6 +81,52 @@ def test_undo_with_no_history_is_404(client, db_session):
     assert client.post(f"/api/transcripts/{t.id}/relabel-undo").status_code == 404
 
 
+def test_undo_skips_corrected_text_regenerated_after_rename(client, db_session):
+    """Rename stores a corrected_text before-image; if a correction pass
+    re-runs before the undo, the snapshot is stale — undo must revert the
+    segment labels but leave the fresh corrected_text alone rather than
+    clobbering it with the pre-rename document."""
+    t = _transcript(db_session, corrected_text="SPEAKER_00: hello there\n\nSPEAKER_01: general kenobi")
+    r = client.post(f"/api/transcripts/{t.id}/speakers/rename",
+                    json={"from": "SPEAKER_00", "to": "Alice"})
+    assert r.status_code == 200
+
+    # A correction job re-runs in between and rewrites corrected_text.
+    db_session.expire_all()
+    t2 = db_session.query(Transcript).filter(Transcript.id == t.id).first()
+    fresh = "Alice: hello there, tidied up by a newer correction pass"
+    t2.corrected_text = fresh
+    db_session.commit()
+
+    r = client.post(f"/api/transcripts/{t.id}/relabel-undo")
+    assert r.status_code == 200
+    db_session.expire_all()
+    t3 = db_session.query(Transcript).filter(Transcript.id == t.id).first()
+    # Labels revert, the newer correction output survives.
+    assert [s["speaker"] for s in t3.segments] == ["SPEAKER_00", "SPEAKER_01", "SPEAKER_00"]
+    assert t3.corrected_text == fresh
+
+
+def test_delete_transcript_removes_relabel_history(client, db_session):
+    """ORM-level cascade must clean up history rows: the FK's
+    ondelete=CASCADE never fires (SQLite foreign_keys pragma is off), and
+    orphaned rows are dangerous because SQLite reuses rowids — a future
+    transcript could inherit a dead transcript's id and with it a foreign
+    undo entry."""
+    t = _transcript(db_session)
+    r = client.post(f"/api/transcripts/{t.id}/segments/retag",
+                    json={"indices": [0], "speaker": "Bob"})
+    assert r.status_code == 200
+    tid = t.id
+    assert (db_session.query(RelabelHistory)
+            .filter(RelabelHistory.transcript_id == tid).count()) == 1
+
+    assert client.delete(f"/api/transcripts/{tid}").status_code == 200
+    db_session.expire_all()
+    assert (db_session.query(RelabelHistory)
+            .filter(RelabelHistory.transcript_id == tid).count()) == 0
+
+
 def test_two_undos_walk_back_two_actions(client, db_session):
     t = _transcript(db_session)
     client.post(f"/api/transcripts/{t.id}/segments/retag", json={"indices": [0], "speaker": "A"})
@@ -163,3 +209,39 @@ def test_voice_match_records_relabel_history(db_session, tmp_path):
     rows = db_session.query(RelabelHistory).filter(RelabelHistory.kind == "voice_match").all()
     assert len(rows) == 1
     assert rows[0].inverse["segments"][0]["speaker"] == "SPEAKER_00"
+
+
+class _FakeDiarizationService:
+    async def diarize_and_merge(self, audio_path, num_speakers, segments,
+                                hf_token=None, stereo_audio_path=None):
+        merged = [{"start": 0.0, "end": 2.0, "text": "regenerated", "speaker": "SPEAKER_00"}]
+        return merged, 1, "heuristic"
+
+
+def test_rediarize_clears_relabel_history(client, db_session, tmp_path):
+    """Rediarize regenerates the segmentation wholesale, so index-based
+    inverse patches recorded against the old segments must be invalidated —
+    otherwise undo stamps stale labels onto unrelated new lines."""
+    user = _test_user(db_session)
+    audio = tmp_path / "a.mp3"
+    audio.write_bytes(b"fake")
+    t = _transcript(db_session, audio_path=str(audio))
+
+    r = client.post(f"/api/transcripts/{t.id}/segments/retag",
+                    json={"indices": [0], "speaker": "Bob"})
+    assert r.status_code == 200
+    assert (db_session.query(RelabelHistory)
+            .filter(RelabelHistory.transcript_id == t.id).count()) == 1
+
+    job = enqueue_llm_job(db_session, user.id, t.id, "rediarize", "", "")
+    job.status = "running"
+    db_session.commit()
+    factory = lambda: _NoCloseSession(db_session)
+    asyncio.run(run_llm_job(factory, job.id, transcription_service=None,
+                            diarization_service=_FakeDiarizationService()))
+
+    db_session.expire_all()
+    assert (db_session.query(RelabelHistory)
+            .filter(RelabelHistory.transcript_id == t.id).count()) == 0
+    # And the undo endpoint agrees there is nothing left to undo.
+    assert client.post(f"/api/transcripts/{t.id}/relabel-undo").status_code == 404
