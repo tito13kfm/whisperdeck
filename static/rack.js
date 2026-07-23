@@ -2279,6 +2279,7 @@ async function openEnrollMarkedModal() {
     </div>`);
   $('enroll-marked-cancel').addEventListener('click', closeModal);
   $('enroll-marked-go').addEventListener('click', (e) => withBusy(e.currentTarget, async () => {
+    // Voice-embedding compute — runs 10-20s server-side, spinner keeps it from reading as frozen.
     const sp = $('enroll-marked-speaker').value;
     const existing = $('enroll-marked-existing').value;
     const newName = $('enroll-marked-new').value.trim();
@@ -2296,7 +2297,7 @@ async function openEnrollMarkedModal() {
       renderDetailBody();
       syncEnrollMarkedBtn();
     } catch (e) { toast(e.message, 'error'); }
-  }));
+  }, { spinner: true }));
 }
 
 async function openRetagModal() {
@@ -2814,7 +2815,7 @@ async function renderDetailBody() {
 async function detailAction(act, btn) {
   const t = detailData;
   if (!t) return;
-  const opts = (act === 'summarize' || act.startsWith('format-')) ? { spinner: true } : {};
+  const opts = (act === 'summarize' || act === 'voicematch' || act.startsWith('format-')) ? { spinner: true } : {};
   return withBusy(btn, async () => {
   try {
     if (act === 'delete') {
@@ -3043,6 +3044,7 @@ async function toggleRerunPicker() {
   const box = $('rerun-picker');
   if (box.style.display !== 'none') { box.style.display = 'none'; return; }
   box.style.display = 'block';
+  box.innerHTML = '<div class="unit" style="padding:12px 34px;font-size:12px;color:var(--label-dim)">Loading…</div>';
   let settings = {};
   try { settings = await api('/api/settings'); } catch { /* defaults below */ }
   const prov = normalizeLlmProvider(settings.correction_provider || 'groq');
@@ -3086,6 +3088,7 @@ async function toggleRetranscribePicker() {
   const box = $('retranscribe-picker');
   if (box.style.display !== 'none') { box.style.display = 'none'; return; }
   box.style.display = 'block';
+  box.innerHTML = '<div class="unit" style="padding:12px 34px;font-size:12px;color:var(--label-dim)">Loading…</div>';
   let provs = [];
   try { provs = await api('/api/providers'); } catch (e) { toast(e.message, 'error'); }
   const usable = provs.filter(p => !p.needs_key || p.configured);
@@ -3190,7 +3193,7 @@ async function toggleContextPicker() {
       // Applying the new terms takes a correction re-run — open that picker.
       if (n && $('rerun-picker').style.display === 'none') toggleRerunPicker();
     } catch (e) { toast(e.message, 'error'); }
-  }));
+  }, { spinner: true }));
 }
 
 /* ══════════════════ voice roster ══════════════════ */
@@ -3362,7 +3365,7 @@ function openAddClipModal(profileId) {
       closeModal();
       loadVoices();
     } catch (e) { toast(e.message, 'error'); }
-  }));
+  }, { spinner: true }));
 }
 
 let identifyFile = null, identifyThreshold = '65';
