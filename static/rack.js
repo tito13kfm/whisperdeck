@@ -337,9 +337,25 @@ function statusView(t) {
 /* ══════════════════ navigation ══════════════════ */
 const PAGES = ['dashboard', 'transcribe', 'transcripts', 'queue', 'detail', 'voices', 'files', 'settings'];
 
+// Rail chrome (Tape-library/Voice-roster nav badges, storage meter) is
+// otherwise only refreshed as a side effect of loadDashboard() — visiting
+// any other page, or a job finishing while parked on one, left it showing
+// whatever was true at the last Monitor visit. Best-effort like
+// refreshQueueBadge(): a failed fetch (e.g. a 401 right after logout)
+// shouldn't surface as a toast for a background chrome refresh.
+async function refreshRailChrome() {
+  try {
+    const st = await api('/api/status');
+    $('nav-badge-transcripts').textContent = String(st.total_transcripts ?? 0).padStart(2, '0');
+    $('nav-badge-voices').textContent = String(st.voice_profiles ?? 0).padStart(2, '0');
+    updateRailStorage(st.total_minutes ?? 0);
+  } catch { /* chrome refresh is best-effort */ }
+}
+
 function navigate(page, data) {
   if (!PAGES.includes(page)) page = 'dashboard';
   S.page = page;
+  refreshRailChrome();
   if (page === 'detail' && data != null) S.detailId = data;
   PAGES.forEach(p => $('page-' + p).classList.toggle('active', p === page));
   document.querySelectorAll('.rail-btn').forEach(b => {
@@ -1365,6 +1381,10 @@ async function startJob() {
     S.stage = null;
     S.runningId = null;
     S.indeterminate = false;
+    // startJob() never navigates away on completion (the user stays on the
+    // Transcribe deck to load the next tape), so this is the only chance to
+    // refresh the rail badge/storage meter for a job watched in place.
+    refreshRailChrome();
     if (finalData.status === 'cancelled') {
       toast('Transcription cancelled — resume from the channel bank', 'info');
       S.pct = 0;
@@ -1618,6 +1638,7 @@ async function loadTranscripts() {
   } catch (e) { toast(e.message, 'error'); return; }
 
   bankListCache = list;
+  refreshRailChrome(); // covers a job finishing while parked here across poll ticks
   const active = list.filter(t => t.status === 'processing').length;
   const openIds = new Set([...root.querySelectorAll('details[open]')].map(d => d.dataset.tid));
 
@@ -1805,6 +1826,7 @@ async function loadQueue() {
   try { data = await api('/api/jobs?limit=50'); } catch (e) { toast(e.message, 'error'); return; }
   const jobs = data.jobs || [];
   updateQueueBadge(data.active || 0);
+  refreshRailChrome(); // covers a job finishing while parked here across poll ticks
 
   const openIds = new Set([...root.querySelectorAll('details[open]')].map(d => d.dataset.qid));
 
