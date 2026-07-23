@@ -29,10 +29,11 @@ file isn't touched in the same session, that's a bug — fix it before moving on
 - Queue audit: LLM job auto-retry (`docs/superpowers/plans/2026-07-07-queue-audit-llmjob-auto-retry.md`)
 - Queue audit: split concurrent job pools (`docs/superpowers/plans/2026-07-07-queue-audit-split-concurrent-job-pools.md`)
 - pyannote.audio voice-ID embedding backend (`docs/superpowers/plans/2026-07-21-pyannote-voice-id-backend.md`)
+- Diarization misidentification fixes, issue #67: metadata persistence, channel-aware live-stereo diarization, undo for bulk speaker relabels (closes #55), per-line speaker-confidence signal, post-review hardening (`docs/superpowers/plans/2026-07-22-issue-67-diarization.md`) — merged via PR #72. Phase 5 (contingent repro runbook) only runs if over-splitting persists in production.
 
 ## In Progress
 
-- Diarization misidentification fixes, issue #67 (`docs/superpowers/plans/2026-07-22-issue-67-diarization.md`) — Phases 0-4 complete (dropped dead threshold override, `diarization_method`/`num_speakers` persistence fixes, channel-aware live-stereo diarization, undo for bulk speaker relabels — closes #55 for free, per-line speaker-confidence signal), draft PR #69. Phase 5 (contingent repro runbook) only runs if over-splitting persists in production. Known gaps: live-stereo pyannote path unverified on real hardware (dev machine has no pyannote/torch); confidence markers and undo button unit-correct but never driven in a real browser; confidence signal always reads 1.0 on heuristic-diarized transcripts by construction (only informative for pyannote/live_stereo).
+_(nothing right now)_
 
 ## Parked (not designed yet)
 
@@ -43,5 +44,8 @@ file isn't touched in the same session, that's a bug — fix it before moving on
 ## Known accepted gaps
 
 - Cancel/resume: a few-Python-instructions race window between the diarization-await re-check and the final commit in `_finalize_if_done` is inert under the current single-process deployment (no `await` point in the gap). Needs a guarded `UPDATE ... WHERE status != 'cancelled'` if the app ever goes multi-worker.
+- Live-stereo diarization (issue #67): the pyannote inference path is verified only against monkeypatched unit tests — the dev machine has no pyannote/torch. Needs one real run on the pyannote-equipped machine (live capture with system audio playing a distinct voice, expect two labels "You"/`SPEAKER_00` and `diarization_method == "live_stereo"`). Related: mic speech bleed-dropped during loud system audio overlaps no diarization turn and keeps `speaker: None` at confidence 0.0; assess on real hardware.
+- Speaker-confidence UI (issue #67): "?" markers, "N uncertain" count, and the "Undo relabel" button are unit-correct but never driven in a real browser. Heuristic-diarized transcripts always score confidence 1.0 by construction, so the markers can only fire on a pyannote/live_stereo machine.
+- `LlmJob` rows are orphaned on transcript delete: same inert-FK-CASCADE pattern RelabelHistory had before PR #72 (SQLite `foreign_keys` pragma is off, no ORM cascade relationship). Harmless today (jobs are queried per existing transcript) but the same rowid-reuse hazard applies in principle; fix is one `relationship(cascade="all, delete-orphan")` line plus a test.
 - Detail page for an in-progress transcript doesn't live-poll (only the dashboard recents badge does). Spec called for both; only the dashboard got built. Not blocking, not fixed.
 - Theme/phosphor/motion faceplate preferences (`rack.js`) are `localStorage`-only, not synced through the existing per-user `/api/settings`, so they don't follow a user across browsers/devices.
