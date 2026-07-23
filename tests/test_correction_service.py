@@ -98,7 +98,7 @@ def test_extract_hotwords_from_doc_persists_terms(db_session):
     assert all(h.source == "extracted" for h in list_hotwords(db_session, user.id))
 
 
-def test_extract_hotwords_from_doc_returns_empty_on_failure(db_session):
+def test_extract_hotwords_from_doc_raises_on_failure(db_session):
     user = User(username="carol", password_hash="x", password_salt="y")
     db_session.add(user)
     db_session.commit()
@@ -106,9 +106,11 @@ def test_extract_hotwords_from_doc_returns_empty_on_failure(db_session):
     fake_post = AsyncMock(return_value=_FakeResponse(500, {"error": "boom"}))
     with patch("httpx.AsyncClient.post", fake_post):
         import asyncio
-        terms = asyncio.run(
-            extract_hotwords_from_doc(db_session, user.id, "some doc text", api_key="fake-key")
-        )
+        import pytest
+        with pytest.raises(Exception):
+            asyncio.run(
+                extract_hotwords_from_doc(db_session, user.id, "some doc text", api_key="fake-key")
+            )
 
-    assert terms == []
+    # Function raises before persisting — no hotwords should exist
     assert list_hotwords(db_session, user.id) == []

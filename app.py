@@ -1867,10 +1867,16 @@ async def add_transcript_context(
             status_code=400,
             detail=f"Context extraction needs a {extraction_provider.capitalize()} API key (service panel)",
         )
-    terms = await extract_hotwords_from_doc(
-        db, current_user.id, context_doc, api_key=extraction_key,
-        provider_name=extraction_provider, provider_config=extraction_cfg,
-    )
+    try:
+        terms = await extract_hotwords_from_doc(
+            db, current_user.id, context_doc, api_key=extraction_key,
+            provider_name=extraction_provider, provider_config=extraction_cfg,
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Context extraction failed: {e}",
+        )
     return {"terms": terms}
 
 
