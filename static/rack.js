@@ -189,6 +189,23 @@ function toast(msg, type = 'ok') {
   setTimeout(() => el.remove(), 4200);
 }
 
+// Provider/parsing failures land in job.error as raw exception text (a
+// json.JSONDecodeError message glued to a repr'd content snippet, or a raw
+// HTTP error body) — see services/transcription.py and services/llm_client.py.
+// Translate the known shapes into something a user can act on; anything
+// unrecognized falls back to the raw message rather than hiding it.
+function humanizeJobError(raw) {
+  if (!raw) return 'unknown error';
+  if (/did not return valid JSON/i.test(raw)) {
+    return 'The AI model returned an unreadable response. Try rerunning — if it keeps happening, try a different model.';
+  }
+  const apiErr = raw.match(/API error \((\d+)\)/);
+  if (apiErr) {
+    return 'The AI provider returned an error (HTTP ' + apiErr[1] + '). Check the provider/model configuration and try again.';
+  }
+  return raw;
+}
+
 let inFlightCount = 0;
 
 function setInFlight(n) {
@@ -445,6 +462,55 @@ function showApp() {
   $('page-login').style.display = 'none';
   $('app-shell').style.display = 'flex';
   navigate('dashboard');
+  startBackgroundJobPoll();
+}
+
+// Watches every LLM job regardless of which page is open, so a summary/
+// correction/etc. job that finishes failing while the user has navigated
+// away still gets a toast (the page-scoped pollers in loadQueue/
+// scheduleDetailPoll only run while their own page is showing).
+let bgJobPollTimer = null;
+let bgJobPollFirstTick = true;
+const bgJobStatusSeen = new Map();
+
+async function pollBackgroundJobs() {
+  try {
+    const data = await api('/api/jobs?limit=50');
+    for (const j of (data.jobs || [])) {
+      // will_retry is only set on LLM job entries (services/llm_jobs.py); it's
+      // undefined on transcription queue entries, so they never match here —
+      // transcription failures are surfaced elsewhere, out of scope for #58.
+      const terminalFailure = j.status === 'failed' && j.will_retry === false;
+      const wasTerminalFailure = bgJobStatusSeen.get(j.id) === 'terminalFailed';
+      // The very first tick after login/registration just establishes a
+      // silent baseline, so pre-existing failures don't all toast at once.
+      // A job created after that baseline (not just one already open on the
+      // Queue/Detail page) can still fail-and-exhaust-retries between two
+      // ticks, so this can't be "was this job seen before" per job id — a
+      // job whose whole pending->failed->retry->terminal lifecycle finishes
+      // inside one poll gap must still toast on the tick that first sees it
+      // terminal. A rerun that fails again re-toasts because its status left
+      // 'terminalFailed' in between.
+      if (!bgJobPollFirstTick && terminalFailure && !wasTerminalFailure) {
+        toast(humanizeJobError(j.error), 'error');
+      }
+      bgJobStatusSeen.set(j.id, terminalFailure ? 'terminalFailed' : j.status);
+    }
+    bgJobPollFirstTick = false;
+  } catch { /* transient fetch failure — just retry next tick */ }
+  bgJobPollTimer = setTimeout(pollBackgroundJobs, 8000);
+}
+
+function startBackgroundJobPoll() {
+  clearTimeout(bgJobPollTimer);
+  bgJobStatusSeen.clear();
+  bgJobPollFirstTick = true;
+  pollBackgroundJobs();
+}
+
+function stopBackgroundJobPoll() {
+  clearTimeout(bgJobPollTimer);
+  bgJobPollTimer = null;
 }
 
 async function checkAuth() {
@@ -586,6 +652,7 @@ async function submitAuth(ev) {
 }
 
 async function logout() {
+  stopBackgroundJobPoll();
   try { await api('/api/logout', { method: 'POST' }); } catch { /* session may be gone */ }
   // Logout clears the whole session server-side, invalidating csrfToken too —
   // refresh it so a subsequent login in this page session isn't rejected.
@@ -1838,7 +1905,7 @@ async function loadQueue() {
       : '';
     const meta = [(j.provider || '—') + (j.model ? ' · ' + j.model : ''),
                   j.status === 'running' ? 'working' + prog : null,
-                  j.error || null,
+                  j.error ? humanizeJobError(j.error) : null,
                   timeAgo(j.created_at)].filter(Boolean).join(' · ');
     return `
     <details class="unit" data-qid="${escapeHtml(String(j.id))}" ${openIds.has(String(j.id)) ? 'open' : ''}>
@@ -2557,7 +2624,7 @@ async function formatHtml(t) {
     if (llmJobActive(job)) {
       body = jobRunningUnit(job, target.label);
     } else if (job && job.status === 'failed') {
-      body = '<div style="padding:14px 0;font-size:13px;color:var(--red)">' + escapeHtml(job.error || 'unknown error') + '</div>';
+      body = '<div style="padding:14px 0;font-size:13px;color:var(--red)">' + escapeHtml(humanizeJobError(job.error)) + '</div>';
     } else if (job && job.status === 'completed') {
       try {
         const runs = (await api('/api/transcripts/' + t.id + '/runs/' + target.kind)).runs;
@@ -2589,7 +2656,7 @@ async function summaryHtml(t) {
   const failedBanner = (t.summary_job && t.summary_job.status === 'failed')
     ? '<div class="unit" style="padding:14px 32px;margin-bottom:10px;font-size:13px;color:var(--red)">' +
       '<div class="t-cap" style="color:var(--red);margin-bottom:6px">Summary failed</div>' +
-      escapeHtml(t.summary_job.error || 'unknown error') + ' — rerun it from the Queue screen.' +
+      escapeHtml(humanizeJobError(t.summary_job.error)) + ' — rerun it from the Queue screen.' +
       (t.has_summary ? ' Showing the last successful summary below.' : '') + '</div>'
     : '';
   if (!t.has_summary) {

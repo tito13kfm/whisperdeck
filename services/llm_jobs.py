@@ -54,6 +54,11 @@ def serialize_llm_job(job: LlmJob) -> dict:
         "provider": job.provider,
         "model": job.model,
         "error": job.error,
+        "will_retry": bool(
+            job.status == "failed"
+            and job.kind in AUTO_RETRY_KINDS
+            and (job.attempts or 0) < MAX_ATTEMPTS
+        ),
         "created_at": job.created_at.isoformat() if job.created_at else None,
         "updated_at": job.updated_at.isoformat() if job.updated_at else None,
     }
