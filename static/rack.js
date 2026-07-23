@@ -25,6 +25,7 @@ const S = {
   indeterminate: false,       // running with no chunk data — show elapsed, not %
   jobDone: false,
   doneId: null,
+  doneDuration: null,
   // settings state (persisted server-side)
   providers: [],
   providerIdx: 0,
@@ -1057,13 +1058,10 @@ function wireTranscribe() {
     if (S.capturing) stopLiveCapture();
     else if (!S.running) openRecModal();
   });
-  $('key-open-done').addEventListener('click', () => {
-    if (S.doneId) navigate('detail', S.doneId);
-  });
+  const openDone = () => { if (S.doneId) navigate('detail', S.doneId); };
+  $('key-open-done').addEventListener('click', openDone);
+  $('tx-view-results').addEventListener('click', openDone);
   $('tx-cancel').addEventListener('click', (e) => withBusy(e.currentTarget, cancelJob));
-  $('tx-view-results').addEventListener('click', () => {
-    if (S.doneId) navigate('detail', S.doneId);
-  });
   $('ctl-provider').addEventListener('click', (e) => withBusy(e.currentTarget, async () => {
     if (S.running) return;
     S.providerIdx = (S.providerIdx + 1) % S.providers.length;
@@ -1173,7 +1171,7 @@ function syncTranscribe() {
       : 'Reading (' + S.pct + '%): ' + S.tapeName;
     dA.style.color = AMBER;
   } else if (S.tapeLoaded) {
-    const mb = S.tapeFile ? ' · ' + (S.tapeFile.size / 1048576).toFixed(1) + ' MB' : '';
+    const mb = S.tapeFile ? ' · ' + fmtBytes(S.tapeFile.size) : '';
     dA.textContent = S.tapeName + mb + ' · loaded';
     dA.style.color = AMBER;
   } else {
@@ -1198,10 +1196,8 @@ function syncTranscribe() {
   playKey.title = canStart ? 'Start transcription' : S.running ? 'Job running' : !S.tapeLoaded ? 'Load media first' : 'Provider needs a key — see service panel';
   const ledColor = (S.running || canStart) ? GREEN : null;
   const statusLed = $('tx-status-led');
-  if (statusLed) {
-    statusLed.style.background = ledColor || 'var(--edge)';
-    statusLed.style.boxShadow = ledColor ? '0 0 5px ' + GREEN : 'none';
-  }
+  statusLed.style.background = ledColor || 'var(--edge)';
+  statusLed.style.boxShadow = ledColor ? '0 0 5px ' + GREEN : 'none';
   const recLed = $('key-rec-led');
   recLed.style.background = S.capturing ? RED : 'var(--edge)';
   recLed.style.boxShadow = S.capturing ? '0 0 5px ' + RED : 'none';
@@ -1211,10 +1207,8 @@ function syncTranscribe() {
   const armText = $('tx-arm-text');
   const viewBtn = $('tx-view-results');
   if (S.jobDone && S.doneId) {
-    armText.textContent = 'Transcription complete — ' + formatDur(detailData ? detailData.duration_seconds : null);
+    armText.textContent = 'Transcription complete — ' + formatDur(S.doneDuration);
     viewBtn.style.display = '';
-    playKey.disabled = false;
-    playKey.title = 'Load another file to start';
   } else {
     viewBtn.style.display = 'none';
     armText.textContent = S.running
@@ -1367,10 +1361,12 @@ async function startJob() {
       toast('Partially complete — some sections failed; retry from the channel bank', 'error');
       S.jobDone = true;
       S.doneId = finalData.id;
+      S.doneDuration = finalData.duration_seconds;
     } else {
       toast('Transcription complete');
       S.jobDone = true;
       S.doneId = finalData.id;
+      S.doneDuration = finalData.duration_seconds;
       S.pct = 100;
     }
     S.tapeLoaded = false;
@@ -1631,7 +1627,7 @@ async function loadTranscripts() {
     renderBankRows(openIds);
   } catch (e) {
     console.error('renderBankRows error:', e);
-    root.innerHTML += '<div class="empty-unit">Error rendering tape library: ' + escapeHtml(e.message) + '</div>';
+    root.insertAdjacentHTML('beforeend', '<div class="empty-unit">Error rendering tape library: ' + escapeHtml(e.message) + '</div>');
   }
 
   $('bank-search').addEventListener('input', () => {
@@ -2585,6 +2581,8 @@ function renderDetail() {
   if (!t) return;
   const root = $('page-detail');
   const sv = statusView(t);
+  const kind = t.kind || 'meeting';
+  const kindLabel = kind.charAt(0).toUpperCase() + kind.slice(1);
   const extraActs = [];
   if (t.status === 'partial')
     extraActs.push('<button class="btn" style="font-size:12px;padding:7px 14px;border-color:var(--inset-edge)" data-dact="retry">Retry failed sections</button>');
@@ -2628,7 +2626,8 @@ function renderDetail() {
         <div style="font-size:12.5px"><div style="font-family:var(--f-mono);font-size:10px;text-transform:uppercase;letter-spacing:0.08em;color:var(--label-dim);margin-bottom:3px">Provider</div>${escapeHtml((t.provider || '—') + (t.model ? ' · ' + t.model : ''))}</div>
         <div style="font-size:12.5px"><div style="font-family:var(--f-mono);font-size:10px;text-transform:uppercase;letter-spacing:0.08em;color:var(--label-dim);margin-bottom:3px">Status</div><span class="status-badge status-badge--${escapeHtml(sv.word)}" data-word="${escapeHtml(sv.word)}">${escapeHtml(sv.word)}</span></div>
         <div style="font-size:12.5px"><div style="font-family:var(--f-mono);font-size:10px;text-transform:uppercase;letter-spacing:0.08em;color:var(--label-dim);margin-bottom:3px">Speakers</div>${t.speaker_count || '—'}</div>
-        <div style="font-size:12.5px"><div style="font-family:var(--f-mono);font-size:10px;text-transform:uppercase;letter-spacing:0.08em;color:var(--label-dim);margin-bottom:3px">Mode</div><button class="btn" style="font-size:11px;padding:2px 10px;border-color:var(--inset-edge);cursor:pointer" data-dact="toggle-kind">${escapeHtml((t.kind || 'meeting').charAt(0).toUpperCase() + (t.kind || 'meeting').slice(1))}</button></div>
+        <div style="font-size:12.5px"><div style="font-family:var(--f-mono);font-size:10px;text-transform:uppercase;letter-spacing:0.08em;color:var(--label-dim);margin-bottom:3px">Segments</div>${(t.segments || []).length}</div>
+        <div style="font-size:12.5px"><div style="font-family:var(--f-mono);font-size:10px;text-transform:uppercase;letter-spacing:0.08em;color:var(--label-dim);margin-bottom:3px">Mode</div><button class="btn" style="font-size:11px;padding:2px 10px;border-color:var(--inset-edge);cursor:pointer" title="Switch between meeting and dictation mode" data-dact="toggle-kind">${escapeHtml(kindLabel)}</button></div>
       </div>
     </div>
     ${videoHtml}
@@ -2728,6 +2727,7 @@ async function detailAction(act, btn) {
       await loadTranscriptDetail(t.id);
       return;
     }
+    if (act === 'retry') {
       const r = await api('/api/transcripts/' + t.id + '/retry-failed-chunks', { method: 'POST' });
       toast('Retrying ' + r.retried + ' sections', 'info');
       loadTranscriptDetail(t.id);
@@ -2870,25 +2870,32 @@ function normalizeLlmProvider(id) {
 }
 
 // Populate a model <select> from the curated catalog (labels carry live
-// pricing for OpenRouter). local_llm now fetches live models from the
-// configured endpoint — shows a dropdown with the results, not free text.
+// pricing for OpenRouter). local_llm fetches live models from the configured
+// endpoint and shows a dropdown; free text remains the fallback when the
+// endpoint is unconfigured or unreachable.
 async function fillModelPicker(selectId, textId, provider, preferred) {
   const sel = $(selectId), txt = $(textId);
   const isLocal = provider === 'local_llm';
   sel.style.display = isLocal ? 'none' : '';
   txt.style.display = isLocal ? '' : 'none';
   if (isLocal) {
-    // Fetch models from the local endpoint; fall back to free text on failure
+    // Fetch models from the local endpoint; fall back to free text when the
+    // endpoint is unconfigured/unreachable (backend returns an empty list).
     sel.innerHTML = '<option>Loading…</option>';
     try {
       const r = await api('/api/correction-models/local_llm');
       const models = r.models || [];
       if (models.length) {
+        // A previously saved custom id may not be in the live list; keep it
+        // selectable rather than silently swapping to the first live model.
+        if (preferred && !models.some(m => m.id === preferred)) {
+          models.unshift({ id: preferred, label: preferred + ' (saved)' });
+        }
         sel.style.display = '';
         txt.style.display = 'none';
         sel.innerHTML = models.map(m =>
           '<option value="' + escapeHtml(m.id) + '">' + escapeHtml(m.label || m.id) + '</option>').join('');
-        if (preferred && models.some(m => m.id === preferred)) sel.value = preferred;
+        if (preferred) sel.value = preferred;
         return;
       }
     } catch { /* fall through to free text */ }
@@ -2909,7 +2916,12 @@ async function fillModelPicker(selectId, textId, provider, preferred) {
 }
 
 function llmPickerValue(selectId, textId, provider) {
-  return provider === 'local_llm' ? $(textId).value.trim() : $(selectId).value;
+  // local_llm shows either the live-model dropdown or the free-text input
+  // (fillModelPicker decides); read whichever control is visible.
+  if (provider === 'local_llm' && $(selectId).style.display === 'none') {
+    return $(textId).value.trim();
+  }
+  return $(selectId).value;
 }
 
 async function toggleRerunPicker() {

@@ -1139,6 +1139,11 @@ async def update_transcript(transcript_id: int, data: dict = Body(...), db: Sess
     if "kind" in data:
         if data["kind"] not in ("meeting", "dictation"):
             raise HTTPException(status_code=400, detail="kind must be 'meeting' or 'dictation'")
+        # The pipeline reads kind mid-job (dictation skips diarization), so a
+        # flip during processing would diarize later chunks differently than
+        # earlier ones. Only allow changing kind on settled transcripts.
+        if data["kind"] != t.kind and t.status == "processing":
+            raise HTTPException(status_code=409, detail="Cannot change mode while transcription is running")
         t.kind = data["kind"]
     t.updated_at = utcnow_naive()
     db.commit()
@@ -1731,6 +1736,7 @@ async def correction_models(provider: str, db: Session = Depends(get_db), curren
     OpenRouter entries are validated against its live catalog with pricing.
     For local_llm, fetches live models from the configured endpoint."""
     local_llm_api_url = None
+    local_llm_api_key = None
     if provider == "local_llm":
         cfg = db.query(ProviderConfig).filter(
             ProviderConfig.user_id == current_user.id,
@@ -1738,7 +1744,8 @@ async def correction_models(provider: str, db: Session = Depends(get_db), curren
         ).first()
         if cfg:
             local_llm_api_url = cfg.api_url
-    return {"provider": provider, "models": await get_correction_models(provider, local_llm_api_url)}
+            local_llm_api_key = cfg.api_key
+    return {"provider": provider, "models": await get_correction_models(provider, local_llm_api_url, local_llm_api_key)}
 
 
 # ── Job queue (unified: transcription + LLM jobs) ─────────────────────────
