@@ -1404,7 +1404,7 @@ let txTicker = null;
 function startTxTicker() {
   clearInterval(txTicker);
   txTicker = setInterval(() => {
-    if (!S.running) { clearInterval(txTicker); txTicker = null; return; }
+    if (!S.running && !S.capturing) { clearInterval(txTicker); txTicker = null; return; }
     if (S.indeterminate && S.stage === 'upload' && Date.now() - S.jobStartedAt > 15000) {
       S.stage = 'transcribe';
     }
@@ -1638,6 +1638,7 @@ async function startLiveCapture() {
   S.capturing = true;
   S.captureStartedAt = Date.now();
   S.stereoLive = !!disp;
+  startTxTicker();
   syncTranscribe();
   toast(disp ? 'Recording mic + system audio' : 'Recording mic only', 'info');
 }
