@@ -336,6 +336,15 @@ button.unit:hover { border-color: var(--dash); }
 .key-stack .led { width: 6px; height: 6px; border-radius: 50%; background: var(--edge); }
 .key-stack .cap { font-family: var(--f-mono); font-size: 8px; text-transform: uppercase; color: var(--label-dim); }
 
+/* ── amber pulse for permission-pending Rec key LED ── */
+@keyframes pulse-amber {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+.key-stack .led.pulse-amber {
+  animation: pulse-amber 1.2s ease-in-out infinite;
+}
+
 /* ── knob (click steps position; pointer via ::after) ── */
 .knob-plate {
   width: 30px; height: 30px;
