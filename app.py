@@ -664,7 +664,7 @@ async def _run_transcription_pipeline(
     language: str,
     temperature: float,
     diarize: bool,
-    auto_correct: bool = True,
+    auto_correct: Optional[bool] = None,
     num_speakers: Optional[int],
     source_transcript_id: Optional[int] = None,
     kind: str = "meeting",
@@ -892,6 +892,8 @@ async def _run_transcription_pipeline(
 
         # Post-hoc correction pass — queued as a background LlmJob (visible
         # on the Queue screen) instead of blocking this response.
+        if auto_correct is None:
+            auto_correct = user_settings.get("auto_correct", True)
         if auto_correct:
             enqueue_auto_correction(db, transcript, user_settings)
         enqueue_auto_classify(db, transcript, user_settings)
@@ -915,7 +917,7 @@ async def transcribe_audio(
     language: str = Form("en"),
     temperature: float = Form(0.0),
     diarize: bool = Form(False),
-    auto_correct: bool = Form(True),
+    auto_correct: Optional[bool] = Form(None),
     num_speakers: Optional[int] = Form(None),
     context_doc: Optional[str] = Form(None),
     kind: str = Form("meeting"),
