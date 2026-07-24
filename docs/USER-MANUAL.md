@@ -560,7 +560,7 @@ Click the ✕ next to any hotword to remove it from your glossary.
 
 ### Context Documents
 
-You can also attach context documents to individual transcripts (see Chapter 8, "Context Documents"). The LLM uses both your hotword glossary and the transcript-specific context document during correction, with the context document taking priority for conflicting terms.
+You can also attach context documents to individual transcripts (see Chapter 8, "Context Documents"). The LLM receives both your hotword glossary and the transcript-specific context document during correction.
 
 ---
 
@@ -716,7 +716,7 @@ python scripts/reset_password.py --username <name> --new-password <pass>
 Each user's data is fully isolated:
 - Transcripts belong to one user
 - Settings, hotwords, and API keys are per-user
-- Voice roster profiles are shared (so enrolled speakers are available to all users)
+- Voice roster profiles are per-user (enrolled speakers are scoped to the user who enrolled them)
 - Admin functions span all users
 
 ---
