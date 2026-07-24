@@ -373,6 +373,7 @@ async function refreshRailChrome() {
 function navigate(page, data) {
   if (!PAGES.includes(page)) page = 'dashboard';
   S.page = page;
+  if (page !== 'detail' && videoFloating) reattachVideo();
   refreshRailChrome();
   if (page === 'detail' && data != null) S.detailId = data;
   PAGES.forEach(p => $('page-' + p).classList.toggle('active', p === page));
@@ -456,6 +457,10 @@ function styledPrompt(message, defaultValue) {
 
 /* ══════════════════ auth ══════════════════ */
 function showLogin() {
+  // #video-dock lives outside #app-shell (so it survives renderDetail()),
+  // which also means hiding app-shell alone leaves it floating over the
+  // login screen — close it explicitly.
+  if (videoFloating) closeVideoDock();
   $('page-login').style.display = 'flex';
   $('app-shell').style.display = 'none';
 }
@@ -745,6 +750,87 @@ async function loadDashboard() {
   } catch (e) {
     toast(e.message, 'error');
   }
+  loadDashboardJobs();
+  scheduleDashPoll();
+}
+
+async function loadDashboardJobs() {
+  var data;
+  try { data = await api('/api/jobs?limit=20'); } catch { return; }
+  var jobs = data && data.jobs || [];
+  var active = jobs.filter(function(j) { return j.status === 'running' || j.status === 'pending'; });
+  var wrap = $('dash-activity');
+  if (!active.length) {
+    clearTimeout(dashPollTimer);
+    if (wrap) wrap.style.display = 'none';
+    return;
+  }
+  var title = active[0].title || 'Untitled';
+  var repeated = (escapeHtml(title) + '  \u00B7  ').repeat(4).trimEnd();
+  var stages = ['transcribe', 'diarize', 'correct', 'summarize', 'voicematch'];
+  var activeKinds = {};
+  active.forEach(function(j) {
+    if (j.kind === 'voice_match') activeKinds.voicematch = true;
+    else activeKinds[j.kind] = true;
+  });
+  var stageHtml = stages.map(function(s) {
+    var lit = !!activeKinds[s];
+    return '<span class="dash-stage-light' + (lit ? ' active' : '') + '" data-stage="' + s + '"></span>'
+      + '<span class="dash-stage-label">' + s + '</span>';
+  }).join('');
+  if (!wrap) {
+    var stats = $('dash-stats');
+    if (!stats) return;
+    var div = document.createElement('div');
+    div.id = 'dash-activity';
+    div.className = 'dash-activity';
+    div.innerHTML =
+      '<div class="dash-activity-head"><span class="led-dot" style="background:var(--amber);box-shadow:0 0 5px var(--amber)"></span>Live</div>'
+      + '<div class="dash-activity-body">'
+      + '<div class="dash-ticker-wrap"><span class="dash-ticker-text">' + repeated + '</span></div>'
+      + '<div id="dash-vu" class="dash-vu-wrap"></div>'
+      + '</div>'
+      + '<div class="dash-stage-lights">'
+      + '<span class="dash-stage-label">Pipeline:</span>'
+      + stageHtml
+      + '</div>';
+    stats.insertAdjacentElement('afterend', div);
+  } else {
+    wrap.style.display = '';
+    var ticker = wrap.querySelector('.dash-ticker-text');
+    if (ticker) ticker.textContent = repeated;
+    var lights = wrap.querySelectorAll('.dash-stage-light');
+    lights.forEach(function(lt) {
+      lt.classList.toggle('active', !!activeKinds[lt.dataset.stage]);
+    });
+  }
+  if (!INST.scopeInit) dashInitVu();
+}
+
+function dashInitVu() {
+  if (INST.scopeInit) return;
+  INST.scopeInit = true;
+  INST.driveMic = 0.6;
+  var canvas = document.createElement('canvas');
+  canvas.width = 96;
+  canvas.height = 48;
+  var wrap = $('dash-vu');
+  if (wrap) wrap.appendChild(canvas);
+  function frame(ts) {
+    INST.dt = ts / 1000;
+    drawVU(canvas, 'dash');
+    INST.raf = requestAnimationFrame(frame);
+  }
+  INST.raf = requestAnimationFrame(frame);
+}
+
+function scheduleDashPoll() {
+  clearTimeout(dashPollTimer);
+  dashPollTimer = setTimeout(async function() {
+    if (S.page !== 'dashboard') return;
+    await loadDashboardJobs();
+    scheduleDashPoll();
+  }, 3000);
 }
 /* ══════════════════ transcribe: instruments (verbatim from prototype logic) ══════════════════ */
 const INST = { dt: 0, raf: null, vuMeters: {}, scopeInit: false, driveMic: null, driveSys: null };
@@ -1671,6 +1757,7 @@ function finishLiveCapture() {
   }
 }
 /* ══════════════════ channel bank ══════════════════ */
+let dashPollTimer = null;
 let bankPollTimer = null;
 let bankListCache = [];
 
@@ -1994,6 +2081,8 @@ let detailPollTimer = null;
 // doesn't wipe them).
 let segAudio = null, segAudioTid = null, segPlayingBtn = null;
 let seedClips = {}; // speaker label -> [{start, end}]
+let videoFloating = false;
+let videoFloatingTid = null; // transcript id the floating video belongs to
 
 // Bulk re-tag mode: selectedSegments holds real indices into t.segments
 // (not the filtered-view index, since search can filter the list).
@@ -2008,6 +2097,10 @@ function resetSegAudio() {
   seedClips = {};
   const v = $('seg-video');
   if (v) v.pause();
+  const vf = $('seg-video-floating');
+  if (vf) vf.pause();
+  // Re-attach on transcript switch — floating is per-transcript, not global
+  if (videoFloating) reattachVideo();
 }
 
 async function loadTranscriptDetail(id, opts = {}) {
@@ -2140,35 +2233,37 @@ function segPlay(btn) {
   return segPlayAudio(btn, t, start, end);
 }
 
+// Wiring is keyed off the node itself (v._wired) — the node is rebuilt
+// on every renderDetail() call (rename, job-poll-tick, tab switch,
+// select-mode toggle — anything that re-renders the whole detail page),
+// so a transcript-id-based guard would silently no-op after a
+// mid-playback re-render (new node, no listeners, but the guard
+// variable still says "already set up").
+// v._wired resets to undefined on a fresh node automatically (it's a
+// new object), so this both survives a re-render AND avoids stacking
+// duplicate listeners across repeated clicks on the SAME node between
+// re-renders.
+function wireSegVideoElement(v) {
+  if (v._wired) return;
+  v.addEventListener('timeupdate', () => {
+    if (v._stopAt != null && v.currentTime >= v._stopAt) v.pause();
+  });
+  v.addEventListener('pause', () => {
+    if (segPlayingBtn) { segPlayingBtn.textContent = '▶'; segPlayingBtn = null; }
+    // Clear the stop marker on every pause — unlike the detached
+    // segAudio object, this element exposes native controls, and a
+    // stale _stopAt would re-pause any user-initiated playback past
+    // the last segment's end, making the controls appear broken.
+    v._stopAt = null;
+  });
+  v.addEventListener('error', () => toast('Video failed to load', 'error'));
+  v._wired = true;
+}
+
 function segPlayVideo(btn, t, start, end) {
-  const v = $('seg-video');
+  const v = videoFloating ? $('seg-video-floating') : $('seg-video');
   if (!v) return;
-  // Wiring is keyed off the node itself (v._wired) — the node is rebuilt
-  // on every renderDetail() call (rename, job-poll-tick, tab switch,
-  // select-mode toggle — anything that re-renders the whole detail page),
-  // so a transcript-id-based guard would silently no-op after a
-  // mid-playback re-render (new node, no listeners, but the guard
-  // variable still says "already set up").
-  // v._wired resets to undefined on a fresh node automatically (it's a
-  // new object), so this both survives a re-render AND avoids stacking
-  // duplicate listeners across repeated clicks on the SAME node between
-  // re-renders — src is already correct from the template (Step 2), so
-  // first-wire doesn't need to touch it.
-  if (!v._wired) {
-    v.addEventListener('timeupdate', () => {
-      if (v._stopAt != null && v.currentTime >= v._stopAt) v.pause();
-    });
-    v.addEventListener('pause', () => {
-      if (segPlayingBtn) { segPlayingBtn.textContent = '▶'; segPlayingBtn = null; }
-      // Clear the stop marker on every pause — unlike the detached
-      // segAudio object, this element exposes native controls, and a
-      // stale _stopAt would re-pause any user-initiated playback past
-      // the last segment's end, making the controls appear broken.
-      v._stopAt = null;
-    });
-    v.addEventListener('error', () => toast('Video failed to load', 'error'));
-    v._wired = true;
-  }
+  wireSegVideoElement(v);
   if (segPlayingBtn === btn && !v.paused) { v.pause(); return; }
   if (segPlayingBtn) segPlayingBtn.textContent = '▶';
   const seekAndPlay = () => {
@@ -2208,6 +2303,117 @@ function segPlayAudio(btn, t, start, end) {
   segPlayingBtn = btn;
   btn.textContent = '■';
 }
+
+/* ── floating video panel ── */
+
+function detachVideo() {
+  const src = $('seg-video');
+  if (!src) return;
+  const dock = $('video-dock');
+  const vid = $('seg-video-floating');
+  const cur = src.currentTime;
+  const paused = src.paused;
+  const stopAt = src._stopAt;
+  // segPlayingBtn points at a node the upcoming renderDetail() destroys —
+  // find its replacement afterward by (start, end), the only stable key
+  // segment buttons carry across a re-render.
+  const playingStart = (!paused && segPlayingBtn) ? segPlayingBtn.dataset.start : null;
+  const playingEnd = (!paused && segPlayingBtn) ? segPlayingBtn.dataset.end : null;
+  wireSegVideoElement(vid);
+  vid.src = src.src;
+  // Seeking before metadata arrives gets clamped to 0 — defer to the event.
+  const seekAndPlay = () => {
+    vid.currentTime = cur;
+    vid._stopAt = stopAt;
+    if (!paused) vid.play().catch(function() {});
+  };
+  if (vid.readyState >= 1) seekAndPlay();
+  else vid.addEventListener('loadedmetadata', seekAndPlay, { once: true });
+  videoFloating = true;
+  videoFloatingTid = detailData ? detailData.id : null;
+  dock.style.display = 'block';
+  // Show PiP button only when supported
+  if (document.pictureInPictureEnabled) $('video-dock-pip').style.display = '';
+  renderDetail();
+  if (playingStart != null) {
+    const newBtn = document.querySelector('[data-seg-play][data-start="' + playingStart + '"][data-end="' + playingEnd + '"]');
+    if (newBtn) { segPlayingBtn = newBtn; newBtn.textContent = '■'; }
+  }
+}
+
+// Hides the dock and stops the floating video without touching the inline
+// page — used when the floating video simply no longer applies (transcript
+// switch, logout), where restoring playback position onto whatever's about
+// to render would be restoring the WRONG video's position.
+function closeVideoDock() {
+  const vid = $('seg-video-floating');
+  if (document.pictureInPictureElement === vid) document.exitPictureInPicture().catch(function() {});
+  videoFloating = false;
+  videoFloatingTid = null;
+  $('video-dock').style.display = 'none';
+  if (vid) vid.pause();
+}
+
+function reattachVideo() {
+  const vid = $('seg-video-floating');
+  const cur = vid ? vid.currentTime : 0;
+  const paused = vid ? vid.paused : true;
+  // Only the SAME transcript's video is safe to restore position onto —
+  // if the transcript changed underneath the dock (switch while floating),
+  // the freshly-rendered inline video belongs to a different recording.
+  const sameTranscript = detailData && detailData.id === videoFloatingTid;
+  closeVideoDock();
+  renderDetail();
+  if (sameTranscript) {
+    // Restore position after re-render rebuilds the inline element
+    setTimeout(function() {
+      var v = $('seg-video');
+      if (v) { v.currentTime = cur; if (!paused) v.play().catch(function() {}); }
+    }, 150);
+  }
+}
+
+function togglePiP() {
+  var v = $('seg-video-floating');
+  if (!v) return;
+  if (document.pictureInPictureElement === v) {
+    document.exitPictureInPicture();
+  } else {
+    v.requestPictureInPicture().catch(function() {});
+  }
+}
+
+function initVideoDockDrag() {
+  var dock = $('video-dock');
+  var handle = $('video-dock-handle');
+  if (!dock || !handle) return;
+  var dragging = false, offX, offY;
+
+  handle.addEventListener('mousedown', function(e) {
+    if (e.target.closest('button')) return; // don't drag when clicking buttons
+    dragging = true;
+    offX = e.clientX - dock.getBoundingClientRect().left;
+    offY = e.clientY - dock.getBoundingClientRect().top;
+    dock.style.cursor = 'grabbing';
+    e.preventDefault();
+  });
+
+  document.addEventListener('mousemove', function(e) {
+    if (!dragging) return;
+    dock.style.right = 'auto';
+    dock.style.bottom = 'auto';
+    dock.style.left = Math.max(0, Math.min(e.clientX - offX, window.innerWidth - dock.offsetWidth)) + 'px';
+    dock.style.top = Math.max(0, Math.min(e.clientY - offY, window.innerHeight - 40)) + 'px';
+  });
+
+  document.addEventListener('mouseup', function() {
+    if (!dragging) return;
+    dragging = false;
+    dock.style.cursor = '';
+  });
+}
+
+/* ── seed / enroll ── */
 
 function syncEnrollMarkedBtn() {
   const btn = $('enroll-marked-btn');
@@ -2706,9 +2912,25 @@ function renderDetail() {
   // renderDetail() call (rename, job-poll-tick, tab switch, select-mode
   // toggle) — a freshly-rebuilt node must be immediately pointed at the
   // right URL with no follow-up JS.
-  const videoHtml = t.has_video
-    ? `<video id="seg-video" controls src="/api/transcripts/${t.id}/video" style="display:block;width:calc(100% - 72px);max-height:260px;background:#000;border:1px solid var(--inset-edge);border-radius:4px;margin:0 36px 12px"></video>`
+  const videoHtml = t.has_video && !videoFloating
+    ? `<div style="margin:0 36px 12px"><video id="seg-video" controls src="/api/transcripts/${t.id}/video" style="display:block;width:100%;max-height:260px;background:#000;border:1px solid var(--inset-edge);border-radius:4px"></video><div style="display:flex;justify-content:flex-end;margin-top:4px"><button id="video-detach-btn" class="btn" style="font-size:11px;padding:3px 10px;border-color:var(--inset-edge)">⤢ Detach</button></div></div>`
     : '';
+
+  if (t.has_video && videoFloating) {
+    var dockVid = $('seg-video-floating');
+    // renderDetail() runs on far more than detach/reattach — poll ticks,
+    // tab switches, select-mode toggles — none of which change the video.
+    // Only reassign src (which forces a reload, dropping playback position)
+    // when it's actually pointed at a different transcript.
+    if (dockVid && videoFloatingTid !== t.id) {
+      var wasPaused = dockVid.paused;
+      dockVid.src = '/api/transcripts/' + t.id + '/video';
+      videoFloatingTid = t.id;
+      if (!wasPaused) dockVid.play().catch(function() {});
+    }
+    $('video-dock').style.display = 'block';
+    if (document.pictureInPictureEnabled) $('video-dock-pip').style.display = '';
+  }
 
   root.innerHTML = `
     <div class="page-head page-head--with-actions">
@@ -2784,6 +3006,9 @@ function renderDetail() {
   root.querySelectorAll('[data-dact]').forEach(b => b.addEventListener('click', () => detailAction(b.dataset.dact, b)));
   // Delegated: segment rows re-render on search/poll, the container doesn't.
   $('detail-body').addEventListener('click', detailBodyClick);
+  // Detach button is rebuilt on every render — wire it each time.
+  var detachBtn = $('video-detach-btn');
+  if (detachBtn) detachBtn.addEventListener('click', detachVideo);
 }
 
 async function renderDetailBody() {
@@ -3908,5 +4133,10 @@ document.addEventListener('DOMContentLoaded', () => {
   // Account recovery links (login page)
   $('auth-forgot-username').addEventListener('click', (e) => withBusy(e.currentTarget, showForgotUsername));
   $('auth-reset-code').addEventListener('click', showResetCode);
+  var dockClose = $('video-dock-close');
+  if (dockClose) dockClose.addEventListener('click', reattachVideo);
+  var dockPip = $('video-dock-pip');
+  if (dockPip) dockPip.addEventListener('click', togglePiP);
+  initVideoDockDrag();
   checkAuth();
 });
