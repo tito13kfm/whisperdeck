@@ -114,6 +114,19 @@
 
 <div id="toast-wrap"></div>
 
+<!-- persistent floating video dock — survives renderDetail() re-renders,
+     stays visible while scrolling through segments for speaker ID workflow -->
+<div id="video-dock" style="display:none;position:fixed;bottom:20px;right:20px;z-index:1000;min-width:320px;max-width:420px;background:var(--panel-lo);border:1px solid var(--edge);border-radius:6px;box-shadow:0 4px 24px rgba(0,0,0,0.55);padding:6px;cursor:default;user-select:none;resize:both;overflow:hidden">
+  <div id="video-dock-handle" style="display:flex;align-items:center;justify-content:space-between;padding:2px 4px 5px;font-family:var(--f-cond);font-size:11px;text-transform:uppercase;letter-spacing:0.05em;color:var(--label-dim);cursor:grab">
+    <span>Video monitor</span>
+    <div style="display:flex;gap:4px">
+      <button id="video-dock-pip" title="Picture-in-Picture" style="background:none;border:1px solid var(--inset-edge);border-radius:3px;color:var(--label-dim);cursor:pointer;font-size:13px;padding:1px 7px;line-height:1;display:none">⛶</button>
+      <button id="video-dock-close" title="Re-attach to page" style="background:none;border:1px solid var(--inset-edge);border-radius:3px;color:var(--label-dim);cursor:pointer;font-size:13px;padding:1px 7px;line-height:1">✕</button>
+    </div>
+  </div>
+  <video id="seg-video-floating" controls style="width:100%;max-height:240px;background:#000;border-radius:3px;display:block"></video>
+</div>
+
 <input type="file" id="file-input" accept=".mp3,.wav,.m4a,.flac,.ogg,.mp4,audio/*,video/mp4" style="display:none">
 
 <script src="/static/rack.js"></script>

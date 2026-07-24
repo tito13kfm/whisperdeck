@@ -373,6 +373,7 @@ async function refreshRailChrome() {
 function navigate(page, data) {
   if (!PAGES.includes(page)) page = 'dashboard';
   S.page = page;
+  if (page !== 'detail' && videoFloating) reattachVideo();
   refreshRailChrome();
   if (page === 'detail' && data != null) S.detailId = data;
   PAGES.forEach(p => $('page-' + p).classList.toggle('active', p === page));
@@ -1994,6 +1995,7 @@ let detailPollTimer = null;
 // doesn't wipe them).
 let segAudio = null, segAudioTid = null, segPlayingBtn = null;
 let seedClips = {}; // speaker label -> [{start, end}]
+let videoFloating = false;
 
 // Bulk re-tag mode: selectedSegments holds real indices into t.segments
 // (not the filtered-view index, since search can filter the list).
@@ -2008,6 +2010,10 @@ function resetSegAudio() {
   seedClips = {};
   const v = $('seg-video');
   if (v) v.pause();
+  const vf = $('seg-video-floating');
+  if (vf) vf.pause();
+  // Re-attach on transcript switch — floating is per-transcript, not global
+  if (videoFloating) reattachVideo();
 }
 
 async function loadTranscriptDetail(id, opts = {}) {
@@ -2141,7 +2147,7 @@ function segPlay(btn) {
 }
 
 function segPlayVideo(btn, t, start, end) {
-  const v = $('seg-video');
+  const v = videoFloating ? $('seg-video-floating') : $('seg-video');
   if (!v) return;
   // Wiring is keyed off the node itself (v._wired) — the node is rebuilt
   // on every renderDetail() call (rename, job-poll-tick, tab switch,
@@ -2208,6 +2214,82 @@ function segPlayAudio(btn, t, start, end) {
   segPlayingBtn = btn;
   btn.textContent = '■';
 }
+
+/* ── floating video panel ── */
+
+function detachVideo() {
+  const src = $('seg-video');
+  if (!src) return;
+  const dock = $('video-dock');
+  const vid = $('seg-video-floating');
+  const cur = src.currentTime;
+  const paused = src.paused;
+  vid.src = src.src;
+  vid.currentTime = cur;
+  if (!paused) vid.play().catch(function() {});
+  videoFloating = true;
+  dock.style.display = 'block';
+  // Show PiP button only when supported
+  if (document.pictureInPictureEnabled) $('video-dock-pip').style.display = '';
+  renderDetail();
+}
+
+function reattachVideo() {
+  const vid = $('seg-video-floating');
+  const cur = vid ? vid.currentTime : 0;
+  const paused = vid ? vid.paused : true;
+  videoFloating = false;
+  $('video-dock').style.display = 'none';
+  if (vid) vid.pause();
+  renderDetail();
+  // Restore position after re-render rebuilds the inline element
+  setTimeout(function() {
+    var v = $('seg-video');
+    if (v) { v.currentTime = cur; if (!paused) v.play().catch(function() {}); }
+  }, 150);
+}
+
+function togglePiP() {
+  var v = $('seg-video-floating');
+  if (!v) return;
+  if (document.pictureInPictureElement === v) {
+    document.exitPictureInPicture();
+  } else {
+    v.requestPictureInPicture().catch(function() {});
+  }
+}
+
+function initVideoDockDrag() {
+  var dock = $('video-dock');
+  var handle = $('video-dock-handle');
+  if (!dock || !handle) return;
+  var dragging = false, offX, offY;
+
+  handle.addEventListener('mousedown', function(e) {
+    if (e.target.closest('button')) return; // don't drag when clicking buttons
+    dragging = true;
+    offX = e.clientX - dock.getBoundingClientRect().left;
+    offY = e.clientY - dock.getBoundingClientRect().top;
+    dock.style.cursor = 'grabbing';
+    e.preventDefault();
+  });
+
+  document.addEventListener('mousemove', function(e) {
+    if (!dragging) return;
+    dock.style.right = 'auto';
+    dock.style.bottom = 'auto';
+    dock.style.left = Math.max(0, Math.min(e.clientX - offX, window.innerWidth - dock.offsetWidth)) + 'px';
+    dock.style.top = Math.max(0, Math.min(e.clientY - offY, window.innerHeight - 40)) + 'px';
+  });
+
+  document.addEventListener('mouseup', function() {
+    if (!dragging) return;
+    dragging = false;
+    dock.style.cursor = '';
+  });
+}
+
+/* ── seed / enroll ── */
 
 function syncEnrollMarkedBtn() {
   const btn = $('enroll-marked-btn');
@@ -2706,9 +2788,20 @@ function renderDetail() {
   // renderDetail() call (rename, job-poll-tick, tab switch, select-mode
   // toggle) — a freshly-rebuilt node must be immediately pointed at the
   // right URL with no follow-up JS.
-  const videoHtml = t.has_video
-    ? `<video id="seg-video" controls src="/api/transcripts/${t.id}/video" style="display:block;width:calc(100% - 72px);max-height:260px;background:#000;border:1px solid var(--inset-edge);border-radius:4px;margin:0 36px 12px"></video>`
+  const videoHtml = t.has_video && !videoFloating
+    ? `<div style="margin:0 36px 12px"><video id="seg-video" controls src="/api/transcripts/${t.id}/video" style="display:block;width:100%;max-height:260px;background:#000;border:1px solid var(--inset-edge);border-radius:4px"></video><div style="display:flex;justify-content:flex-end;margin-top:4px"><button id="video-detach-btn" class="btn" style="font-size:11px;padding:3px 10px;border-color:var(--inset-edge)">⤢ Detach</button></div></div>`
     : '';
+
+  if (t.has_video && videoFloating) {
+    var dockVid = $('seg-video-floating');
+    if (dockVid) {
+      var wasPaused = dockVid.paused;
+      dockVid.src = '/api/transcripts/' + t.id + '/video';
+      if (!wasPaused) dockVid.play().catch(function() {});
+    }
+    $('video-dock').style.display = 'block';
+    if (document.pictureInPictureEnabled) $('video-dock-pip').style.display = '';
+  }
 
   root.innerHTML = `
     <div class="page-head page-head--with-actions">
@@ -2784,6 +2877,9 @@ function renderDetail() {
   root.querySelectorAll('[data-dact]').forEach(b => b.addEventListener('click', () => detailAction(b.dataset.dact, b)));
   // Delegated: segment rows re-render on search/poll, the container doesn't.
   $('detail-body').addEventListener('click', detailBodyClick);
+  // Detach button is rebuilt on every render — wire it each time.
+  var detachBtn = $('video-detach-btn');
+  if (detachBtn) detachBtn.addEventListener('click', detachVideo);
 }
 
 async function renderDetailBody() {
@@ -3908,5 +4004,10 @@ document.addEventListener('DOMContentLoaded', () => {
   // Account recovery links (login page)
   $('auth-forgot-username').addEventListener('click', (e) => withBusy(e.currentTarget, showForgotUsername));
   $('auth-reset-code').addEventListener('click', showResetCode);
+  var dockClose = $('video-dock-close');
+  if (dockClose) dockClose.addEventListener('click', reattachVideo);
+  var dockPip = $('video-dock-pip');
+  if (dockPip) dockPip.addEventListener('click', togglePiP);
+  initVideoDockDrag();
   checkAuth();
 });
