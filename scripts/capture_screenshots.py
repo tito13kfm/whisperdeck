@@ -1,161 +1,142 @@
+"""Capture missing user manual screenshots via Playwright.
+
+Starts an isolated WhisperDeck server, registers a test user, then
+captures screenshots of pages the existing set doesn't cover:
+
+  1. Login page
+  2. File inventory
+  3. Enroll speaker modal (Voice Roster)
+
+Saves to the worktree screenshots/ directory.
 """
-capture_screenshots.py
-======================
-
-Drive the WhisperDeck browser via Playwright and capture screenshots
-of all major pages, switching through all 4 UI themes.
-
-Prereqs: pip install playwright && playwright install chromium
-         A WhisperDeck server running on PORT (default 9782)
-         A valid login (use screencap/screencap_pass_2026 or login inline)
-"""
-
+import http.cookiejar
+import json
 import os
-from pathlib import Path
+import socket
+import sys
+import threading
+import time
+import urllib.request
+import urllib.error
 
+import uvicorn
+
+# Add main repo to path for app imports
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, REPO_ROOT)
+
+# Isolated data dir — unique per run
+import tempfile
+DATA_DIR = tempfile.mkdtemp(prefix="whisperdeck-screenshots-")
+os.environ["WHISPERDECK_DATA_DIR"] = DATA_DIR
+
+OUT_DIR = os.path.join(REPO_ROOT, "screenshots")
+os.makedirs(OUT_DIR, exist_ok=True)
+
+# Find free port
+sock = socket.socket()
+sock.bind(("127.0.0.1", 0))
+PORT = sock.getsockname()[1]
+sock.close()
+BASE_URL = f"http://127.0.0.1:{PORT}"
+
+# Start server
+import app as app_module
+config = uvicorn.Config(app_module.app, host="127.0.0.1", port=PORT, log_level="warning", lifespan="on")
+server = uvicorn.Server(config)
+t = threading.Thread(target=server.run, daemon=True)
+t.start()
+
+deadline = time.time() + 10
+while time.time() < deadline:
+    try:
+        with urllib.request.urlopen(BASE_URL + "/", timeout=1) as r:
+            if r.status == 200:
+                break
+    except Exception:
+        time.sleep(0.2)
+else:
+    print("FAIL: server did not start")
+    sys.exit(1)
+
+print(f"Server running on {BASE_URL}")
+
+# Register + login test user via API
+cj = http.cookiejar.CookieJar()
+opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cj))
+
+def api(method, path, body=None):
+    token = json.loads(opener.open(BASE_URL + "/api/csrf-token", timeout=5).read())["token"]
+    headers = {"Content-Type": "application/json", "X-CSRF-Token": token}
+    data = json.dumps(body).encode() if body else None
+    req = urllib.request.Request(BASE_URL + path, data=data, headers=headers, method=method)
+    try:
+        resp = opener.open(req, timeout=10)
+        return json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        body_text = e.read().decode(errors="replace")
+        raise RuntimeError(f"{method} {path} -> {e.code}: {body_text}")
+
+try:
+    api("POST", "/api/register", {"username": "docs", "password": "docs_pass_123"})
+    print("Registered user 'docs'")
+except RuntimeError as e:
+    err = str(e)
+    if "400" in err or "409" in err or "already taken" in err.lower():
+        print("User 'docs' already exists")
+    else:
+        raise
+
+api("POST", "/api/login", {"username": "docs", "password": "docs_pass_123"})
+print("Logged in via API")
+
+# Playwright capture
 from playwright.sync_api import sync_playwright
 
-BASE = "http://localhost:9782"
-USERNAME = "screencap"
-PASSWORD = "screencap_pass_2026"
-OUT = Path("screenshots")
-OUT.mkdir(exist_ok=True)
+with sync_playwright() as p:
+    browser = p.chromium.launch(headless=True)
 
+    # 1. Login page (no cookies)
+    ctx1 = browser.new_context(viewport={"width": 1440, "height": 900})
+    pg = ctx1.new_page()
+    pg.goto(BASE_URL + "/", wait_until="networkidle")
+    pg.wait_for_timeout(1500)
+    pg.screenshot(path=os.path.join(OUT_DIR, "11-login.png"))
+    print("Captured: 11-login.png")
+    ctx1.close()
 
-def main():
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
-        context = browser.new_context(viewport={"width": 1600, "height": 1000})
-        page = context.new_page()
-        page.set_default_timeout(60000)
+    # 2. Log in via browser for subsequent pages
+    ctx2 = browser.new_context(viewport={"width": 1440, "height": 900})
+    pg = ctx2.new_page()
+    pg.goto(BASE_URL + "/", wait_until="networkidle")
+    pg.wait_for_timeout(500)
+    pg.fill("input[type='text'], input[name='username']", "docs")
+    pg.fill("input[type='password']", "docs_pass_123")
+    pg.click("button[type='submit']")
+    pg.wait_for_selector("#app-shell", state="visible", timeout=10000)
+    pg.wait_for_timeout(1500)
 
-        # Login
-        page.goto(f"{BASE}/")
-        page.wait_for_load_state("networkidle")
-        try:
-            page.fill("#auth-user", USERNAME)
-            page.fill("#auth-pass", PASSWORD)
-            page.click("#auth-submit")
-            page.wait_for_load_state("networkidle")
-            page.wait_for_timeout(500)
-        except Exception as e:
-            print(f"Login: {e}")
+    # 2. File inventory
+    pg.evaluate("navigate('files')")
+    pg.wait_for_timeout(2500)
+    pg.screenshot(path=os.path.join(OUT_DIR, "12-file-inventory.png"))
+    print("Captured: 12-file-inventory.png")
 
-        # Disable animations for cleaner screenshots
-        page.add_style_tag(content="""
-            *, *::before, *::after {
-                animation-duration: 0s !important;
-                animation-iteration-count: 1 !important;
-                transition-duration: 0s !important;
-            }
-        """)
+    # 3. Voice Roster + Enroll modal
+    pg.evaluate("navigate('voices')")
+    pg.wait_for_timeout(2000)
+    enroll_btn = pg.locator("button:has-text('Enroll')")
+    if enroll_btn.count() > 0:
+        enroll_btn.first.click()
+        pg.wait_for_timeout(1500)
+        pg.screenshot(path=os.path.join(OUT_DIR, "13-enroll-speaker.png"))
+        print("Captured: 13-enroll-speaker.png")
+    else:
+        print("No enroll button found")
 
-        def goto_nav(name):
-            page.evaluate(f"""() => {{
-                const btn = document.querySelector('[data-nav="{name}"]');
-                if (btn) btn.click();
-            }}""")
-            page.wait_for_timeout(800)
+    ctx2.close()
+    browser.close()
 
-        def shot(name, full_page=True, wait_ms=1500):
-            page.wait_for_timeout(wait_ms)
-            path = OUT / name
-            page.screenshot(path=str(path), full_page=full_page)
-            print(f"  -> {path} ({path.stat().st_size:,} bytes)")
-            return path
-
-        print("Capturing screenshots...")
-
-        # 1. Monitor dashboard
-        goto_nav("dashboard")
-        shot("01-monitor.png", full_page=True)
-
-        # 2. Transcribe page
-        goto_nav("transcribe")
-        shot("02-transcribe.png", full_page=True)
-
-        # 3. Tape library
-        goto_nav("transcripts")
-        shot("03-tape-library.png", full_page=True)
-
-        # 4. Transcript detail
-        goto_nav("transcripts")
-        page.wait_for_timeout(500)
-        page.evaluate("""() => {
-            const openBtn = document.querySelector('[data-act="open"]');
-            if (openBtn) openBtn.click();
-        }""")
-        page.wait_for_timeout(2000)
-        shot("04-transcript-detail.png", full_page=True)
-
-        # 5. Corrected tab
-        page.evaluate("""() => {
-            const tabs = document.querySelectorAll('[data-tab], .tab, button');
-            for (const t of tabs) {
-                if (t.textContent && t.textContent.trim().toLowerCase() === 'corrected') {
-                    t.click();
-                    return;
-                }
-            }
-        }""")
-        page.wait_for_timeout(1500)
-        shot("05-corrected.png", full_page=True)
-
-        # 6. Queue
-        goto_nav("queue")
-        shot("06-queue.png", full_page=True)
-
-        # 7. Voice roster
-        goto_nav("voices")
-        shot("07-voice-roster.png", full_page=True)
-
-        # 8. Service panel (settings)
-        goto_nav("settings")
-        shot("08-service-panel.png", full_page=True)
-
-        # 9. Hotwords - try to find a hotwords sub-tab in settings
-        goto_nav("settings")
-        page.wait_for_timeout(500)
-        page.evaluate("""() => {
-            const all = document.querySelectorAll('a, button, [role=tab], [data-tab]');
-            for (const el of all) {
-                const t = (el.textContent || '').trim().toLowerCase();
-                if (t === 'hotwords' || t === 'hot word' || t === 'glossary') {
-                    el.click();
-                    return;
-                }
-            }
-        }""")
-        page.wait_for_timeout(1500)
-        shot("09-hotwords.png", full_page=True)
-
-        # 10. Theme screenshots - 4 faceplate themes
-        # The app uses localStorage 'rack-theme' and applyTheme(name) function
-        themes = ["charcoal", "silverface", "champagne", "blue-glass"]
-        for theme in themes:
-            try:
-                # Set theme via localStorage and call applyTheme if available
-                page.evaluate(f"""() => {{
-                    localStorage.setItem('rack-theme', '{theme}');
-                    if (typeof applyTheme === 'function') {{
-                        applyTheme('{theme}');
-                    }}
-                }}""")
-                # Reload to apply from localStorage
-                page.goto(f"{BASE}/")
-                page.wait_for_load_state("domcontentloaded")
-                page.wait_for_timeout(1500)
-                # Navigate to monitor for the screenshot
-                goto_nav("dashboard")
-                path = OUT / f"10-theme-{theme}.png"
-                page.screenshot(path=str(path), full_page=False)
-                print(f"  -> {path} ({path.stat().st_size:,} bytes)")
-            except Exception as e:
-                print(f"  Theme {theme} failed: {e}")
-
-        browser.close()
-        print("\nDone!")
-
-
-if __name__ == "__main__":
-    main()
+server.should_exit = True
+t.join(timeout=5)
+print("Done.")
