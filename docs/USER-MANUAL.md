@@ -123,7 +123,7 @@ pip install speechbrain torchaudio
 
 After starting the server (via `run.bat` or `python app.py`), open `http://localhost:9781` in your browser. You will see the login page.
 
-![Login page — register or sign in to access WhisperDeck](../screenshots/11-login.png)
+![Login page : register or sign in to access WhisperDeck](../screenshots/11-login.png)
 
 **Figure 2-1: The login page**
 
@@ -141,12 +141,12 @@ The first account you register is automatically the admin. Register with any use
 
 After logging in, the application shell appears with a navigation rail on the left side. The rail links to each section of the application:
 
-- **Monitor** — the dashboard, your home screen
-- **Transcribe** — upload audio/video and start transcription
-- **Bank** — the transcript library
-- **Queue** — job progress and management
-- **Voices** — the voice roster
-- **Files** — disk usage and file management
+- **Monitor** : the dashboard, your home screen
+- **Transcribe** : upload audio/video and start transcription
+- **Bank** : the transcript library
+- **Queue** : job progress and management
+- **Voices** : the voice roster
+- **Files** : disk usage and file management
 
 At the bottom of the rail, a faceplate knob opens the **Service Panel** (settings), and the current theme name is displayed.
 
@@ -154,7 +154,7 @@ Click any rail link to navigate to that section. The current section is highligh
 
 ### User Interface Conventions
 
-The WhisperDeck interface uses a "Signal Rack" theme — a hardware-inspired design with LED indicators, toggle switches, and panel controls. Throughout this manual:
+The WhisperDeck interface uses a "Signal Rack" theme : a hardware-inspired design with LED indicators, toggle switches, and panel controls. Throughout this manual:
 
 - **Amber LED** indicates active or busy state
 - **Green LED** indicates ready or completed state
@@ -170,7 +170,7 @@ The WhisperDeck interface uses a "Signal Rack" theme — a hardware-inspired des
 
 The Monitor is your home screen. It gives you an at-a-glance view of your WhisperDeck instance.
 
-![WhisperDeck Monitor — at-a-glance stats, transcript library, voice roster, and storage bargraph in the "Signal Rack" chassis](../screenshots/01-monitor.png)
+![WhisperDeck Monitor : at-a-glance stats, transcript library, voice roster, and storage bargraph in the "Signal Rack" chassis](../screenshots/01-monitor.png)
 
 **Figure 4-1: The Monitor dashboard**
 
@@ -184,7 +184,7 @@ The Monitor is your home screen. It gives you an at-a-glance view of your Whispe
 
 **Voice Roster Summary**: Shows the number of enrolled speakers. Click to navigate to the Voice Roster page.
 
-**Storage Gauge**: A horizontal bar graph showing disk usage — how much space your transcripts, audio files, and voice clips are using. The bar turns amber as storage grows.
+**Storage Gauge**: A horizontal bar graph showing disk usage : how much space your transcripts, audio files, and voice clips are using. The bar turns amber as storage grows.
 
 ---
 
@@ -194,7 +194,7 @@ The Monitor is your home screen. It gives you an at-a-glance view of your Whispe
 
 The Transcribe page is where you turn audio into text. It supports drag-and-drop upload, live microphone recording, and a range of transcription providers.
 
-![Transcribe page — drag-and-drop upload, provider/model/language selectors, diarize toggle, live-capture, and the reel-to-reel deck animation](../screenshots/02-transcribe.png)
+![Transcribe page : drag-and-drop upload, provider/model/language selectors, diarize toggle, live-capture, and the reel-to-reel deck animation](../screenshots/02-transcribe.png)
 
 **Figure 5-1: The Transcribe page**
 
@@ -250,7 +250,7 @@ When transcription completes, a **☰ View transcript** button appears. Click it
 
 The Transcript Library (labeled **Bank** in the navigation rail) lists all your transcripts with search, sort, and per-row actions.
 
-![Tape library — searchable, sortable list of all transcripts with per-row open / cancel / resume / rename / delete actions](../screenshots/03-tape-library.png)
+![Tape library : searchable, sortable list of all transcripts with per-row open / cancel / resume / rename / delete actions](../screenshots/03-tape-library.png)
 
 **Figure 6-1: The Transcript Library**
 
@@ -259,17 +259,17 @@ The Transcript Library (labeled **Bank** in the navigation rail) lists all your 
 **Search**: Type in the search box to filter transcripts by filename or title. Results update as you type.
 
 **Status Indicators**: Each transcript shows its current status:
-- **Green** — completed
-- **Amber** — in progress
-- **Red** — failed
-- **Gray** — cancelled
+- **Green** : completed
+- **Amber** : in progress
+- **Red** : failed
+- **Gray** : cancelled
 
 **Per-Row Actions**: Click a transcript row to reveal action buttons:
-- **Open** — navigate to the Transcript Detail view
-- **Cancel** — stop a running transcription
-- **Resume** — continue a paused transcription
-- **Rename** — change the transcript title
-- **Delete** — permanently remove the transcript and all associated data
+- **Open** : navigate to the Transcript Detail view
+- **Cancel** : stop a running transcription
+- **Resume** : continue a paused transcription
+- **Rename** : change the transcript title
+- **Delete** : permanently remove the transcript and all associated data
 
 **Sorting**: The library sorts by date by default (newest first). The search box additionally filters in real-time.
 
@@ -283,7 +283,7 @@ The Transcript Library (labeled **Bank** in the navigation rail) lists all your 
 
 The Transcript Detail page is where you interact with a completed transcript. It shows speaker-labeled segments, offers per-segment audio playback, and provides tabs for viewing the original transcript, corrected version, summary, and (for dictation mode) formatted output.
 
-![Transcript detail — speaker-labelled segments with per-segment audio playback, speaker rename, and the corrected/summary tabs](../screenshots/04-transcript-detail.png)
+![Transcript detail : speaker-labelled segments with per-segment audio playback, speaker rename, and the corrected/summary tabs](../screenshots/04-transcript-detail.png)
 
 **Figure 7-1: The Transcript Detail page**
 
@@ -291,21 +291,21 @@ The Transcript Detail page is where you interact with a completed transcript. It
 
 The header shows the transcript title, filename, duration, provider and model used, diarization method, and speaker count. Action buttons at the top right depend on transcript state:
 
-- **Retry failed chunks** — re-run chunks that failed during chunked transcription
-- **Re-transcribe** — run a new transcription with different provider/model settings (creates a linked version chain)
-- **Correct** — run LLM correction (see Chapter 8)
-- **Summarize** — generate meeting notes (see Chapter 8)
-- **Re-diarize** — re-run speaker diarization (see Chapter 9)
-- **Voice match** — identify speakers against the voice roster (see Chapter 10)
-- **Delete** — permanently remove the transcript
+- **Retry failed chunks** : re-run chunks that failed during chunked transcription
+- **Re-transcribe** : run a new transcription with different provider/model settings (creates a linked version chain)
+- **Correct** : run LLM correction (see Chapter 8)
+- **Summarize** : generate meeting notes (see Chapter 8)
+- **Re-diarize** : re-run speaker diarization (see Chapter 9)
+- **Voice match** : identify speakers against the voice roster (see Chapter 10)
+- **Delete** : permanently remove the transcript
 
 ### Segments Panel
 
 Each segment shows:
 - **Speaker label** (e.g., "Speaker 1", "Alice")
 - **Timestamp** (start and end time)
-- **Text** — the transcribed words
-- **Play button** — plays that segment's audio
+- **Text** : the transcribed words
+- **Play button** : plays that segment's audio
 
 **Renaming a speaker**: Click a speaker label to type a new name. All segments with that label update immediately.
 
@@ -317,14 +317,14 @@ Each segment shows:
 
 The Detail page has four tabs beneath the header:
 
-- **Transcript** — the original transcription with speaker labels
-- **Corrected** — the LLM-corrected version (appears after running a correction job)
-- **Summary** — generated meeting notes (appears after running a summarization job)
-- **Format** — (dictation mode only) reformatted output
+- **Transcript** : the original transcription with speaker labels
+- **Corrected** : the LLM-corrected version (appears after running a correction job)
+- **Summary** : generated meeting notes (appears after running a summarization job)
+- **Format** : (dictation mode only) reformatted output
 
 Switch between tabs to compare the original transcript against corrections or summaries.
 
-![LLM-corrected transcript — the same source audio after a correction pass, with normalized punctuation and hotword-driven fixes](../screenshots/05-corrected.png)
+![LLM-corrected transcript : the same source audio after a correction pass, with normalized punctuation and hotword-driven fixes](../screenshots/05-corrected.png)
 
 **Figure 7-2: The Corrected tab showing an LLM-corrected transcript**
 
@@ -350,10 +350,10 @@ After transcription, WhisperDeck can improve the text and generate summaries usi
 
 Correction and summarization use the same LLM providers configured in the Service Panel. Supported providers:
 
-- **Groq** — fast, free tier available
-- **OpenAI** — GPT models
-- **OpenRouter** — routes to multiple LLM providers
-- **Local** — any Ollama-compatible endpoint (e.g., a local Ollama instance)
+- **Groq** : fast, free tier available
+- **OpenAI** : GPT models
+- **OpenRouter** : routes to multiple LLM providers
+- **Local** : any Ollama-compatible endpoint (e.g., a local Ollama instance)
 
 Provider API keys are shared with the transcription providers where applicable (Groq, OpenAI, OpenRouter). The **Local** provider connects to `http://localhost:11434` by default.
 
@@ -376,7 +376,7 @@ The summary job generates meeting notes from the transcript. The result appears 
 
 ### Context Documents
 
-Before running a correction or summary, you can attach a **context document** — a meeting agenda, slide deck text, or any document that provides domain context. The LLM uses this context to improve accuracy.
+Before running a correction or summary, you can attach a **context document** : a meeting agenda, slide deck text, or any document that provides domain context. The LLM uses this context to improve accuracy.
 
 On the Transcript Detail page, click **Context**, paste or type the document text, and click **Attach**. The document is included in the next correction or summary job for this transcript.
 
@@ -435,7 +435,7 @@ Re-diarization runs as a background job on the Queue screen.
 
 Voice identification matches known speaker profiles to transcript segments. Once enrolled, WhisperDeck can automatically label speakers across any transcript.
 
-![Voice roster — enrolled speaker profiles with their voice-clip samples, ready for voice-match across new transcripts](../screenshots/07-voice-roster.png)
+![Voice roster : enrolled speaker profiles with their voice-clip samples, ready for voice-match across new transcripts](../screenshots/07-voice-roster.png)
 
 **Figure 10-1: The Voice Roster page**
 
@@ -456,7 +456,7 @@ There are two ways to enroll a speaker:
 
 **From a transcript**: On the Transcript Detail page, select segments you have manually identified as belonging to a specific speaker. Click **Enroll**, name the speaker, and click **Save**. The selected segments become voice clips for that profile.
 
-![Enroll speaker — name the speaker and upload voice clips to add them to the roster](../screenshots/13-enroll-speaker.png)
+![Enroll speaker : name the speaker and upload voice clips to add them to the roster](../screenshots/13-enroll-speaker.png)
 
 **Figure 10-2: The Enroll Speaker dialog**
 
@@ -472,8 +472,8 @@ On the Voice Roster page, click a speaker profile, then click **Add Clip**. Uplo
 
 WhisperDeck auto-detects the best available embedding backend:
 
-1. **speechbrain** (most accurate) — requires `pip install speechbrain torchaudio`
-2. **librosa MFCC** (basic, always available) — works without extra dependencies but is less accurate
+1. **speechbrain** (most accurate) : requires `pip install speechbrain torchaudio`
+2. **librosa MFCC** (basic, always available) : works without extra dependencies but is less accurate
 
 The active backend is shown in the health check at `/api/health`.
 
@@ -485,7 +485,7 @@ The active backend is shown in the health check at `/api/health`.
 
 The Queue screen shows every background job with live progress, cancel/resume/retry controls, and bulk management.
 
-![Job queue — live LED-bargraph progress for transcription chunks, correction, summary, rediarize, and voice-match jobs, with cancel/rerun/dismiss controls](../screenshots/06-queue.png)
+![Job queue : live LED-bargraph progress for transcription chunks, correction, summary, rediarize, and voice-match jobs, with cancel/rerun/dismiss controls](../screenshots/06-queue.png)
 
 **Figure 11-1: The Job Queue page**
 
@@ -501,32 +501,32 @@ The Queue screen shows every background job with live progress, cancel/resume/re
 
 ### Job States
 
-- **Pending** — queued, waiting for a worker slot
-- **Running** — actively processing, with progress indicator
-- **Completed** — finished successfully
-- **Failed** — terminated with an error (hover for details)
-- **Cancelled** — stopped by user
+- **Pending** : queued, waiting for a worker slot
+- **Running** : actively processing, with progress indicator
+- **Completed** : finished successfully
+- **Failed** : terminated with an error (hover for details)
+- **Cancelled** : stopped by user
 
 ### Job Controls
 
 Each job card shows:
-- **LED progress bar** — for chunked transcriptions, each chunk lights up as it completes (green = done, amber = running, red = failed)
-- **Section counter** — "section 3 of 12" for chunked jobs
-- **Duration** — how long the job has been running
-- **Pipeline info** — provider and model used
+- **LED progress bar** : for chunked transcriptions, each chunk lights up as it completes (green = done, amber = running, red = failed)
+- **Section counter** : "section 3 of 12" for chunked jobs
+- **Duration** : how long the job has been running
+- **Pipeline info** : provider and model used
 
 Action buttons appear based on job state:
-- **Cancel** — stop a running job
-- **Resume** — continue a paused/cancelled transcription
-- **Retry failed chunks** — re-run only the chunks that failed
-- **Rerun** — start the job over (LLM jobs only)
-- **Dismiss** — remove a finished job from the queue
+- **Cancel** : stop a running job
+- **Resume** : continue a paused/cancelled transcription
+- **Retry failed chunks** : re-run only the chunks that failed
+- **Rerun** : start the job over (LLM jobs only)
+- **Dismiss** : remove a finished job from the queue
 
 ### Bulk Actions
 
 At the bottom of the Queue page:
 
-- **Clear finished** — removes all completed, failed, and cancelled jobs from the queue without affecting the underlying transcripts
+- **Clear finished** : removes all completed, failed, and cancelled jobs from the queue without affecting the underlying transcripts
 
 ### Queue Polling
 
@@ -538,9 +538,9 @@ The Queue page polls for updates every 3 seconds while active. When navigating a
 
 ## 12. Hotword Glossary
 
-The hotword glossary is a per-user list of names, jargon, and product terms that the transcription model tends to mishear. The glossary feeds the LLM correction pass — it does not change the transcription itself.
+The hotword glossary is a per-user list of names, jargon, and product terms that the transcription model tends to mishear. The glossary feeds the LLM correction pass : it does not change the transcription itself.
 
-![Hotword glossary — per-user list of names, jargon, and product terms that guide the LLM correction pass](../screenshots/09-hotwords.png)
+![Hotword glossary : per-user list of names, jargon, and product terms that guide the LLM correction pass](../screenshots/09-hotwords.png)
 
 **Figure 12-1: The Hotword Glossary on the Service Panel**
 
@@ -570,16 +570,16 @@ You can also attach context documents to individual transcripts (see Chapter 8, 
 
 The Service Panel (labeled **Settings** in the navigation rail) is the configuration center for WhisperDeck. It controls providers, API keys, themes, and hotwords.
 
-![Service panel — per-provider API keys, model pickers, and the WhisperDeck faceplate / phosphor theme controls](../screenshots/08-service-panel.png)
+![Service panel : per-provider API keys, model pickers, and the WhisperDeck faceplate / phosphor theme controls](../screenshots/08-service-panel.png)
 
 **Figure 13-1: The Service Panel**
 
 ### Provider Configuration
 
 Each transcription provider has a section with:
-- **API Key field** — paste your key here. Validated on input (prefix check: Groq `gsk_`, OpenAI `sk-`, Replicate `r8_`, OpenRouter `sk-or-`)
-- **Default Model** — the model used when no specific model is chosen on the Transcribe page
-- **Health indicator** — shows whether the provider is reachable
+- **API Key field** : paste your key here. Validated on input (prefix check: Groq `gsk_`, OpenAI `sk-`, Replicate `r8_`, OpenRouter `sk-or-`)
+- **Default Model** : the model used when no specific model is chosen on the Transcribe page
+- **Health indicator** : shows whether the provider is reachable
 
 Cloud providers require an API key before they can be used. Local providers (Moonshine, Built-in) work without keys.
 
@@ -601,15 +601,15 @@ The **Phosphor** selector changes the LED and oscilloscope color between Green, 
 
 ## 14. UI Themes
 
-WhisperDeck ships with four "faceplate" themes and three phosphor colors. Themes only change the visual appearance — all hardware behavior is identical across themes.
+WhisperDeck ships with four "faceplate" themes and three phosphor colors. Themes only change the visual appearance : all hardware behavior is identical across themes.
 
 ### Faceplate Themes
 
 | | |
 |:---:|:---:|
-| ![Charcoal — default dark chassis](../screenshots/10-theme-charcoal.png) | ![Silverface — warm light chassis](../screenshots/10-theme-silverface.png) |
+| ![Charcoal : default dark chassis](../screenshots/10-theme-charcoal.png) | ![Silverface : warm light chassis](../screenshots/10-theme-silverface.png) |
 | **Charcoal** (default) | **Silverface** |
-| ![Champagne — warm cream chassis](../screenshots/10-theme-champagne.png) | ![Blue-Glass — deep cool chassis](../screenshots/10-theme-blue-glass.png) |
+| ![Champagne : warm cream chassis](../screenshots/10-theme-champagne.png) | ![Blue-Glass : deep cool chassis](../screenshots/10-theme-blue-glass.png) |
 | **Champagne** | **Blue-Glass** |
 
 **Figure 14-1: The four faceplate themes**
@@ -626,9 +626,9 @@ The theme choice is saved per-user and persists across sessions.
 ### Phosphor Colors
 
 The phosphor color affects all LED indicators, the oscilloscope, and other illuminated elements. Three options are available:
-- **Green** (default) — classic oscilloscope green
-- **Cyan** — blue-green tint
-- **Amber** — warm orange glow
+- **Green** (default) : classic oscilloscope green
+- **Cyan** : blue-green tint
+- **Amber** : warm orange glow
 
 Change the phosphor color in the Service Panel under **Phosphor**.
 
@@ -638,9 +638,9 @@ Change the phosphor color in the Service Panel under **Phosphor**.
 
 ## 15. File Management
 
-The Files page shows everything WhisperDeck has stored on disk — transcripts, audio files, voice clips, and any orphaned files that are no longer linked to a transcript.
+The Files page shows everything WhisperDeck has stored on disk : transcripts, audio files, voice clips, and any orphaned files that are no longer linked to a transcript.
 
-![File inventory — disk usage breakdown, linked and orphaned files with per-file delete controls](../screenshots/12-file-inventory.png)
+![File inventory : disk usage breakdown, linked and orphaned files with per-file delete controls](../screenshots/12-file-inventory.png)
 
 **Figure 15-1: The File Inventory page**
 
@@ -654,8 +654,8 @@ The storage bar at the top shows total disk usage and the breakdown between link
 ### Deleting Files
 
 You can delete individual files or entire categories:
-- **Delete orphaned files** — reclaims disk space from files no longer associated with any transcript
-- **Delete a specific file** — removes a single linked file (this breaks the associated transcript)
+- **Delete orphaned files** : reclaims disk space from files no longer associated with any transcript
+- **Delete a specific file** : removes a single linked file (this breaks the associated transcript)
 
 > **Caution**: Deleting a linked file removes the audio source for that transcript. Playback and re-transcription will no longer work.
 
@@ -707,7 +707,7 @@ python scripts/reset_password.py --username <name> --new-password <pass>
 ### Session Management
 
 - Sessions are cookie-based with a signing secret generated on first launch
-- The secret lives in `data/.session_secret` — never share this file
+- The secret lives in `data/.session_secret` : never share this file
 - There is no `SECRET_KEY` to configure; it is auto-generated
 - CSRF tokens protect all mutation endpoints (see Chapter 17)
 
