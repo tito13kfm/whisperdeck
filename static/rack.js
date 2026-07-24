@@ -263,8 +263,9 @@ async function withBusy(el, fn, opts = {}) {
 function nixie(str, variant = '', color = null) {
   const style = color ? ' style="color:' + color + ';text-shadow:0 0 3px ' + color + ',0 0 9px rgba(255,138,61,0.5)"' : '';
   const glyphs = String(str).split('').map(ch =>
-    '<i><b' + style + '>' + escapeHtml(ch) + '</b></i>').join('');
-  return '<span class="nixie ' + variant + '">' + glyphs + '</span>';
+    '<i aria-hidden="true"><b' + style + '>' + escapeHtml(ch) + '</b></i>').join('');
+  const label = escapeHtml(String(str));
+  return '<span class="nixie ' + variant + '" aria-label="' + label + '">' + glyphs + '</span>';
 }
 
 // 11-cell LED bargraph. cells: array of {on, color}. Color is set via the
