@@ -1670,6 +1670,7 @@ async function startLiveCapture() {
   try {
     mic = await navigator.mediaDevices.getUserMedia({ audio: true });
     S.permPending = false;
+    syncTranscribe();
   } catch {
     S.permPending = false;
     toast('Microphone permission denied — nothing was recorded', 'error');
