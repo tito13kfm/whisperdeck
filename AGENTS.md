@@ -63,3 +63,54 @@ Your diff shows where you looked; before finishing, enumerate the complement. Wh
 4. Conditional UI is a two-sided contract: the chrome that offers a control and the renderer that fulfills it must share one predicate, and any sticky view state (selected tab, mode) must be reset or re-validated when the entity behind it changes.
 
 A guard is only as strong as its least-guarded entry point. Tests that only exercise the entry points the PR touched prove nothing about the others.
+
+## Delegation enforcement
+
+The OMO prompt contains aspirational delegation rules. They fail in practice because they are not gated. These rules ARE gated — violation is a bug.
+
+### Hard gate: edit tools are delegation-only
+
+For any task touching 2+ files or a non-trivial code change, you MAY NOT call `edit` or `write` directly. The ONLY valid workflow is:
+
+1. Decompose into independent units
+2. Delegate each unit to `task(category="deep")` in parallel (`run_in_background=true`)
+3. Collect results, verify each against its success criteria
+
+Exceptions where direct edits ARE allowed:
+- Single-file typo fixes
+- Single-line config changes
+- Mechanical rename across one file
+- Appending a line to a known location
+
+If in doubt, delegate. Time spent decomposing into a good prompt is cheaper than fixing direct-implementation mistakes.
+
+### Explore agent retry loop
+
+If an `explore` or `librarian` agent returns empty, incomplete, or garbage:
+
+1. Diagnose: was the prompt too vague? Scope too wide? Missing expected output format?
+2. Fix the prompt — narrower scope, specific file patterns, explicit output format
+3. Retry (max 2 retries)
+4. ONLY after 2 failed retries: fall back to manual `grep`/`read`
+
+NEVER silently skip past a failed explore and start grepping manually. That defeats the purpose.
+
+### Simplified delegation tiers
+
+Three tiers only. Pick one. Do not deliberate.
+
+| Tier | Agent | When |
+|---|---|---|
+| Discovery | `explore`, `librarian`, `codegraph_codegraph_explore` | Finding code, understanding patterns |
+| Implementation | `task(category="deep")` | Any code change |
+| Review | `oracle` | Architecture, debugging, quality review |
+
+Ignore `quick`, `unspecified-low`, `unspecified-high`, `artistry`, `ultrabrain` unless the task genuinely does not fit the three tiers above.
+
+### Before-edit self-check
+
+Before ANY `edit` or `write` call that touches code, ask:
+
+> Can this be decomposed into 2+ independent units and delegated?
+
+If yes → delegate. If the answer is "yes but it's faster to do it myself" → delegate anyway. Speed of direct implementation is false economy — subagents produce better code in parallel.
