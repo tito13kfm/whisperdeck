@@ -1520,6 +1520,7 @@ async function startJob() {
   form.append('language', lang === 'Auto-detect' ? 'auto' : lang.toLowerCase().slice(0, 2));
   form.append('temperature', ($('tx-temp') && $('tx-temp').value) || '0');
   form.append('diarize', S.mode === 'dictation' ? 'false' : (S.diarize ? 'true' : 'false'));
+  form.append('auto_correct', S.autoCorrect ? 'true' : 'false');
   form.append('kind', S.mode);
   const n = $('tx-speakers') && $('tx-speakers').value.trim();
   if (n) form.append('num_speakers', n);
