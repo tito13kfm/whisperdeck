@@ -489,7 +489,53 @@ function styledPrompt(message, defaultValue) {
 }
 
 /* ══════════════════ auth ══════════════════ */
+// Every path back to the login screen (explicit logout, a 401 mid-session,
+// or checkAuth() finding no session on page load) routes through here, so
+// this is the one place to clear per-account state — otherwise the next
+// account to sign in inherits the previous account's deck status, detail
+// view, and caches (issue #54).
+function resetDeckState() {
+  S.user = null;
+  S.isAdmin = false;
+  S.detailId = null;
+  S.detailTab = 'transcript';
+  S.query = '';
+  S.bankQuery = '';
+  S.tapeLoaded = false;
+  S.tapeName = '';
+  S.tapeFile = null;
+  S.tapeIsLiveStereo = false;
+  S.running = false;
+  S.runningId = null;
+  S.pct = 0;
+  S.stage = null;
+  S.jobStartedAt = null;
+  S.indeterminate = false;
+  S.jobDone = false;
+  S.doneId = null;
+  S.doneDuration = null;
+  // providerIdx is intentionally left alone: ensureProviders() owns picking
+  // firstReady and early-returns once S.providers is populated, so forcing
+  // this to 0 here would only match a fresh page load by coincidence.
+  S.modelIdx = 0;
+  S.langIdx = 0;
+  S.diarize = true;
+  S.autoCorrect = false;
+  S.correctionPending = false;
+  S.correctionStatus = null;
+  S.mode = 'meeting';
+  S.capturing = false;
+  S.stereoLive = false;
+  S.permPending = false;
+  stopCorrectionPoll();
+  detailData = null;
+  bankListCache = [];
+  seedClips = {};
+  expandedVoice = null;
+}
+
 function showLogin() {
+  resetDeckState();
   // #video-dock lives outside #app-shell (so it survives renderDetail()),
   // which also means hiding app-shell alone leaves it floating over the
   // login screen — close it explicitly.
