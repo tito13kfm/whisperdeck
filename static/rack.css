@@ -301,6 +301,56 @@ button.unit:hover { border-color: var(--dash); }
   letter-spacing: 0.1em;
 }
 
+/* ── dashboard activity panel (live/standby, non-abrupt) ── */
+.dash-activity {
+  padding: 12px 26px 14px;
+  opacity: 0.55;
+  transition: opacity 0.35s ease, box-shadow 0.35s ease;
+}
+.dash-activity--active { opacity: 1; }
+.dash-activity-head {
+  display: flex; align-items: center; gap: 8px;
+  font-family: var(--f-cond); font-weight: 600; font-size: 12.5px;
+  text-transform: uppercase; letter-spacing: 0.05em; color: var(--label-dim);
+  margin-bottom: 10px;
+}
+.dash-activity--active .dash-activity-head { color: var(--label); }
+.dash-activity-body { display: flex; align-items: center; gap: 14px; }
+
+.dash-ticker-wrap {
+  flex: 1; min-width: 0;
+  background: var(--vfd-bg); border: 1px solid var(--vfd-edge); border-radius: 2px;
+  padding: 4px 10px; overflow: hidden; white-space: nowrap;
+  box-shadow: inset 0 0 6px rgba(0, 0, 0, 0.8);
+}
+.dash-ticker-text {
+  display: inline-block; font-family: var(--f-tube); font-size: 11px;
+  color: var(--vfd); text-shadow: 0 0 3px rgba(77, 232, 216, 0.6);
+  text-transform: uppercase; padding-right: 24px;
+}
+@keyframes dash-ticker-scroll { from { transform: translateX(0); } to { transform: translateX(-50%); } }
+.dash-ticker-text.scroll { animation: dash-ticker-scroll 10s linear infinite; }
+
+.dash-vu-wrap {
+  flex-shrink: 0; width: 96px; height: 48px;
+  border: 2px solid var(--edge); border-radius: 5px; overflow: hidden;
+}
+
+.dash-stage-lights {
+  display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+  margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--panel-lo);
+}
+.dash-stage-light {
+  width: 8px; height: 8px; border-radius: 50%; background: var(--edge);
+  display: inline-block; margin-right: 4px;
+  transition: background 0.25s ease, box-shadow 0.25s ease;
+}
+.dash-stage-light.active { background: var(--amber); box-shadow: 0 0 5px var(--amber); }
+.dash-stage-label {
+  font-family: var(--f-mono); font-size: 9px; text-transform: uppercase;
+  letter-spacing: 0.06em; color: var(--label-dim); margin-right: 14px;
+}
+
 /* ── piano keys ── */
 .key {
   width: 38px; height: 30px;
@@ -680,9 +730,11 @@ button:disabled:not(.btn):not(.key) { opacity: 0.5; cursor: default; }
 @media (prefers-reduced-motion: reduce) {
   .vfd > span.scroll { animation: none; }
   [style*="reel-spin"] { animation: none !important; }
+  .dash-ticker-text.scroll { animation: none; }
 }
 body.no-motion .vfd > span.scroll { animation: none; }
 body.no-motion .reel-anim { animation: none !important; }
+body.no-motion .dash-ticker-text.scroll { animation: none; }
 
 /* tape library row expand-vs-open visual cue */
 details.unit[open] > summary .row-chevron { transform: rotate(90deg); }
