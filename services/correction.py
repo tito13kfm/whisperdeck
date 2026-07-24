@@ -141,8 +141,8 @@ async def extract_hotwords_from_doc(
     provider_config: dict | None = None,
 ) -> list[str]:
     """Non-fatal: returns the list of newly-seen extracted terms (also
-    persisted via add_hotword with source='extracted'), or [] on any
-    failure. Never raises."""
+    persisted via add_hotword with source='extracted'), or raises on
+    LLM failure. Callers should catch and handle appropriately."""
     prompt = (
         "Extract a short list of proper nouns, names, and domain-specific "
         "jargon from the following document that might appear in a related "
@@ -151,14 +151,11 @@ async def extract_hotwords_from_doc(
         f"DOCUMENT:\n{doc_text}"
     )
 
-    try:
-        content = await _chat_completion(
-            prompt, api_key, provider_name, model, json_mode=True,
-            provider_config=provider_config,
-        )
-        terms = json.loads(content).get("terms", [])
-    except Exception:
-        return []
+    content = await _chat_completion(
+        prompt, api_key, provider_name, model, json_mode=True,
+        provider_config=provider_config,
+    )
+    terms = json.loads(content).get("terms", [])
 
     for term in terms:
         add_hotword(db, user_id, term, source="extracted")
