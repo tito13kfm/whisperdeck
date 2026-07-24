@@ -39,6 +39,7 @@ const S = {
   // live capture
   capturing: false,
   stereoLive: false,
+  permPending: false,          // true while browser mic-permission prompt is open
   // prefs (localStorage)
   theme: 'charcoal',
   phosphor: '#5CFFAC',
@@ -1237,6 +1238,7 @@ function wireTranscribe() {
   });
   $('key-play-a').addEventListener('click', startJob);
   $('key-rec').addEventListener('click', () => {
+    if (S.permPending) return;
     if (S.capturing) stopLiveCapture();
     else if (!S.running) openRecModal();
   });
@@ -1381,9 +1383,16 @@ function syncTranscribe() {
   statusLed.style.background = ledColor || 'var(--edge)';
   statusLed.style.boxShadow = ledColor ? '0 0 5px ' + GREEN : 'none';
   const recLed = $('key-rec-led');
-  recLed.style.background = S.capturing ? RED : 'var(--edge)';
-  recLed.style.boxShadow = S.capturing ? '0 0 5px ' + RED : 'none';
-  $('key-rec').title = S.capturing ? 'Stop recording' : 'Live capture — asks before recording';
+  if (S.permPending) {
+    recLed.style.background = AMBER;
+    recLed.style.boxShadow = '0 0 8px ' + AMBER;
+    recLed.classList.add('pulse-amber');
+  } else {
+    recLed.classList.remove('pulse-amber');
+    recLed.style.background = S.capturing ? RED : 'var(--edge)';
+    recLed.style.boxShadow = S.capturing ? '0 0 5px ' + RED : 'none';
+  }
+  $('key-rec').title = S.permPending ? 'Waiting for microphone permission…' : S.capturing ? 'Stop recording' : 'Live capture — asks before recording';
 
   // status strip
   const armText = $('tx-arm-text');
@@ -1442,7 +1451,7 @@ function syncTranscribe() {
   setVfd('vfd-autocorrect', S.autoCorrect ? 'ON' : 'OFF');
 
   // instruments monitor + nav badge
-  $('inst-monitor').textContent = instrumentsActive() ? 'LIVE' : 'STANDBY';
+  $('inst-monitor').textContent = S.permPending ? 'AWAITING MIC' : instrumentsActive() ? 'LIVE' : 'STANDBY';
   const lamp = $('inst-stereo-lamp');
   lamp.style.background = S.stereoLive ? GREEN : 'var(--edge)';
   lamp.style.boxShadow = S.stereoLive ? '0 0 6px ' + GREEN : 'none';
@@ -1654,12 +1663,18 @@ function analyserLevel(an) {
 
 async function startLiveCapture() {
   if (S.capturing || S.running) return;
+  S.permPending = true;
+  syncTranscribe();
   toast('Requesting microphone…', 'info');
   let mic;
   try {
     mic = await navigator.mediaDevices.getUserMedia({ audio: true });
+    S.permPending = false;
+    syncTranscribe();
   } catch {
+    S.permPending = false;
     toast('Microphone permission denied — nothing was recorded', 'error');
+    syncTranscribe();
     return;
   }
   let disp = null;
@@ -1714,7 +1729,9 @@ async function startLiveCapture() {
     if (actx) actx.close();
     CAP.micAn = null;
     CAP.sysAn = null;
+    S.permPending = false;
     toast('Could not start the recorder: ' + e.message, 'error');
+    syncTranscribe();
     return;
   }
 
