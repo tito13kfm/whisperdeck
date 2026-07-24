@@ -1012,7 +1012,7 @@ async function renderTranscribe() {
             ${deckKey('key-play-b', '▶', 'Play', 'disabled', 'Preview voice sample — available in Voice roster')}
             ${deckKey('key-ff-b', '▶▶', 'FF', 'inert', 'Fast-forward — no mapped action')}
             <div style="visibility:hidden"><button tabindex="-1" aria-hidden="true" class="key"></button></div>
-            ${deckKey('key-open-done', '⏹', 'Open', 'active', 'Open finished transcript')}
+            ${deckKey('key-open-done', '⏹', 'View', 'active', 'View finished transcript')}
           </div>
         </div>
       </div>
@@ -1258,7 +1258,7 @@ function syncTranscribe() {
   // deck statuses
   const dA = $('deck-a-status');
   if (S.capturing) {
-    dA.textContent = '● REC — mic' + (S.stereoLive ? ' (L) + system (R)' : ' only') + ' — press ● to stop';
+    dA.textContent = '● REC — mic' + (S.stereoLive ? ' (L) + system (R)' : '') + ' — ' + formatTime((Date.now() - (S.captureStartedAt || Date.now())) / 1000);
     dA.style.color = RED;
   } else if (S.running) {
     dA.textContent = S.indeterminate
@@ -1278,7 +1278,7 @@ function syncTranscribe() {
     dB.textContent = S.stage === 'diarize' || S.stage === 'finalize' ? 'Writing output — diarizing' : 'Standing by — transcription in progress';
     dB.style.color = S.stage === 'diarize' || S.stage === 'finalize' ? AMBER : 'var(--label-dim)';
   } else if (S.jobDone) {
-    dB.textContent = 'Transcript written — press ⏹ to open it';
+    dB.textContent = 'Transcript written — press ⏹ to view';
     dB.style.color = GREEN;
   } else {
     dB.textContent = 'Idle — output writes here';
@@ -1404,7 +1404,7 @@ let txTicker = null;
 function startTxTicker() {
   clearInterval(txTicker);
   txTicker = setInterval(() => {
-    if (!S.running) { clearInterval(txTicker); txTicker = null; return; }
+    if (!S.running && !S.capturing) { clearInterval(txTicker); txTicker = null; return; }
     if (S.indeterminate && S.stage === 'upload' && Date.now() - S.jobStartedAt > 15000) {
       S.stage = 'transcribe';
     }
@@ -1636,7 +1636,9 @@ async function startLiveCapture() {
   CAP.disp = disp;
   CAP.actx = actx;
   S.capturing = true;
+  S.captureStartedAt = Date.now();
   S.stereoLive = !!disp;
+  startTxTicker();
   syncTranscribe();
   toast(disp ? 'Recording mic + system audio' : 'Recording mic only', 'info');
 }
@@ -1888,6 +1890,7 @@ function jobActions(j) {
 
 const KIND_LABELS = {
   transcription: 'TRANSCRIBE', correction: 'CORRECT', summary: 'SUMMARIZE', rediarize: 'DIARIZE',
+  voice_match: 'VOICE MATCH',
   format_markdown: 'MD NOTE', format_email: 'EMAIL DRAFT', format_coding_prompt: 'CODE PROMPT', classify_intent: 'CLASSIFY',
 };
 
@@ -2709,20 +2712,26 @@ function renderDetail() {
   root.innerHTML = `
     <div class="page-head page-head--with-actions">
       <h1 class="t-title" style="min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(t.title || t.filename || 'Untitled')}</h1>
-      <div style="display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end">
+      <div style="display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end;align-items:center">
         ${extraActs.join('')}
+        <span style="font-family:var(--f-mono);font-size:9px;color:var(--label-faint);text-transform:uppercase;letter-spacing:0.06em">Transcribe</span>
         <button class="btn" style="font-size:12px;padding:7px 14px;border-color:var(--inset-edge)" data-dact="retranscribe" ${t.has_audio ? '' : 'disabled title="No stored audio for this transcript"'}>Re-transcribe</button>
         <button class="btn" style="font-size:12px;padding:7px 14px;border-color:var(--inset-edge)" data-dact="compare-versions">Compare versions</button>
         ${t.kind === 'dictation' ? '' : `
+        <span style="font-family:var(--f-mono);font-size:9px;color:var(--label-faint);text-transform:uppercase;letter-spacing:0.06em">Diarize</span>
         <button class="btn" style="font-size:12px;padding:7px 14px;border-color:var(--inset-edge)" data-dact="rediarize" ${t.has_audio ? '' : 'disabled title="No stored audio for this transcript"'}>Re-diarize</button>
         <button class="btn" style="font-size:12px;padding:7px 14px;border-color:var(--inset-edge)" data-dact="rediarize-history">Rediarize history</button>
+        `}
+        <span style="font-family:var(--f-mono);font-size:9px;color:var(--label-faint);text-transform:uppercase;letter-spacing:0.06em">Voice</span>
         <button class="btn" style="font-size:12px;padding:7px 14px;border-color:var(--inset-edge)" data-dact="voicematch" ${!t.has_audio ? 'disabled title="No stored audio for this transcript"' : (llmJobActive(t.voice_match_job) ? 'disabled title="Voice match job already queued"' : '')}>Match against voice roster</button>
-        ${t.last_relabel ? `<button class="btn" style="font-size:12px;padding:7px 14px;border-color:var(--inset-edge)" data-dact="relabel-undo" title="${escapeHtml(t.last_relabel.description || '')}">Undo relabel</button>` : ''}`}
+        ${t.last_relabel ? `<button class="btn" style="font-size:12px;padding:7px 14px;border-color:var(--inset-edge)" data-dact="relabel-undo" title="${escapeHtml(t.last_relabel.description || '')}">Undo relabel</button>` : ''}
+        <span style="font-family:var(--f-mono);font-size:9px;color:var(--label-faint);text-transform:uppercase;letter-spacing:0.06em">Correction</span>
         <button class="btn" style="font-size:12px;padding:7px 14px;border-color:var(--inset-edge)" data-dact="context">Add context</button>
         <button class="btn" style="font-size:12px;padding:7px 14px;border-color:var(--inset-edge)" data-dact="summarize" ${llmJobActive(t.summary_job) ? 'disabled title="Summary job already queued"' : ''}>Summarize</button>
         <button class="btn" style="font-size:12px;padding:7px 14px;border-color:var(--inset-edge)" data-dact="summary-history">Summary history</button>
         <button class="btn" style="font-size:12px;padding:7px 14px;border-color:var(--inset-edge)" data-dact="rerun" ${llmJobActive(t.correction_job) ? 'disabled title="Correction job already queued"' : ''}>Re-run correction</button>
         <button class="btn" style="font-size:12px;padding:7px 14px;border-color:var(--inset-edge)" data-dact="correction-history">Correction history</button>
+        <span style="display:inline-block;width:1px;height:24px;background:var(--edge);margin:0 4px;align-self:center"></span>
         <button class="btn btn--red" style="font-size:12px;padding:7px 14px" data-dact="delete">Delete</button>
       </div>
     </div>
