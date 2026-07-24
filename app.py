@@ -664,6 +664,7 @@ async def _run_transcription_pipeline(
     language: str,
     temperature: float,
     diarize: bool,
+    auto_correct: Optional[bool] = None,
     num_speakers: Optional[int],
     source_transcript_id: Optional[int] = None,
     kind: str = "meeting",
@@ -891,7 +892,9 @@ async def _run_transcription_pipeline(
 
         # Post-hoc correction pass — queued as a background LlmJob (visible
         # on the Queue screen) instead of blocking this response.
-        if user_settings.get("auto_correct", True):
+        if auto_correct is None:
+            auto_correct = user_settings.get("auto_correct", True)
+        if auto_correct:
             enqueue_auto_correction(db, transcript, user_settings)
         enqueue_auto_classify(db, transcript, user_settings)
 
@@ -914,6 +917,7 @@ async def transcribe_audio(
     language: str = Form("en"),
     temperature: float = Form(0.0),
     diarize: bool = Form(False),
+    auto_correct: Optional[bool] = Form(None),
     num_speakers: Optional[int] = Form(None),
     context_doc: Optional[str] = Form(None),
     kind: str = Form("meeting"),
@@ -957,6 +961,7 @@ async def transcribe_audio(
         language=language,
         temperature=temperature,
         diarize=diarize,
+        auto_correct=auto_correct,
         num_speakers=num_speakers,
         kind=kind,
         capture_source=capture_source,
@@ -1300,6 +1305,8 @@ async def retranscribe_transcript(
             detail="No stored audio for this transcript — it predates audio retention or the file was removed",
         )
     root_id = t.source_transcript_id or t.id
+    user_settings = get_user_settings(db, current_user.id)
+    retranscribe_auto_correct = user_settings.get("auto_correct", True)
     return await _run_transcription_pipeline(
         db, current_user, Path(t.audio_path),
         filename=t.filename,
@@ -1312,6 +1319,7 @@ async def retranscribe_transcript(
         num_speakers=num_speakers if num_speakers is not None else t.num_speakers,
         source_transcript_id=root_id,
         kind=t.kind or "meeting",
+        auto_correct=retranscribe_auto_correct,
     )
 
 
