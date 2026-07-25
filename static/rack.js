@@ -2704,6 +2704,7 @@ async function openEnrollMarkedModal() {
       delete seedClips[sp];
       closeModal();
       renderDetailBody();
+      refreshRailChrome();
       syncEnrollMarkedBtn();
     } catch (e) { toast(e.message, 'error'); }
   }, { spinner: true }));
@@ -3760,6 +3761,7 @@ function openEnrollModal() {
       await api('/api/voices/enroll', { method: 'POST', body: fd });
       toast('Enrolled ' + name + ' to the roster');
       closeModal();
+      refreshRailChrome();
       loadVoices();
     } catch (e) { toast(e.message, 'error'); }
   }, { spinner: true }));
