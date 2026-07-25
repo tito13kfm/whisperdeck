@@ -21,6 +21,7 @@ from fastapi.responses import Response, JSONResponse, FileResponse, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.middleware.gzip import GZipMiddleware
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
@@ -201,6 +202,10 @@ app.add_middleware(BaseHTTPMiddleware, dispatch=enforce_csrf)
 # explicitly anyway so a Starlette default change can't silently weaken the
 # defense-in-depth layer.
 app.add_middleware(SessionMiddleware, secret_key=SESSION_SECRET, same_site="lax")
+# GZip compression for responses > 500 bytes. Added last (outermost in
+# middleware stack) so it compresses the final response after all other
+# middleware has processed it.
+app.add_middleware(GZipMiddleware, minimum_size=500)
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────
