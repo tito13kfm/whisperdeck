@@ -253,7 +253,7 @@ def poll_correction_done(tid, timeout=90):
     while time.time() < deadline_:
         last = api("GET", f"/api/transcripts/{tid}")
         job = last.get("correction_job")
-        if job and job.get("status") in ("done", "failed"):
+        if job and job.get("status") in ("completed", "failed"):
             return last
         time.sleep(1)
     return last
@@ -326,7 +326,7 @@ with sync_playwright() as p:
     # 4. Wait for transcription to finish, then open the transcript detail view
     initial_status = api("GET", "/api/transcripts")
     tid = initial_status[0]["id"]
-    poll_transcript(tid, {"done", "failed"}, timeout=150)
+    poll_transcript(tid, {"completed", "failed"}, timeout=150)
     pg.wait_for_selector("#key-open-done:not([disabled])", timeout=150000)
     pg.locator("#key-open-done").click()
     pg.wait_for_selector('[id^="page-"].active', timeout=10000)
@@ -357,11 +357,34 @@ with sync_playwright() as p:
     pg.screenshot(path=os.path.join(OUT_DIR, "05-corrected.png"))
     print("Captured: 05-corrected.png")
 
-    # 7. Re-run correction to get a second version, then open the compare modal
+    # 7. Re-run correction (same model, deliberately not the blind "rerun"
+    #    button - that only opens the picker) to get a second, genuinely
+    #    distinct version. NOT switching models here: the /api/correction-models
+    #    local_llm list is every model Lemonade reports, unfiltered for chat/JSON
+    #    output support, and several (e.g. small/non-instruct quantizations)
+    #    fail the correction pass's structured-output parsing. The stock
+    #    model at temperature 0.2 (services/llm_client.py) already varies
+    #    run-to-run, which is enough for the diff view to show real changes.
     rerun_btn = pg.locator('[data-dact="rerun"]')
     if rerun_btn.count() > 0 and rerun_btn.first.is_enabled():
         rerun_btn.first.click()
-        poll_correction_done(tid, timeout=90)
+        # #rerun-model exists the instant the picker opens, but its options
+        # are still a placeholder "Loading…" until the async
+        # /api/correction-models/local_llm fetch resolves - wait for a real
+        # <option value="..."> before reading it. wait_for_function (not
+        # wait_for_selector) because Playwright's actionability check treats
+        # <option> elements as never "visible" (no bounding box outside an
+        # open dropdown), so a selector-based wait always times out.
+        pg.wait_for_function("""() => {
+            const sel = document.getElementById('rerun-model');
+            return sel && sel.options.length > 0 && sel.options[0].hasAttribute('value');
+        }""", timeout=10000)
+        pg.locator("#rerun-go").click()
+        second_run = poll_correction_done(tid, timeout=90)
+        if second_run and (second_run.get("correction_job") or {}).get("status") != "completed":
+            print("WARNING: second correction run did not complete (status="
+                  + str((second_run.get("correction_job") or {}).get("status")) + ") - "
+                  "15-version-compare.png will only have one completed run to show")
         pg.wait_for_timeout(500)
     pg.locator('[data-dact="correction-history"]').click()
     pg.wait_for_selector("#modal-overlay.open", timeout=10000)
@@ -391,15 +414,28 @@ with sync_playwright() as p:
     pg.screenshot(path=os.path.join(OUT_DIR, "12-file-inventory.png"))
     print("Captured: 12-file-inventory.png")
 
-    # 11. Voice Roster + Enroll modal (unchanged from before)
+    # 11. Voice Roster: enroll one speaker first so the roster isn't empty,
+    #     then reopen the Enroll modal for the screenshot - it shows both the
+    #     populated roster in the background and the enroll workflow itself.
     pg.evaluate("navigate('voices')")
-    pg.wait_for_timeout(2000)
+    pg.wait_for_timeout(1000)
     enroll_btn = pg.locator("#voice-enroll-btn")
     if enroll_btn.count() > 0:
         enroll_btn.first.click()
-        pg.wait_for_timeout(1500)
+        pg.wait_for_selector("#enroll-name", state="visible", timeout=5000)
+        pg.fill("#enroll-name", "Sarah")
+        with pg.expect_file_chooser() as fc_info:
+            pg.locator("#enroll-file-btn").click()
+        fc_info.value.set_files(SHORT_AUDIO)
+        pg.wait_for_timeout(300)
+        pg.locator("#enroll-go").click()
+        pg.wait_for_timeout(1500)  # POST /api/voices/enroll + roster refresh
+
+        enroll_btn.first.click()  # reopen for the screenshot itself
+        pg.wait_for_selector("#enroll-name", state="visible", timeout=5000)
+        pg.wait_for_timeout(500)
         pg.screenshot(path=os.path.join(OUT_DIR, "13-enroll-speaker.png"))
-        print("Captured: 13-enroll-speaker.png")
+        print("Captured: 13-enroll-speaker.png (roster populated, modal open for a second enrollment)")
         pg.keyboard.press("Escape")
         pg.wait_for_timeout(300)
 
@@ -413,7 +449,7 @@ with sync_playwright() as p:
     pg.locator("#key-play-a").click()
     all_transcripts = api("GET", "/api/transcripts")
     video_tid = max((row["id"] for row in all_transcripts), default=tid)
-    poll_transcript(video_tid, {"done", "failed"}, timeout=90)
+    poll_transcript(video_tid, {"completed", "failed"}, timeout=90)
     pg.wait_for_selector("#key-open-done:not([disabled])", timeout=90000)
     pg.locator("#key-open-done").click()
     pg.wait_for_timeout(1200)
