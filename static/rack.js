@@ -8,6 +8,7 @@ const S = {
   user: null,
   isAdmin: false,
   authMode: 'login',          // login | register
+  passwordMinLength: 8,       // overridden from <meta name="wd-password-min-length"> at DOMContentLoaded
   detailId: null,
   detailTab: 'transcript',
   query: '',
@@ -632,11 +633,15 @@ async function checkAuth() {
 
 
 /* ── client-side password mirror ──
-   Best-effort UX match for the server policy. Hardcodes min length 8 to
-   match the server default; a self-hoster who overrides PASSWORD_MIN_LENGTH
-   gets the real rejection from the server, surfaced via toast on API error. */
+   Reads S.passwordMinLength from the <meta name="wd-password-min-length">
+   tag injected by the server at render time, so the client pre-check and
+   hint text always match the server's PASSWORD_MIN_LENGTH env var. */
+function passwordHintText() {
+  return 'Min ' + S.passwordMinLength + ' chars, at least one letter and one number.';
+}
+
 function clientValidatePassword(pw) {
-  if (pw.length < 8) { return { ok: false, reason: 'Password must be at least 8 characters' }; }
+  if (pw.length < S.passwordMinLength) { return { ok: false, reason: 'Password must be at least ' + S.passwordMinLength + ' characters' }; }
   if (!/[a-zA-Z]/.test(pw)) { return { ok: false, reason: 'Password must contain at least one letter' }; }
   if (!/[0-9]/.test(pw)) { return { ok: false, reason: 'Password must contain at least one digit' }; }
   return { ok: true, reason: '' };
@@ -651,6 +656,7 @@ function toggleAuthMode() {
   $('auth-forgot-username').style.display = S.authMode === 'login' ? '' : 'none';
   $('auth-pass-confirm-wrap').style.display = S.authMode === 'register' ? '' : 'none';
   $('auth-req-hint').style.display = S.authMode === 'register' ? '' : 'none';
+  $('auth-req-hint').textContent = S.authMode === 'register' ? passwordHintText() : '';
   $('auth-pass').autocomplete = S.authMode === 'register' ? 'new-password' : 'current-password';
   if (S.authMode === 'login') { $('auth-pass-confirm').value = ''; }
 }
@@ -727,7 +733,7 @@ async function showResetCode() {
       <label class="t-label" style="font-size:12px">New password</label>
       <input class="inp" id="rc-password" type="password" placeholder="Choose a new password" style="font-size:13px;padding:8px 10px;width:100%">
     </div>
-    <div style="font-size:11px;color:var(--label-dim);margin-bottom:10px">Min 8 chars, at least one letter and one number.</div>
+    <div style="font-size:11px;color:var(--label-dim);margin-bottom:10px">${passwordHintText()}</div>
     <div class="modal-actions">
       <button id="rc-close" class="btn btn--ghost btn--sm">Cancel</button>
       <button id="rc-submit" class="btn btn--amber btn--sm">Reset password</button>
@@ -4342,6 +4348,8 @@ async function addHotword() {
 
 /* ══════════════════ init ══════════════════ */
 document.addEventListener('DOMContentLoaded', () => {
+  const pwMeta = document.querySelector('meta[name="wd-password-min-length"]');
+  if (pwMeta) { S.passwordMinLength = parseInt(pwMeta.content, 10) || 8; }
   loadPrefs();
   document.querySelectorAll('.rail-btn').forEach(b =>
     b.addEventListener('click', () => navigate(b.dataset.nav)));
