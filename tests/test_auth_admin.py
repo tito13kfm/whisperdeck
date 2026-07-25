@@ -132,6 +132,8 @@ class TestResetPassword:
         })
         assert resp.status_code == 200
         assert resp.json()["username"] == "target_user"
+        # reset-password rotated the CSRF token -- refresh the header
+        client.headers["X-CSRF-Token"] = client.get("/api/csrf-token").json()["token"]
         # Verify login with new password works
         login = client.post("/api/login", json={"username": "target_user", "password": "newpass123"})
         assert login.status_code == 200
@@ -149,6 +151,8 @@ class TestResetPassword:
             "token": token, "new_password": "newpass1"
         })
         assert resp.status_code == 200
+        # reset-password rotated the CSRF token -- refresh the header
+        client.headers["X-CSRF-Token"] = client.get("/api/csrf-token").json()["token"]
         # Second use fails (token cleared)
         resp2 = client.post("/api/reset-password", json={
             "token": token, "new_password": "newpass2"
@@ -298,3 +302,47 @@ class TestEnvVarIsolation:
         # Must NOT be the production data dir — conftest uses tempfile.mkdtemp
         # which produces paths like /tmp/whisperdesk-test-XXXXXX, never ./data
         assert app_module.DATA_DIR != app_module.BASE_DIR / "data"
+
+# -- CSRF token lifecycle -------------------------------------------------
+
+
+class TestCsrfTokenLifecycle:
+    def test_stable_token_across_reads(self, client):
+        """GET /api/csrf-token returns the same token on consecutive
+        calls: token is per-session, not per-request (issue #51)."""
+        first = client.get("/api/csrf-token").json()["token"]
+        second = client.get("/api/csrf-token").json()["token"]
+        assert first == second, "CSRF token should be stable per session"
+        assert len(first) == 64, "token should be 32 hex bytes"
+
+    def test_token_rotates_on_register(self, client, db_session):
+        """Register must rotate the CSRF token.
+        Anonymous-session token must not survive into authenticated session."""
+        fresh = _fresh_client()
+        pre = fresh.get("/api/csrf-token").json()["token"]
+        fresh.post("/api/register", json={"username": "csrftest", "password": "secret"})
+        post = fresh.get("/api/csrf-token").json()["token"]
+        assert pre != post, "register should rotate CSRF token"
+
+    def test_token_rotates_on_login(self, client, db_session):
+        """Login must rotate the CSRF token.
+        Pre-auth token must not survive into the authenticated session."""
+        _register(client, "logintest", "secret")
+        fresh = _fresh_client()
+        pre = fresh.get("/api/csrf-token").json()["token"]
+        fresh.post("/api/login", json={"username": "logintest", "password": "secret"})
+        post = fresh.get("/api/csrf-token").json()["token"]
+        assert pre != post, "login should rotate CSRF token"
+    def test_token_rotates_on_reset_password(self, client, db_session):
+        """Reset-password auto-login must rotate the CSRF token.
+        Same session-fixation gap as login/register: anonymous token
+        must not survive into the authenticated session."""
+        _make_admin(db_session)
+        _register(client, "resetrot", "oldpass")
+        token = client.post("/api/forgot-password", json={"username": "resetrot"}).json()["reset_token"]
+        fresh = _fresh_client()
+        pre = fresh.get("/api/csrf-token").json()["token"]
+        fresh.post("/api/reset-password", json={"token": token, "new_password": "newpass"})
+        post = fresh.get("/api/csrf-token").json()["token"]
+        assert pre != post, "reset-password should rotate CSRF token"
+

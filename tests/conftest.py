@@ -114,5 +114,10 @@ def client(db_session):
         "/api/register",
         json={"username": "testuser", "password": "testpass123"},
     )
+    # Register rotates the CSRF token (issue #51) -- refresh the header
+    # so the yielded client carries the post-register token, not the stale
+    # anonymous-session one.
+    csrf_token = test_client.get("/api/csrf-token").json()["token"]
+    test_client.headers["X-CSRF-Token"] = csrf_token
     yield test_client
     app_module.app.dependency_overrides.clear()
