@@ -443,3 +443,29 @@ class TestPasswordPolicy:
         })
         assert resp.status_code == 400
         assert "Invalid or expired reset token" in resp.json()["detail"]
+
+    # ── single source of truth: meta tag injection ──
+
+    def test_index_page_has_default_min_length_meta(self, client, db_session):
+        """The served index.html has a meta tag with the password min length,
+        defaulting to 8 when PASSWORD_MIN_LENGTH is unset."""
+        resp = client.get("/")
+        assert resp.status_code == 200
+        assert 'name="wd-password-min-length" content="8"' in resp.text
+
+    def test_index_page_reflects_env_var(self, client, db_session, monkeypatch):
+        """Setting PASSWORD_MIN_LENGTH injects the value into the page meta tag
+        so the client and hint text match the server policy."""
+        monkeypatch.setenv("PASSWORD_MIN_LENGTH", "12")
+        resp = client.get("/")
+        assert resp.status_code == 200
+        assert 'name="wd-password-min-length" content="12"' in resp.text
+        assert 'content="8"' not in resp.text
+
+    def test_index_page_falls_back_on_non_numeric(self, client, db_session, monkeypatch):
+        """A non-numeric PASSWORD_MIN_LENGTH falls back to 8 in the meta tag,
+        matching the server-side fallback in password_min_length()."""
+        monkeypatch.setenv("PASSWORD_MIN_LENGTH", "garbage")
+        resp = client.get("/")
+        assert resp.status_code == 200
+        assert 'name="wd-password-min-length" content="8"' in resp.text
