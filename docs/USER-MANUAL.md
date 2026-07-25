@@ -127,7 +127,9 @@ After starting the server (via `run.bat` or `python app.py`), open `http://local
 
 **Figure 2-1: The login page**
 
-The first account you register is automatically the admin. Register with any username and password, then log in.
+The first account you register is automatically the admin. Register with a username and a password meeting the policy shown on the form, confirm the password, then log in.
+
+**Password policy**: passwords must be at least `PASSWORD_MIN_LENGTH` characters (default 8) and contain at least one letter and one number. The registration form shows the current minimum and requires the password to be typed twice; a mismatch is rejected client-side before it reaches the server.
 
 > If you need the server on a different port, set the `PORT` environment variable before launching. If you need the database in a different location, set `WHISPERDECK_DATA_DIR`.
 
@@ -186,6 +188,8 @@ The Monitor is your home screen. It gives you an at-a-glance view of your Whispe
 
 **Storage Gauge**: A horizontal bar graph showing disk usage - how much space your transcripts, audio files, and voice clips are using. The bar turns amber as storage grows.
 
+**Live Activity**: While a job is running, a scrolling ticker shows its filename, a VU meter pulses with signal activity, and a row of pipeline stage lights tracks progress through transcribe, diarize, correct, and summarize. With no active jobs the ticker reads "No active jobs" and the lights sit idle.
+
 ---
 
 <div style="page-break-before: always"></div>
@@ -238,7 +242,9 @@ Click **Begin Recording** to start, then **Stop** when done. The recording appea
 
 ### Starting Transcription
 
-With a file loaded or a recording captured, click **▶** (Play) to start transcription. The reel-to-reel deck animation plays while the job runs. For short recordings under 5 minutes, transcription completes inline. Longer recordings are split into chunks and sent to the Job Queue.
+With a file loaded or a recording captured, click **▶** (Play) to start transcription. The reel-to-reel deck animation plays while the job runs, alongside an elapsed-time readout. For short recordings under 5 minutes, transcription completes inline. Longer recordings are split into chunks and sent to the Job Queue, where each chunked row shows a segment light per chunk instead of a plain percent bar.
+
+If auto-correct is enabled, a non-blocking Correct-stage indicator tracks the correction pass without delaying the transcription result - the transcript is available as soon as transcription finishes, and the correction updates in place when it's done.
 
 When transcription completes, a **☰ View transcript** button appears. Click it to open the transcript in the Detail view.
 
@@ -330,13 +336,19 @@ Switch between tabs to compare the original transcript against corrections or su
 
 ### Run History
 
-Every correction, summary, re-diarization, and voice-match run is recorded per transcript. Click **Versions** in the header to view the version chain, or use the **Compare** button on the Corrected/Summary tabs to see word-level diffs between runs.
+Every correction, summary, re-diarization, and voice-match run is recorded per transcript. Each pass has its own history button in the transcript detail header - **Compare versions** (re-transcriptions), **Correction history**, **Summary history**, and **Rediarize history** - each opening a diff view to compare any two runs of that pass.
 
-<!-- TODO: capture version compare modal screenshot -->
+![Compare correction runs - pick two runs from the dropdowns to see their output side by side](../screenshots/15-version-compare.png)
+
+**Figure 7-3: Comparing two correction runs**
 
 ### Floating Video Panel
 
 If the source file contains a video stream, a floating video panel appears. You can position it independently of the transcript view, which is useful for manually identifying speakers by sight.
+
+![Floating video panel - detached from the transcript view, draggable, with picture-in-picture support](../screenshots/14-video-panel.png)
+
+**Figure 7-4: The floating video panel, detached from the transcript**
 
 ---
 
@@ -540,7 +552,7 @@ The Queue page polls for updates every 3 seconds while active. When navigating a
 
 The hotword glossary is a per-user list of names, jargon, and product terms that the transcription model tends to mishear. The glossary feeds the LLM correction pass - it does not change the transcription itself.
 
-![Hotword glossary - per-user list of names, jargon, and product terms that guide the LLM correction pass](../screenshots/09-hotwords.png)
+![Hotword glossary widget on the Service Panel - add a term, and the list of names, jargon, and product terms that guide the LLM correction pass](../screenshots/09-hotwords.png)
 
 **Figure 12-1: The Hotword Glossary on the Service Panel**
 
@@ -704,6 +716,8 @@ There is no email flow. Password resets work through shared tokens:
 python scripts/reset_password.py --username <name> --new-password <pass>
 ```
 
+The new password must meet the same policy as registration (minimum length plus one letter and one number) whether it's set through a reset token or the command-line tool.
+
 ### Session Management
 
 - Sessions are cookie-based with a signing secret generated on first launch
@@ -828,6 +842,7 @@ All environment variables are optional. The application runs with none set.
 | `HUGGINGFACE_TOKEN` | pyannote.audio model access token | unset |
 | `FFMPEG_DIR` | Directory containing ffmpeg binary | use PATH |
 | `WHISPER_CACHE_DIR` | faster-whisper model cache directory | `~/.cache/whisper` |
+| `PASSWORD_MIN_LENGTH` | Minimum password length enforced on register and reset | `8` |
 
 `WHISPERDECK_DATA_DIR` is the correct spelling. The legacy `WHISPERDESK_DATA_DIR` still works but prints a deprecation warning.
 
