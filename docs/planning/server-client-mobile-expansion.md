@@ -52,21 +52,41 @@ autonomously executes the inferred intent, including external, hard-to-undo acti
 email, open this GitHub issue/PR). Ambiguous input plus autonomous irreversible action is a bad
 combination, especially against rambling audio rather than clean dictation.
 
-Refinements from discussion:
+First refinement: a confirmation step before any action fires, split by reversibility rather
+than target system, reusing the existing job-queue/run-history pattern
+(`services/queue.py`, `services/llm_jobs.py`) for a proposed-action record instead of building
+a new automation engine.
 
-- A confirmation step before any action fires is a hard requirement, not optional.
-- Route the transcript through a reasoning/thinking-mode LLM pass specifically for intent
-  extraction, separate from the correction/summary passes that already exist.
-- Split by reversibility rather than by target system: fully local, cheap-to-undo actions
-  (an in-app task or reminder) can auto-commit. Anything that leaves the app's boundary and
-  can't be unsent (email, GitHub issue/PR, an invite to another person) should land as a
-  pending, reviewable item, not fire automatically.
+Second refinement, and the one we settled on: drop execution entirely. The job outputs a
+copyable text block per action, nothing fires automatically, ever. A `gh issue create` command
+with the right flags, or an email draft (To/Subject/Body), that the user pastes and runs or
+sends themselves. This removes the entire confirm/reject UI, the external API integration, and
+any credential storage, while still doing the actual work (figuring out what was meant and
+drafting it). The existing correction/summarize job type already proves the underlying
+capability, turning hours of rambling, multi-person meeting audio into an accurate account of
+what was discussed and decided.
 
-Suggested implementation shape: don't build a new automation engine from scratch. WhisperDeck
-already has a job-queue and run-history pattern (`services/queue.py`, `services/llm_jobs.py`,
-the Queue screen with cancel/rerun/dismiss). A new job type that produces a proposed action
-record, reviewed the same way a correction or summary run is reviewed today, reuses that
-infrastructure instead of inventing a parallel one.
+What still needs real design, even without execution:
+
+- **Summarizing and extracting actionable intent aren't the same task**, even sharing plumbing.
+  A summary is descriptive and forgiving; a generated command is something that might get
+  pasted and run without a close reread, especially as trust in the tool grows. The output
+  format should call out the fields most likely to be wrong and most costly if unnoticed
+  (which repo, which email address), not just follow each target's normal command syntax.
+- **A single ramble usually contains more than one intent** ("remind me to call Bob, also file
+  an issue for the login bug, also send Sarah the notes"). That needs structured, multi-item
+  extraction (a JSON-schema'd pass with one entry per action, each typed by target), then a
+  render step per type, not a reuse of the free-text summarize prompt as-is.
+- **Target resolution needs somewhere to live.** "Email Sarah" is only a usable draft if the
+  system knows Sarah's address; there's no contacts concept in the app today. Smallest fix:
+  extend the existing hotword glossary (already `name -> canonical term`) to optionally carry
+  `name -> email`, rather than building a separate address book. GitHub repo targeting has the
+  same open question: does the user have to say the repo out loud, or is there a per-user
+  default set in Settings?
+- **Silent misses are worse than false positives here.** Nothing executes automatically, so a
+  spurious suggested action just gets ignored at no cost. A missed intent means the whole point
+  of rambling into the app was lost with no signal that it happened. Low-confidence extractions
+  should be shown, flagged as uncertain, rather than dropped.
 
 ### 3. Storage backend evolution
 
@@ -91,17 +111,18 @@ second database backend once migrations are engine-agnostic.
 1. Try an OS-native automation (Shortcuts/Tasker/Syncthing) for LAN-only capture-and-sync
    before writing any app code.
 2. Add Alembic migrations against current SQLite. Pure risk reduction, no user-visible change.
-3. Build the proposed-action job type on the existing queue infrastructure. Ship local-only
-   actions (task/reminder) first; add external actions (email, GitHub) only once the
-   intent-extraction step has proven reliable against real, messy, rambling audio, not just
-   clean test recordings.
+3. Build the intent-extraction job type on the existing queue infrastructure: structured,
+   multi-item output, rendered per target as copyable text, nothing executed automatically.
+   Start with whichever target is cheapest to get right (likely a plain reminder/task line)
+   and validate against real, messy, rambling audio, not just clean test recordings, before
+   adding targets that need resolution data (email addresses, repo names).
 4. Only after 1 to 3: decide whether a custom mobile app and a second database backend are
    still worth building, informed by what step 1 actually showed about the OS-native route.
 
 ## Explicitly not decided
 
 - Whether a custom mobile app gets built at all.
-- Which actions beyond "task/reminder" vs "email/GitHub" are in scope, and how each is
-  reviewed before firing.
+- Which action targets beyond "task/reminder" are in scope (email, GitHub, others), and where
+  target-resolution data (contacts, default repo) lives.
 - Which second database engine (if any) to support, and whether "bring your own database" in
   the installer is worth the support burden it implies.
