@@ -56,15 +56,38 @@ Drive folder a Shortcuts automation can passively watch. Getting a recording out
 explicit "share to Files" tap per meeting, which brings back the exact per-note friction the
 one-button idea is trying to remove. If that turns out to be true in practice, the concrete
 case for a minimal custom app is "save directly somewhere the LAN sync can pick up
-automatically," not "start recording" itself. Android is less of a concern here since app
-storage is generally more open to Tasker/Syncthing.
+automatically," not "start recording" itself.
+
+"Android is less of a concern" was asserted last time without checking it, worth undoing that
+here rather than letting it stand unexamined. Android's problem isn't sandboxing, MediaStore
+generally does expose a shared `Recordings`/`Music` collection other apps can read, but it's
+fragmented and permission-gated in its own way:
+
+- **Which recorder, which folder, is not one answer.** Google's own Recorder app (Pixel-only,
+  saves to the Android 12+ `Recordings` MediaStore collection) behaves differently from
+  Samsung's Voice Recorder or whatever the OEM shipped on a given phone. "Point Tasker/Syncthing
+  at the recordings folder" has to be verified per device, not assumed to be one universal path.
+- **Syncthing/Tasker watching that folder reliably needs broad storage access** (either
+  per-collection `READ_MEDIA_AUDIO` on Android 13+, or the coarser "All files access" grant on
+  older versions), which is an explicit, separate permission screen the user has to grant, not
+  something that's on by default.
+- **OEM battery managers killing background work regardless of what the official Android APIs
+  promise.** A foreground service with a notification is supposed to keep recording or
+  syncing alive in the background, but Samsung, Xiaomi, Huawei, and others ship their own
+  aggressive task killers on top of stock Android that terminate exactly this kind of
+  background service anyway (this is well enough known that a whole site,
+  dontkillmyapp.com, exists to catalog which OEMs do it and how to work around each one). That's
+  the Android-side parallel to the iOS Voice Memos snag: the platform's documented capability
+  and the real device's behavior aren't the same thing, and it has to be checked on whichever
+  actual phone is in use, not assumed from the API docs.
 
 Two more things to validate for real, not assume:
 
-- **Background recording for the length of an actual meeting.** iOS needs a specific
-  background-audio entitlement to keep recording once the app isn't in the foreground, and
-  interruptions (phone calls, lock screen, battery drain over an hour-plus) are the kind of
-  thing that's fine in a two-minute demo and flaky in practice.
+- **Background recording for the length of an actual meeting**, on both platforms. iOS needs a
+  specific background-audio entitlement to keep recording once the app isn't in the foreground;
+  Android needs the foreground-service-survives-the-OEM-killer question above answered.
+  Interruptions (phone calls, lock screen, battery drain over an hour-plus) are the kind of
+  thing that's fine in a two-minute demo and flaky in practice on either platform.
 - **Phone-mic audio quality against diarization.** Pyannote's speaker separation is sensitive to
   mic quality and placement; a phone lying flat on a conference table is a different signal
   than whatever source has been feeding diarization so far. Not assumed to be a blocker, just
@@ -135,10 +158,11 @@ second database backend once migrations are engine-agnostic.
 ## Suggested validation order, if this ever gets picked back up
 
 1. Try an OS-native automation (Shortcuts/Tasker/Syncthing) for LAN-only capture-and-sync
-   before writing any app code. Specifically check whether a recording can reach the watched
-   sync folder without a manual per-file export step (the Voice Memos snag above), whether
-   background recording survives a real hour-plus meeting, and how diarization holds up on
-   phone-mic audio.
+   before writing any app code, on both platforms actually in use. Specifically check: whether a
+   recording can reach the watched sync folder without a manual per-file export step (the Voice
+   Memos snag on iOS, the recorder/folder/permission fragmentation and OEM battery-killer
+   question on Android), whether background recording survives a real hour-plus meeting, and
+   how diarization holds up on phone-mic audio.
 2. Add Alembic migrations against current SQLite. Pure risk reduction, no user-visible change.
 3. Build the intent-extraction job type on the existing queue infrastructure: structured,
    multi-item output, rendered per target as copyable text, nothing executed automatically.
