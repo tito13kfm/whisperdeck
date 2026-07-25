@@ -5,6 +5,7 @@ No FastAPI/HTTP concerns here, same convention as the other services —
 callers pass in an already-open db session.
 """
 import datetime
+import os
 import hashlib
 import secrets
 from typing import Optional
@@ -103,19 +104,26 @@ def generate_reset_token(db, admin_user: User, target_username: str) -> Optional
     return token
 
 
+def get_user_by_reset_token(db, token: str) -> Optional[User]:
+    """Look up a user by a reset token (TTL-checked) without consuming it.
+    Returns None if the token is invalid or expired. Used by the route to
+    validate the token BEFORE checking password policy, so a bad token +
+    weak password reports the token error, not the password error.
+    """
+    token_hash = hash_reset_token(token)
+    return db.query(User).filter(
+        User.reset_token == token_hash,
+        User.reset_token_expires_at > utcnow(),
+    ).first()
+
+
 def reset_password(db, token: str, new_password: str) -> Optional[User]:
     """Validate a reset token (single-use, TTL-checked) and set a new
     password. On success the token is cleared and the User is returned so
     the caller can log them in. Returns None if the token is invalid or
     expired.
     """
-    # Hash the incoming token before querying — tokens are stored hashed
-    # at rest (see generate_reset_token / hash_reset_token).
-    token_hash = hash_reset_token(token)
-    user = db.query(User).filter(
-        User.reset_token == token_hash,
-        User.reset_token_expires_at > utcnow(),
-    ).first()
+    user = get_user_by_reset_token(db, token)
     if not user:
         return None
     salt = generate_salt()
@@ -158,3 +166,30 @@ def get_all_users(db) -> list[dict]:
         }
         for u in users
     ]
+
+
+def validate_password(password: str) -> tuple[bool, str]:
+    """Validate password against the minimum policy.
+    Returns (ok, reason). Reads PASSWORD_MIN_LENGTH at call time (not import)
+    so tests that set env vars work correctly. Falls back to 8 if the env
+    var is non-numeric; clamps to >= 1 so a misconfiguration cannot silently
+    disable the length check. Uses ASCII-only letter/digit checks to match
+    the client-side mirror in rack.js (avoids a Unicode/regex asymmetry
+    where non-ASCII letters pass server but fail client pre-check).
+    """
+    try:
+        min_length = int(os.environ.get("PASSWORD_MIN_LENGTH", "8"))
+    except (ValueError, TypeError):
+        min_length = 8
+    if min_length < 1:
+        min_length = 1
+    if len(password) < min_length:
+        return False, f"Password must be at least {min_length} characters"
+    has_letter = any(c.isascii() and c.isalpha() for c in password)
+    has_digit = any(c.isascii() and c.isdigit() for c in password)
+    if not has_letter:
+        return False, "Password must contain at least one letter"
+    if not has_digit:
+        return False, "Password must contain at least one digit"
+    return True, ""
+
