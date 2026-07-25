@@ -224,8 +224,21 @@ async function api(path, opts = {}) {
   if (isMutation && csrfToken) headers['X-CSRF-Token'] = csrfToken;
   setInFlight(1);
   try {
-    const res = await fetch(path, { credentials: 'same-origin', ...opts, headers });
+    let res = await fetch(path, { credentials: 'same-origin', ...opts, headers });
     if (res.status === 401) { showLogin(); throw new Error('Not signed in'); }
+    // One-shot CSRF retry: if another tab rotated the token (login, register),
+    // refresh and retry once instead of failing silently (issue #51).
+    if (res.status === 403 && isMutation) {
+      let probe = null;
+      try { probe = await res.clone().json(); } catch { /* non-JSON */ }
+      // Must match the literal in app.py enforce_csrf -- keep in sync.
+      if (probe && probe.detail === 'Invalid or missing CSRF token') {
+        await refreshCsrfToken();
+        if (csrfToken) headers['X-CSRF-Token'] = csrfToken;
+        res = await fetch(path, { credentials: 'same-origin', ...opts, headers });
+        if (res.status === 401) { showLogin(); throw new Error('Not signed in'); }
+      }
+    }
     let data = null;
     try { data = await res.json(); } catch { /* non-JSON */ }
     if (!res.ok) {

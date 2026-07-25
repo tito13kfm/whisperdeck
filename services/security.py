@@ -17,7 +17,21 @@ from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 # ── CSRF Protection ────────────────────────────────────────────────────────
 
 def generate_csrf_token(session: dict) -> str:
-    """Generate a CSRF token, store it in the session, and return it."""
+    """Return the session's CSRF token, generating one only if none exists yet."""
+    existing = session.get("csrf_token")
+    if existing:
+        return existing
+    token = secrets.token_hex(32)
+    session["csrf_token"] = token
+    return token
+
+
+def rotate_csrf_token(session: dict) -> str:
+    """Generate a fresh CSRF token, replacing any existing one.
+
+    Use on privilege escalation (login, register, password reset) to prevent session-fixation
+    attacks where an anonymous-session token survives into an authenticated session.
+    """
     token = secrets.token_hex(32)
     session["csrf_token"] = token
     return token
