@@ -176,3 +176,37 @@ gh issue list --state open --json number,title | Out-File -Encoding utf8 $env:TE
 
 - **Glob tool cannot see dot-directories.** `glob(".opencode/**")` or `glob("**/.opencode/*")` returns nothing — the tool silently skips paths starting with `.`. Use `Get-ChildItem -Force` (PowerShell) as a fallback when searching inside `.opencode/`, `.claude/`, `.omo/`, or any hidden directory.
 - **Project config (`oh-my-openagent.jsonc`) lives in a dot-directory AND overrides global config.** Always check `.opencode/oh-my-openagent.jsonc` for agent/category model settings before concluding a model is "hardcoded." The global `~/.config/opencode/oh-my-openagent.json` is the fallback.
+
+
+## File editing on Windows: use bash + sed, NEVER PowerShell
+
+PowerShell text manipulation silently corrupts files in this project:
+- `$()` interpolation eats JavaScript jQuery calls (`$(''rail-operator'')`)
+- `@""@` here-strings interpolate variables; `@''''@` here-strings use CRLF against LF files
+- `Set-Content` / `Out-File` convert line endings
+- `gh pr create --body` argument splitting with special characters
+- Every workaround introduces a new edge case
+
+### File content replacements — use git-bash sed
+
+```bash
+# Single-line edit (line 228, replace content):
+sed -i "228s/OLD_TEXT/NEW_TEXT/" static/rack.js
+
+# Multi-line block replacement via temp file:
+cat > /tmp/replacement.js << 'HEREDOC'
+async function checkAuth() {
+  ...
+}
+HEREDOC
+# ... sed to insert at specific line range
+```
+
+### Why this works
+- `sed -i` preserves line endings exactly (no LF↔CRLF conversion)
+- Single-quoted heredocs (`<< 'EOF'`) zero interpolation
+- git-bash's sed is real GNU sed — no PowerShell argument-passing bugs
+- Works for Python, JavaScript, any text file with any special characters
+
+### PowerShell is fine for: git commands, running scripts, process management, file system ops (Test-Path, Get-ChildItem), API calls (Invoke-RestMethod)
+### PowerShell is NEVER for: editing file contents, text replacements, writing heredocs into files
