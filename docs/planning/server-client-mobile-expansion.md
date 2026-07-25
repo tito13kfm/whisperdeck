@@ -45,6 +45,32 @@ Before writing a line of custom mobile code: try one of those. If it's good enou
 use, a custom app isn't justified. If it's genuinely too janky, that's real evidence a purpose
 built app earns its cost, not just an assumption going in.
 
+The front end this capture app needs, if it does get built, is small: one button, tap to start
+recording when a meeting starts, tap to stop, file gets queued for LAN sync. No on-device STT,
+no in-app playback or editing, WhisperDeck does the actual work later.
+
+Whether that button needs to be a custom app or can just be the phone's own voice recorder is
+part of the same OS-native validation, and there's a concrete snag on iOS worth checking
+directly: Voice Memos recordings live in the app's own sandboxed storage, not a Files/iCloud
+Drive folder a Shortcuts automation can passively watch. Getting a recording out today means an
+explicit "share to Files" tap per meeting, which brings back the exact per-note friction the
+one-button idea is trying to remove. If that turns out to be true in practice, the concrete
+case for a minimal custom app is "save directly somewhere the LAN sync can pick up
+automatically," not "start recording" itself. Android is less of a concern here since app
+storage is generally more open to Tasker/Syncthing.
+
+Two more things to validate for real, not assume:
+
+- **Background recording for the length of an actual meeting.** iOS needs a specific
+  background-audio entitlement to keep recording once the app isn't in the foreground, and
+  interruptions (phone calls, lock screen, battery drain over an hour-plus) are the kind of
+  thing that's fine in a two-minute demo and flaky in practice.
+- **Phone-mic audio quality against diarization.** Pyannote's speaker separation is sensitive to
+  mic quality and placement; a phone lying flat on a conference table is a different signal
+  than whatever source has been feeding diarization so far. Not assumed to be a blocker, just
+  another case for the "validate against real, messy audio" step below, not a clean test
+  recording.
+
 ### 2. Intent routing / autonomous action execution
 
 The risky part of the original pitch: an LLM parses an unstructured, rambling voice note and
@@ -109,7 +135,10 @@ second database backend once migrations are engine-agnostic.
 ## Suggested validation order, if this ever gets picked back up
 
 1. Try an OS-native automation (Shortcuts/Tasker/Syncthing) for LAN-only capture-and-sync
-   before writing any app code.
+   before writing any app code. Specifically check whether a recording can reach the watched
+   sync folder without a manual per-file export step (the Voice Memos snag above), whether
+   background recording survives a real hour-plus meeting, and how diarization holds up on
+   phone-mic audio.
 2. Add Alembic migrations against current SQLite. Pure risk reduction, no user-visible change.
 3. Build the intent-extraction job type on the existing queue infrastructure: structured,
    multi-item output, rendered per target as copyable text, nothing executed automatically.
