@@ -51,7 +51,7 @@ from services.llm_jobs import (
 from services.relabel import record_relabel, latest_relabel
 from backends import list_providers, get_provider, LOCAL_PROVIDERS
 from services.security import (
-    generate_csrf_token, validate_csrf_token,
+    generate_csrf_token, rotate_csrf_token, validate_csrf_token,
     rate_limiter, encrypt_api_key, decrypt_api_key,
 )
 
@@ -181,6 +181,8 @@ async def enforce_csrf(request: Request, call_next):
     if request.method not in _CSRF_SAFE_METHODS and request.url.path.startswith("/api/"):
         csrf = request.headers.get("x-csrf-token") or ""
         if not validate_csrf_token(request.session, csrf):
+            # This literal string is matched by the client retry logic in rack.js api().
+            # Keep the two in sync.
             return JSONResponse(status_code=403, content={"detail": "Invalid or missing CSRF token"})
     return await call_next(request)
 
@@ -323,9 +325,10 @@ def _serialize_summary(s: Summary) -> dict:
 
 @app.get("/api/csrf-token")
 async def csrf_token(request: Request):
-    """Return a fresh CSRF token — the frontend reads this once and submits
-    it as X-CSRF-Token on every mutation request. A new token is generated
-    each call; the old one remains valid until a new one replaces it."""
+    """Return the session's CSRF token for the X-CSRF-Token header.
+    Generates one on first call per session; subsequent calls return the same token.
+    Login and register rotate the token for session-fixation protection.
+    The frontend caches it and re-fetches on auth state changes."""
     token = generate_csrf_token(request.session)
     return {"token": token}
 
@@ -345,6 +348,7 @@ async def register(request: Request, data: dict = Body(...), db: Session = Depen
         raise HTTPException(status_code=400, detail="Username already taken")
     user = create_user(db, username, password)
     request.session["user_id"] = user.id
+    rotate_csrf_token(request.session)
     return {"ok": True, "username": user.username}
 
 
@@ -359,6 +363,7 @@ async def login(request: Request, data: dict = Body(...), db: Session = Depends(
     if not user:
         raise HTTPException(status_code=401, detail="Invalid username or password")
     request.session["user_id"] = user.id
+    rotate_csrf_token(request.session)
     return {"ok": True, "username": user.username}
 
 
@@ -421,6 +426,7 @@ async def reset_password_route(request: Request, data: dict = Body(...), db: Ses
     if not user:
         raise HTTPException(status_code=400, detail="Invalid or expired reset token")
     request.session["user_id"] = user.id
+    rotate_csrf_token(request.session)
     return {"ok": True, "username": user.username}
 
 
@@ -664,6 +670,7 @@ async def _run_transcription_pipeline(
     language: str,
     temperature: float,
     diarize: bool,
+    auto_correct: Optional[bool] = None,
     num_speakers: Optional[int],
     source_transcript_id: Optional[int] = None,
     kind: str = "meeting",
@@ -891,7 +898,9 @@ async def _run_transcription_pipeline(
 
         # Post-hoc correction pass — queued as a background LlmJob (visible
         # on the Queue screen) instead of blocking this response.
-        if user_settings.get("auto_correct", True):
+        if auto_correct is None:
+            auto_correct = user_settings.get("auto_correct", True)
+        if auto_correct:
             enqueue_auto_correction(db, transcript, user_settings)
         enqueue_auto_classify(db, transcript, user_settings)
 
@@ -914,6 +923,7 @@ async def transcribe_audio(
     language: str = Form("en"),
     temperature: float = Form(0.0),
     diarize: bool = Form(False),
+    auto_correct: Optional[bool] = Form(None),
     num_speakers: Optional[int] = Form(None),
     context_doc: Optional[str] = Form(None),
     kind: str = Form("meeting"),
@@ -957,6 +967,7 @@ async def transcribe_audio(
         language=language,
         temperature=temperature,
         diarize=diarize,
+        auto_correct=auto_correct,
         num_speakers=num_speakers,
         kind=kind,
         capture_source=capture_source,
@@ -1300,6 +1311,8 @@ async def retranscribe_transcript(
             detail="No stored audio for this transcript — it predates audio retention or the file was removed",
         )
     root_id = t.source_transcript_id or t.id
+    user_settings = get_user_settings(db, current_user.id)
+    retranscribe_auto_correct = user_settings.get("auto_correct", True)
     return await _run_transcription_pipeline(
         db, current_user, Path(t.audio_path),
         filename=t.filename,
@@ -1312,6 +1325,7 @@ async def retranscribe_transcript(
         num_speakers=num_speakers if num_speakers is not None else t.num_speakers,
         source_transcript_id=root_id,
         kind=t.kind or "meeting",
+        auto_correct=retranscribe_auto_correct,
     )
 
 

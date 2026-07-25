@@ -10,13 +10,16 @@ async def _stub_transcribe(db, user_id, **kwargs):
     return t
 
 
-def _upload(client, provider="groq"):
+def _upload(client, provider="groq", auto_correct=None):
+    data = {"provider": provider}
+    if auto_correct is not None:
+        data["auto_correct"] = "true" if auto_correct else "false"
     with patch("app.transcode_for_upload", AsyncMock(side_effect=lambda path, *a, **k: path)), \
          patch("app.transcription_service.transcribe", AsyncMock(side_effect=_stub_transcribe)):
         return client.post(
             "/api/transcribe",
             files={"file": ("meeting.mp3", io.BytesIO(b"fake audio bytes"), "audio/mpeg")},
-            data={"provider": provider},
+            data=data,
         )
 
 
@@ -39,6 +42,27 @@ def test_auto_correct_skipped_when_setting_disabled(client):
     client.put("/api/providers/groq", json={"api_key": "fake-groq-key"})
     client.put("/api/settings", json={"auto_correct": False})
 
+    response = _upload(client)
+
+    assert response.status_code == 200
+    assert response.json()["correction_job"] is None
+
+
+def test_auto_correct_per_job_false_overrides_global_true(client):
+    client.put("/api/providers/groq", json={"api_key": "fake-groq-key"})
+    client.put("/api/settings", json={"auto_correct": True})
+
+    response = _upload(client, auto_correct=False)
+
+    assert response.status_code == 200
+    assert response.json()["correction_job"] is None
+
+
+def test_auto_correct_field_omitted_falls_back_to_global_setting(client):
+    client.put("/api/providers/groq", json={"api_key": "fake-groq-key"})
+    client.put("/api/settings", json={"auto_correct": False})
+
+    # no auto_correct field sent at all — caller predates the per-job toggle
     response = _upload(client)
 
     assert response.status_code == 200

@@ -35,6 +35,8 @@ const S = {
   langIdx: 0,
   diarize: true,
   autoCorrect: false,
+  correctionPending: false,   // true while a non-blocking post-completion auto-correct poll is watching this run
+  correctionStatus: null,     // pending | running | completed | failed — mirrors the run's correction_job.status
   mode: 'meeting',            // meeting | dictation — dictation skips diarization, unlocks reformat actions on the detail page
   // live capture
   capturing: false,
@@ -222,8 +224,21 @@ async function api(path, opts = {}) {
   if (isMutation && csrfToken) headers['X-CSRF-Token'] = csrfToken;
   setInFlight(1);
   try {
-    const res = await fetch(path, { credentials: 'same-origin', ...opts, headers });
+    let res = await fetch(path, { credentials: 'same-origin', ...opts, headers });
     if (res.status === 401) { showLogin(); throw new Error('Not signed in'); }
+    // One-shot CSRF retry: if another tab rotated the token (login, register),
+    // refresh and retry once instead of failing silently (issue #51).
+    if (res.status === 403 && isMutation) {
+      let probe = null;
+      try { probe = await res.clone().json(); } catch { /* non-JSON */ }
+      // Must match the literal in app.py enforce_csrf -- keep in sync.
+      if (probe && probe.detail === 'Invalid or missing CSRF token') {
+        await refreshCsrfToken();
+        if (csrfToken) headers['X-CSRF-Token'] = csrfToken;
+        res = await fetch(path, { credentials: 'same-origin', ...opts, headers });
+        if (res.status === 401) { showLogin(); throw new Error('Not signed in'); }
+      }
+    }
     let data = null;
     try { data = await res.json(); } catch { /* non-JSON */ }
     if (!res.ok) {
@@ -350,7 +365,37 @@ function statusView(t) {
   }
   const cells = [];
   for (let i = 0; i < 11; i++) cells.push({ on: color !== null && i < lit, color });
-  return { cells, nix, nixVariant, word, color: color || 'var(--label-dim)', pct, status };
+  // Per-stage segments (issue #70): only for chunked runs, where chunks_done/
+  // chunks_total give a real boundary to derive stages from — mirrors
+  // pollTranscript's own S.stage inference (rack.js pollTranscript) so the
+  // Transcribe deck's stageLeds() and this bank-row view can't disagree.
+  // Single-shot runs have no chunk data to derive stage boundaries from, so
+  // they keep the 11-cell percent bar above instead (segments stays null).
+  const segments = stageSegmentsFromQueueStatus(word, qs, t.diarize_requested);
+  return { cells, nix, nixVariant, word, color: color || 'var(--label-dim)', pct, status, segments };
+}
+
+function stageSegmentsFromQueueStatus(word, qs, diarizeRequested) {
+  if (!qs || !qs.chunks_total) return null;
+  const total = qs.chunks_total, done = qs.chunks_done || 0;
+  let st;
+  if (word === 'done') st = 'done';
+  else if (word === 'queued') st = 'upload';
+  else if (done >= total) st = diarizeRequested ? 'diarize' : 'finalize';
+  else if (qs.state === 'transcribing' || done > 0) st = 'transcribe';
+  else st = 'upload';
+  return [
+    { label: 'Initialize', done: st !== 'upload', on: st === 'upload' },
+    { label: 'Transcribe', done: st === 'diarize' || st === 'finalize' || st === 'done', on: st === 'transcribe' },
+    { label: 'Diarize', done: st === 'finalize' || st === 'done', on: st === 'diarize' },
+    { label: 'Finalize', done: st === 'done', on: st === 'finalize' },
+  ];
+}
+
+// 4-cell stage-segment bar, reusing .bargraph/.bargraph>span.on as-is.
+function stageSegmentBar(segments, height = 16) {
+  const cells = segments.map(d => ({ on: d.done || d.on, color: d.done ? GREEN : d.on ? AMBER : null }));
+  return bargraph(cells, height);
 }
 
 /* ══════════════════ navigation ══════════════════ */
@@ -457,7 +502,53 @@ function styledPrompt(message, defaultValue) {
 }
 
 /* ══════════════════ auth ══════════════════ */
+// Every path back to the login screen (explicit logout, a 401 mid-session,
+// or checkAuth() finding no session on page load) routes through here, so
+// this is the one place to clear per-account state — otherwise the next
+// account to sign in inherits the previous account's deck status, detail
+// view, and caches (issue #54).
+function resetDeckState() {
+  S.user = null;
+  S.isAdmin = false;
+  S.detailId = null;
+  S.detailTab = 'transcript';
+  S.query = '';
+  S.bankQuery = '';
+  S.tapeLoaded = false;
+  S.tapeName = '';
+  S.tapeFile = null;
+  S.tapeIsLiveStereo = false;
+  S.running = false;
+  S.runningId = null;
+  S.pct = 0;
+  S.stage = null;
+  S.jobStartedAt = null;
+  S.indeterminate = false;
+  S.jobDone = false;
+  S.doneId = null;
+  S.doneDuration = null;
+  // providerIdx is intentionally left alone: ensureProviders() owns picking
+  // firstReady and early-returns once S.providers is populated, so forcing
+  // this to 0 here would only match a fresh page load by coincidence.
+  S.modelIdx = 0;
+  S.langIdx = 0;
+  S.diarize = true;
+  S.autoCorrect = false;
+  S.correctionPending = false;
+  S.correctionStatus = null;
+  S.mode = 'meeting';
+  S.capturing = false;
+  S.stereoLive = false;
+  S.permPending = false;
+  stopCorrectionPoll();
+  detailData = null;
+  bankListCache = [];
+  seedClips = {};
+  expandedVoice = null;
+}
+
 function showLogin() {
+  resetDeckState();
   // #video-dock lives outside #app-shell (so it survives renderDetail()),
   // which also means hiding app-shell alone leaves it floating over the
   // login screen — close it explicitly.
@@ -755,56 +846,66 @@ async function loadDashboard() {
   scheduleDashPoll();
 }
 
+// Real job `kind` values (services/llm_jobs.py VALID_KINDS + the transcription
+// queue entry's own 'transcription') mapped to the dashboard's pipeline lights.
+// There is no distinct 'diarize' kind \u2014 initial diarization runs inline inside
+// the transcription entry, so it has no light of its own here (only the rare,
+// user-triggered 'rediarize' is separate, and isn't shown on this strip).
+const DASH_STAGE_KINDS = [
+  { light: 'transcribe', kind: 'transcription' },
+  { light: 'correct', kind: 'correction' },
+  { light: 'summarize', kind: 'summary' },
+  { light: 'voicematch', kind: 'voice_match' },
+];
+
 async function loadDashboardJobs() {
   var data;
   try { data = await api('/api/jobs?limit=20'); } catch { return; }
   var jobs = data && data.jobs || [];
   var active = jobs.filter(function(j) { return j.status === 'running' || j.status === 'pending'; });
+  INST.dashActive = active.length > 0;
   var wrap = $('dash-activity');
-  if (!active.length) {
-    clearTimeout(dashPollTimer);
-    if (wrap) wrap.style.display = 'none';
-    return;
-  }
-  var title = active[0].title || 'Untitled';
-  var repeated = (escapeHtml(title) + '  \u00B7  ').repeat(4).trimEnd();
-  var stages = ['transcribe', 'diarize', 'correct', 'summarize', 'voicematch'];
-  var activeKinds = {};
-  active.forEach(function(j) {
-    if (j.kind === 'voice_match') activeKinds.voicematch = true;
-    else activeKinds[j.kind] = true;
-  });
-  var stageHtml = stages.map(function(s) {
-    var lit = !!activeKinds[s];
-    return '<span class="dash-stage-light' + (lit ? ' active' : '') + '" data-stage="' + s + '"></span>'
-      + '<span class="dash-stage-label">' + s + '</span>';
-  }).join('');
   if (!wrap) {
     var stats = $('dash-stats');
     if (!stats) return;
-    var div = document.createElement('div');
-    div.id = 'dash-activity';
-    div.className = 'dash-activity';
-    div.innerHTML =
-      '<div class="dash-activity-head"><span class="led-dot" style="background:var(--amber);box-shadow:0 0 5px var(--amber)"></span>Live</div>'
+    wrap = document.createElement('div');
+    wrap.id = 'dash-activity';
+    wrap.className = 'dash-activity unit';
+    wrap.innerHTML =
+      '<div class="dash-activity-head"></div>'
       + '<div class="dash-activity-body">'
-      + '<div class="dash-ticker-wrap"><span class="dash-ticker-text">' + repeated + '</span></div>'
+      + '<div class="dash-ticker-wrap"><span class="dash-ticker-text"></span></div>'
       + '<div id="dash-vu" class="dash-vu-wrap"></div>'
       + '</div>'
       + '<div class="dash-stage-lights">'
       + '<span class="dash-stage-label">Pipeline:</span>'
-      + stageHtml
+      + DASH_STAGE_KINDS.map(function(s) {
+          return '<span class="dash-stage-light" data-stage="' + s.light + '"></span>'
+            + '<span class="dash-stage-label">' + s.light + '</span>';
+        }).join('')
       + '</div>';
-    stats.insertAdjacentElement('afterend', div);
-  } else {
-    wrap.style.display = '';
-    var ticker = wrap.querySelector('.dash-ticker-text');
-    if (ticker) ticker.textContent = repeated;
-    var lights = wrap.querySelectorAll('.dash-stage-light');
-    lights.forEach(function(lt) {
-      lt.classList.toggle('active', !!activeKinds[lt.dataset.stage]);
-    });
+    stats.insertAdjacentElement('afterend', wrap);
   }
+  wrap.classList.toggle('dash-activity--active', INST.dashActive);
+  var head = wrap.querySelector('.dash-activity-head');
+  head.innerHTML = INST.dashActive
+    ? '<span class="led-dot led-dot--on" style="--led-color:var(--amber);box-shadow:0 0 5px var(--amber)"></span>Live'
+    : '<span class="led-dot"></span>Standby';
+  var ticker = wrap.querySelector('.dash-ticker-text');
+  if (INST.dashActive) {
+    var title = active[0].title || 'Untitled';
+    ticker.textContent = (escapeHtml(title) + '  \u00B7  ').repeat(4).trimEnd();
+    ticker.classList.toggle('scroll', motionAllowed());
+  } else {
+    ticker.textContent = 'No active jobs';
+    ticker.classList.remove('scroll');
+  }
+  var activeKinds = {};
+  active.forEach(function(j) { activeKinds[j.kind] = true; });
+  wrap.querySelectorAll('.dash-stage-light').forEach(function(lt) {
+    var entry = DASH_STAGE_KINDS.find(function(s) { return s.light === lt.dataset.stage; });
+    lt.classList.toggle('active', !!(entry && activeKinds[entry.kind]));
+  });
   if (!INST.scopeInit) dashInitVu();
 }
 
@@ -834,22 +935,33 @@ function scheduleDashPoll() {
   }, 3000);
 }
 /* ══════════════════ transcribe: instruments (verbatim from prototype logic) ══════════════════ */
-const INST = { dt: 0, raf: null, vuMeters: {}, scopeInit: false, driveMic: null, driveSys: null };
+const INST = { dt: 0, raf: null, vuMeters: {}, scopeInit: false, driveMic: null, driveSys: null, dashActive: false };
 
 function instrumentsActive() { return S.running || S.capturing; }
+
+// 'dash' has no real signal (background jobs carry no audio) — it's driven by
+// whether any job is active per the last /api/jobs poll, purely decorative.
+function vuActive(key) { return key === 'dash' ? INST.dashActive : instrumentsActive(); }
 
 function drawVU(canvas, key) {
   const ctx = canvas.getContext('2d');
   const w = canvas.width, h = canvas.height;
   const m = INST.vuMeters[key] || (INST.vuMeters[key] = { v: 0, target: 0, next: 0 });
-  // during live capture the drive is the real analyser level for this channel
-  const override = key === 'mic' ? INST.driveMic : INST.driveSys;
-  const drive = instrumentsActive() ? (override ?? 0.75) : 0.03;
-  if (INST.dt > m.next) {
-    m.target = Math.min(1, drive * (0.3 + Math.random() * 0.7) + (Math.random() < 0.1 ? 0.2 * drive : 0));
-    m.next = INST.dt + 0.12 + Math.random() * 0.32;
+  const active = vuActive(key);
+  if (key === 'dash' && !motionAllowed()) {
+    // decorative jitter is motion; the active/idle level itself is state, so it
+    // still shows, just as a still needle rather than a wandering one.
+    m.target = m.v = active ? 0.5 : 0.03;
+  } else {
+    // during live capture the drive is the real analyser level for this channel
+    const override = key === 'mic' ? INST.driveMic : key === 'sys' ? INST.driveSys : null;
+    const drive = active ? (override ?? 0.75) : 0.03;
+    if (INST.dt > m.next) {
+      m.target = Math.min(1, drive * (0.3 + Math.random() * 0.7) + (Math.random() < 0.1 ? 0.2 * drive : 0));
+      m.next = INST.dt + 0.12 + Math.random() * 0.32;
+    }
+    m.v += (m.target - m.v) * (m.target > m.v ? 0.3 : 0.06);
   }
-  m.v += (m.target - m.v) * (m.target > m.v ? 0.3 : 0.06);
 
   const g = ctx.createLinearGradient(0, 0, 0, h);
   g.addColorStop(0, '#F3E9C9');
@@ -857,7 +969,7 @@ function drawVU(canvas, key) {
   ctx.fillStyle = g;
   ctx.fillRect(0, 0, w, h);
   const lamp = ctx.createRadialGradient(w / 2, h * 0.15, 8, w / 2, h * 0.15, w * 0.7);
-  lamp.addColorStop(0, instrumentsActive() ? 'rgba(255,196,110,0.26)' : 'rgba(255,196,110,0.10)');
+  lamp.addColorStop(0, active ? 'rgba(255,196,110,0.26)' : 'rgba(255,196,110,0.10)');
   lamp.addColorStop(1, 'rgba(255,196,110,0)');
   ctx.fillStyle = lamp;
   ctx.fillRect(0, 0, w, h);
@@ -1142,6 +1254,7 @@ async function renderTranscribe() {
       <div style="display:flex;align-items:center;gap:22px;padding:14px 26px;flex-wrap:wrap">
         <div id="tx-meter-leds" class="bargraph" style="height:16px;flex:1;min-width:180px"></div>
         <span id="tx-meter-nix"></span>
+        <span id="tx-meter-elapsed"></span>
         <div style="display:flex;gap:18px" id="tx-stages"></div>
         <button class="btn btn--red" id="tx-cancel">✕ Cancel — resumable later</button>
       </div>
@@ -1310,9 +1423,19 @@ function stageLeds() {
     { label: 'Diarize', done: st === 'finalize', on: st === 'diarize' },
     { label: 'Finalize', done: false, on: st === 'finalize' },
   ];
+  // Non-blocking 5th stage: only appears once a run's auto-correct pass is
+  // actually being tracked (see pollCorrectionStatus) — never a dead slot.
+  if (S.correctionPending || S.correctionStatus) {
+    defs.push({
+      label: 'Correct',
+      done: S.correctionStatus === 'completed',
+      on: S.correctionPending && S.correctionStatus !== 'completed',
+      fault: S.correctionStatus === 'failed',
+    });
+  }
   return defs.map(d => `
     <div style="display:flex;flex-direction:column;align-items:center;gap:4px">
-      ${ledDot(d.done ? GREEN : d.on ? AMBER : null, d.done || d.on, 7)}
+      ${ledDot(d.fault ? RED : d.done ? GREEN : d.on ? AMBER : null, d.fault || d.done || d.on, 7)}
       <div style="font-family:var(--f-mono);font-size:9px;text-transform:uppercase;color:var(--label-dim)">${d.label}</div>
     </div>`).join('');
 }
@@ -1409,8 +1532,9 @@ function syncTranscribe() {
         : 'Load a tape to arm the transport';
   }
 
-  // meter row
-  $('tx-meter').style.display = S.running ? '' : 'none';
+  // meter row — stays visible past the run's own completion while a
+  // non-blocking auto-correct poll is still watching this transcript (2.2).
+  $('tx-meter').style.display = (S.running || S.correctionPending) ? '' : 'none';
   if (S.running) {
     if (S.indeterminate) {
       // no chunk data — one amber "working" cell + elapsed clock, never a fake %
@@ -1418,19 +1542,28 @@ function syncTranscribe() {
         ? '<span style="background:' + AMBER + ';box-shadow:0 0 4px ' + AMBER + '"></span>'
         : '<span></span>').join('');
       $('tx-meter-nix').outerHTML = '<span id="tx-meter-nix">' + nixie(formatTime((Date.now() - S.jobStartedAt) / 1000)) + '</span>';
+      $('tx-meter-elapsed').outerHTML = '<span id="tx-meter-elapsed"></span>';
     } else {
       const lit = Math.round(S.pct / 100 * 11);
       $('tx-meter-leds').innerHTML = [...Array(11)].map((_, i) => i < lit
         ? '<span style="background:' + AMBER + ';box-shadow:0 0 4px ' + AMBER + '"></span>'
         : '<span></span>').join('');
       $('tx-meter-nix').outerHTML = '<span id="tx-meter-nix">' + nixie(S.pct + '%') + '</span>';
+      // secondary readout alongside percent — dim so it doesn't compete with it
+      $('tx-meter-elapsed').outerHTML = '<span id="tx-meter-elapsed">' + nixie(formatTime((Date.now() - S.jobStartedAt) / 1000), 'dim') + '</span>';
     }
     $('tx-stages').innerHTML = stageLeds();
     // Cancel is only real once the backend knows the transcript (chunked
     // runs). A sync run in flight has nothing cancellable — say so.
     const cancelBtn = $('tx-cancel');
+    cancelBtn.style.display = '';
     cancelBtn.disabled = !S.runningId;
     cancelBtn.title = S.runningId ? '' : "Quick local jobs can't be cancelled — this finishes on its own";
+  } else if (S.correctionPending) {
+    // trailing state: leds/nixies stay frozen at their last (100%) values;
+    // only the Correct dot is still live. Nothing here is cancellable.
+    $('tx-stages').innerHTML = stageLeds();
+    $('tx-cancel').style.display = 'none';
   }
 
   // signal path
@@ -1520,6 +1653,7 @@ async function startJob() {
   form.append('language', lang === 'Auto-detect' ? 'auto' : lang.toLowerCase().slice(0, 2));
   form.append('temperature', ($('tx-temp') && $('tx-temp').value) || '0');
   form.append('diarize', S.mode === 'dictation' ? 'false' : (S.diarize ? 'true' : 'false'));
+  form.append('auto_correct', S.autoCorrect ? 'true' : 'false');
   form.append('kind', S.mode);
   const n = $('tx-speakers') && $('tx-speakers').value.trim();
   if (n) form.append('num_speakers', n);
@@ -1534,6 +1668,9 @@ async function startJob() {
   S.stage = 'upload';
   S.jobStartedAt = Date.now();
   S.indeterminate = false;
+  stopCorrectionPoll();
+  S.correctionPending = false;
+  S.correctionStatus = null;
   startTxTicker();
   syncTranscribe();
   try {
@@ -1552,6 +1689,18 @@ async function startJob() {
     // Transcribe deck to load the next tape), so this is the only chance to
     // refresh the rail badge/storage meter for a job watched in place.
     refreshRailChrome();
+    // Non-blocking Correct indicator (2.2): the run itself already reported
+    // done above — this only starts a side poll to light/clear a 5th stage
+    // dot once the auto-correct pass (enqueued as part of the same pipeline
+    // run) finishes. It never delays the toast or deck unlock.
+    const cj = finalData.correction_job;
+    if (S.autoCorrect && cj && !['completed', 'failed'].includes(cj.status)) {
+      S.correctionPending = true;
+      S.correctionStatus = cj.status;
+      pollCorrectionStatus(finalData.id);
+    } else if (cj) {
+      S.correctionStatus = cj.status;
+    }
     if (finalData.status === 'cancelled') {
       toast('Transcription cancelled — resume from the channel bank', 'info');
       S.pct = 0;
@@ -1606,6 +1755,39 @@ async function pollTranscript(id) {
     if (S.page === 'transcribe') syncTranscribe();
     await new Promise(res => setTimeout(res, 2000));
   }
+}
+
+let correctionPollTimer = null;
+let correctionPollGen = 0;
+
+function stopCorrectionPoll() {
+  clearTimeout(correctionPollTimer);
+  correctionPollTimer = null;
+  correctionPollGen++; // invalidates any in-flight tick from a prior run
+}
+
+// Page-scoped, non-blocking: watches a completed run's auto-correct job so the
+// 5th "Correct" stage dot can light/clear without gating the run's own
+// completion (see startJob's 2.2 comment for why this isn't inside pollTranscript).
+async function pollCorrectionStatus(id) {
+  const gen = ++correctionPollGen;
+  async function tick() {
+    if (gen !== correctionPollGen) return; // superseded by a newer run
+    try {
+      const data = await api('/api/transcripts/' + id);
+      const cj = data.correction_job;
+      S.correctionStatus = cj ? cj.status : null;
+      if (!cj || ['completed', 'failed'].includes(cj.status)) {
+        S.correctionPending = false;
+        if (S.page === 'transcribe') syncTranscribe();
+        return;
+      }
+    } catch { /* transient — retry next tick */ }
+    if (gen !== correctionPollGen) return;
+    if (S.page === 'transcribe') syncTranscribe();
+    correctionPollTimer = setTimeout(tick, 2000);
+  }
+  tick();
 }
 
 async function cancelJob() {
@@ -1942,7 +2124,7 @@ function renderBankRows(preservedOpenIds) {
           <div style="font-weight:600;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(t.title || t.filename || 'Untitled')}</div>
           <div style="font-family:var(--f-mono);font-size:11px;color:var(--label-dim);margin-top:2px">${escapeHtml(transcriptMeta(t))} · click to expand</div>
         </div>
-        ${bargraph(sv.cells, 16)}
+        ${sv.segments ? stageSegmentBar(sv.segments) : bargraph(sv.cells, 16)}
         <div style="display:flex;flex-direction:column;align-items:flex-end;gap:3px">
           ${nixie(sv.nix, sv.nixVariant)}
           <div class="status-badge status-badge--${escapeHtml(sv.word)}" data-word="${escapeHtml(sv.word)}">${escapeHtml(sv.word)}</div>
