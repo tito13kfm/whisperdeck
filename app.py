@@ -17,7 +17,7 @@ import secrets
 
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Query, Body, Depends, Request
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import JSONResponse, FileResponse, HTMLResponse
+from fastapi.responses import Response, JSONResponse, FileResponse, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
