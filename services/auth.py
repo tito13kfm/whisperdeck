@@ -168,20 +168,6 @@ def get_all_users(db) -> list[dict]:
     ]
 
 
-def password_min_length() -> int:
-    """Read and validate PASSWORD_MIN_LENGTH from the environment.
-    Falls back to 8 if unset or non-numeric; clamps to >= 1 so a
-    misconfiguration cannot silently disable the length check.
-    Single source of truth — the route injects this into the page
-    meta tag so the client and hint text read from the same value.
-    """
-    try:
-        min_length = int(os.environ.get("PASSWORD_MIN_LENGTH", "8"))
-    except (ValueError, TypeError):
-        min_length = 8
-    return max(min_length, 1)
-
-
 def validate_password(password: str) -> tuple[bool, str]:
     """Validate password against the minimum policy.
     Returns (ok, reason). Reads PASSWORD_MIN_LENGTH at call time (not import)
@@ -191,7 +177,12 @@ def validate_password(password: str) -> tuple[bool, str]:
     the client-side mirror in rack.js (avoids a Unicode/regex asymmetry
     where non-ASCII letters pass server but fail client pre-check).
     """
-    min_length = password_min_length()
+    try:
+        min_length = int(os.environ.get("PASSWORD_MIN_LENGTH", "8"))
+    except (ValueError, TypeError):
+        min_length = 8
+    if min_length < 1:
+        min_length = 1
     if len(password) < min_length:
         return False, f"Password must be at least {min_length} characters"
     has_letter = any(c.isascii() and c.isalpha() for c in password)

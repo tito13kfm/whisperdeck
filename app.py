@@ -27,8 +27,7 @@ from sqlalchemy.orm import Session
 from database import init_db, backfill_user_id, Transcript, Summary, VoiceProfile, VoiceClip, ProviderConfig, User, LlmJob, TranscriptionJob, utcnow_naive
 from services.auth import (
     get_or_create_fallback_user, create_user, authenticate_user, validate_password,
-    password_min_length, get_user_by_reset_token,
-    list_usernames, generate_reset_token, reset_password,
+    get_user_by_reset_token, list_usernames, generate_reset_token, reset_password,
     set_admin_status, get_all_users,
 )
 from services.settings import get_user_settings, update_user_settings
@@ -2194,12 +2193,7 @@ async def index():
     """Serve the SPA frontend."""
     index_path = BASE_DIR / "static" / "index.html"
     if index_path.exists():
-        html = index_path.read_text(encoding="utf-8")
-        html = html.replace(
-            '<meta name="wd-password-min-length" content="8">',
-            f'<meta name="wd-password-min-length" content="{password_min_length()}">',
-        )
-        return HTMLResponse(html)
+        return HTMLResponse(index_path.read_text(encoding="utf-8"))
     return HTMLResponse("<h1>WhisperDeck</h1><p>Frontend not built yet.</p>")
 
 
