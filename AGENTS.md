@@ -32,62 +32,90 @@ This project is configured with advisor subagents for plan validation and unstuc
 ### ClinePass limit fallback
 When ClinePass hits usage limits, switch the primary model via `/models` to `openrouter/deepseek/deepseek-v4-flash` (or `openrouter/deepseek/deepseek-chat`). Advisors already run on OpenRouter and don't need changes.
 
-## Unsloth Studio Server (Local Model Inference)
+## Lemonade Server (Local Model Inference)
 
-The `explore` agent depends on the Unsloth Studio server at `http://127.0.0.1:8888/v1`. When it is not running, explore agents hang silently with no timeout — the server must be started before using explore or scout subagents. Category delegations (`quick`, `visual-engineering`, `writing`, etc.) use OpenRouter and are not affected.
+The `explore`, `scout`, and `plan` agents use the Lemonade server at `http://localhost:13305/v1` — an OpenAI-compatible local inference server with dynamic model loading. When it is not running, these agents fall back silently until the server starts. Category delegations (`quick`, `visual-engineering`, `writing`, etc.) use OpenRouter and are not affected.
+
+### Why Lemonade over Unsloth Studio
+
+- **Dynamic model loading**: Load/unload models on-the-fly via API — no manual server restarts when switching between tasks.
+- **No tool-calling hallucinations**: Lemonade isolates tool execution from text generation. Unsloth required `--disable-tools` to prevent hallucinated tool calls; Lemonade handles this natively.
+- **Persistent recipe options**: `ctx_size` and backend saved to `recipe_options.json`, survives restarts.
+- **OpenAI-compatible API**: Standard `/v1/chat/completions`, `/v1/models`, etc.
 
 ### Checking if it is running
 
 ```powershell
-Invoke-RestMethod -Uri "http://127.0.0.1:8888/v1/models" -Headers @{"Authorization"="Bearer sk-unsloth-9be9b00467f065d8521794b4889d1fe4"}
+Invoke-RestMethod -Uri "http://localhost:13305/v1/models" -TimeoutSec 2
 ```
 
-A `loaded: true` entry in the response means the model is ready.
+A `data` array in the response means the server is alive. Check `/api/v1/health` for per-model load state.
 
 ### Starting the server
 
-**Default (Qwen3.5-4B, 260K context):**
+Lemonade starts with Windows and runs in the system tray. If it is not running, launch it from the Start Menu or run `lemonade` from a terminal. No CLI flags needed — all model configuration happens via the API or config files.
 
-```powershell
-Start-Process -FilePath "C:\Users\tito1\.unsloth\studio\bin\unsloth.exe" -ArgumentList "studio","run","--api-only","--disable-tools","--model","C:\Users\tito1\.unsloth\gguf\Qwen3.5-4B-UD-Q4_K_XL.gguf","--port","8888" -WindowStyle Minimized
-```
+### Available models
 
-**Fallback (Qwythos-9B, 100K context — for difficult reasoning tasks but limited file capacity):**
+| Model ID | Size | Context | Labels | Use |
+|---|---|---|---|---|
+| `Qwen3.5-4B-MTP-GGUF` | 3.7 GB | 260K (configurable) | reasoning, vision, mtp | **Default**: explore, scout |
+| `DeepSeek-Qwen3-8B-GGUF` | 5.3 GB | 128K | reasoning | plan, hard reasoning tasks |
+| `Bonsai-8B-gguf` | 1.2 GB | 64K | non-reasoning | title, summary, JSON output |
+| `Qwen3-0.6B-GGUF` | 0.4 GB | 40K | reasoning | trivial tasks, fast responses |
+| `DeepSeek-R1-Distill-Qwen-1.5B-GGUF-Q4_K_M` | 1.0 GB | 128K | reasoning | lightweight reasoning fallback |
+| `gpt-oss-20b-mxfp4-GGUF` | 12.1 GB | 128K | reasoning, ROCm | quality over speed (VRAM-heavy) |
+| `Qwen3-Coder-30B-A3B-Instruct-GGUF` | 19 GB | — | coding specialist | not currently used (too large) |
 
-```powershell
-Start-Process -FilePath "C:\Users\tito1\.unsloth\studio\bin\unsloth.exe" -ArgumentList "studio","run","--api-only","--disable-tools","--model","C:\Users\tito1\.unsloth\gguf\Qwythos-9B-Claude-Mythos-5-1M-MTP-Q8_0.gguf","--port","8888" -WindowStyle Minimized
-```
+### Model selection by task
 
-The model argument must be the absolute path to a `.gguf` file in `C:\Users\tito1\.unsloth\gguf\`. A HuggingFace repo ID (e.g. `unsloth/Qwen3.5-4B-MTP-GGUF`) does NOT work — the process stays at 5 MB and never loads the model. Loading takes 30-90 seconds.
-
-**`--disable-tools` is critical.** Without it, Unsloth's server-side tools swallow OpenCode's tool calls (grep, read, etc.), causing agents to hallucinate answers instead of actually searching the codebase. All models appeared broken until this flag was discovered.
-
-**`--max-seq-length` controls context window.** UnslothStudio passes this as `-c` to llama-server. The Qwen3.5-4B model defaults to ~260K at Q4; the Qwythos-9B supports up to 1M native context but the RX 9070 XT (16 GB) runs out of VRAM for KV cache above ~100K at Q8. Use `--max-seq-length <tokens>` to adjust. Larger context = more VRAM for KV cache. The model's `native_context_length` (from `GET /v1/models`) is the hard ceiling.
-
-**`--parallel` sets concurrent decode slots.** Each slot gets `context / parallel` tokens of KV cache. Limited to 2 on the RX 9070 XT (VRAM constraint). Never fire more than 2 explore agents simultaneously — the third+ will block or timeout.
-
-### Available local models
-
-| GGUF file | Size | Used by |
+| Agent | Recommended Model | Reasoning |
 |---|---|---|
-| `Qwythos-9B-Claude-Mythos-5-1M-MTP-Q8_0.gguf` | 9.1 GB | explore, scout, plan — fallback only; 100K context max on RX 9070 XT (VRAM) |
-| `Qwen3.5-4B-UD-Q4_K_XL.gguf` | 2.8 GB | explore, scout, plan — default; 260K context, proven reliable with `--disable-tools` |
-| `Qwen3.6-27B-UD-IQ3_XXS.gguf` | 11.4 GB | unused (categories switched to OpenRouter) |
-| `DeepSeek-R1-0528-Qwen3-8B-Q4_1.gguf` | 4.9 GB | unused, available as fallback |
-| `Qwen3-Coder-30B-A3B-Instruct-UD-Q3_K_XL.gguf` | 12.9 GB | unused, available as fallback |
-| `Devstral-Small-2-24B-Instruct-2512-Q3_K_M.gguf` | 10.7 GB | unused, available as fallback |
+| `explore`, `scout` | `Qwen3.5-4B-MTP-GGUF` (high context needed) | Context > quality |
+| `plan` | `DeepSeek-Qwen3-8B-GGUF` (reasoning quality, 64K ctx) | Quality > context; local is fast enough for plans |
+| `title`, `summary` | `Bonsai-8B-gguf` (fast, non-reasoning) | Speed > everything |
+| Trivial tasks | `Qwen3-0.6B-GGUF` | Minimal |
 
-### Agents that do NOT need Unsloth
+**Context vs. quality tradeoff**: The RX 9070 XT has 16 GB VRAM. Larger context = more KV cache = less room for model weights. The 4B model at 260K leaves ~3 GB headroom. The 8B model at 128K uses ~11 GB (tight). Choose based on task needs.
+
+### Loading models with custom context
+
+```powershell
+# Load with specific context size (persists via save_options):
+$body = '{"model_name":"Qwen3.5-4B-MTP-GGUF","ctx_size":260000,"save_options":true}'
+Invoke-RestMethod -Uri "http://localhost:13305/v1/load" -Method POST -Body $body -ContentType "application/json"
+
+# Unload to free VRAM:
+Invoke-RestMethod -Uri "http://localhost:13305/v1/unload" -Method POST -Body '{"model_name":"Qwen3.5-4B-MTP-GGUF"}' -ContentType "application/json"
+
+# Check what's loaded:
+Invoke-RestMethod -Uri "http://localhost:13305/api/v1/health" | Select-Object -ExpandProperty all_models_loaded | Where-Object loaded | Format-Table model_name, @{N='ctx';E={$_.recipe_options.ctx_size}}
+```
+
+Models auto-load on first request and auto-unload when idle. The `pinned` option (not default) keeps a model loaded.
+
+### Agents that do NOT need Lemonade
 
 These use OpenRouter and work regardless of local server status: `deep`, `ultrabrain`, `oracle`, `librarian`, `unspecified-high`, `artistry`, `quick`, `visual-engineering`, `writing`, `unspecified-low`, `metis`, `momus`, `atlas`.
 
-### Single-model limitation
+### OpenCode configuration
 
-Only one GGUF model per Unsloth instance. Auto-switch is OFF by default — requests for an unloaded model silently get the loaded model instead. Do not split local agents across different models without running separate Unsloth instances on different ports.
+The `lemonade` provider and agent model assignments live in `~/.config/opencode/opencode.json`:
 
-### API key
+```json
+"provider": {
+  "lemonade": {
+    "npm": "@ai-sdk/openai-compatible",
+    "name": "Lemonade (local)",
+    "options": {
+      "baseURL": "http://localhost:13305/v1",
+      "apiKey": "not-needed"
+    }
+  }
+}
+```
 
-`sk-unsloth-9be9b00467f065d8521794b4889d1fe4` (configured in `~/.config/opencode/opencode.json` under `provider.unsloth-studio.options.apiKey`).
+API key can be any non-empty string — Lemonade ignores it.
 
 ## Worktree hygiene
 
@@ -120,3 +148,31 @@ Your diff shows where you looked; before finishing, enumerate the complement. Wh
 4. Conditional UI is a two-sided contract: the chrome that offers a control and the renderer that fulfills it must share one predicate, and any sticky view state (selected tab, mode) must be reset or re-validated when the entity behind it changes.
 
 A guard is only as strong as its least-guarded entry point. Tests that only exercise the entry points the PR touched prove nothing about the others.
+
+## CLI tool invocation: use bash, never PowerShell for gh/git
+
+PowerShell 5.1 splits arguments at `|` when passing to external commands (10-year-old bug, PS #1995). OpenCode's `bash` tool goes through PS 5.1 by default and mangles `gh --jq`/`gh --template` expressions containing `|`, double quotes, or parentheses.
+
+**Fix applied**: `"shell": "pwsh"` in `~/.config/opencode/opencode.json` switches to PS 7.x, which fixes argument-passing. Requires session restart to take effect. If PS 7 isn't working, fall back to the temp-script pattern below.
+
+**Fallback pattern** (when `shell: pwsh` doesn't work or session not restarted):
+```powershell
+# Write command to temp .sh, execute via git-bash:
+$script = 'C:\Users\tito1\AppData\Local\Temp\opencode\gh_cmd.sh'
+Set-Content -Path $script -Value '#!/usr/bin/env bash
+gh issue list --state open --json number,title --jq '"'"'.[] | "#\(.number) \(.title)"'"'"'
+& "C:\Program Files\Git\bin\bash.exe" $script
+```
+
+Also available: `tools/ghc` wrapper — `& "C:\Program Files\Git\bin\bash.exe" tools/ghc "issue list --state open --json number --jq '.[].number'"`
+
+**For gh with JSON + PowerShell processing** (avoids --jq entirely):
+```powershell
+gh issue list --state open --json number,title | Out-File -Encoding utf8 $env:TEMP\issues.json
+# Then Read the file
+```
+
+## Tool quirks
+
+- **Glob tool cannot see dot-directories.** `glob(".opencode/**")` or `glob("**/.opencode/*")` returns nothing — the tool silently skips paths starting with `.`. Use `Get-ChildItem -Force` (PowerShell) as a fallback when searching inside `.opencode/`, `.claude/`, `.omo/`, or any hidden directory.
+- **Project config (`oh-my-openagent.jsonc`) lives in a dot-directory AND overrides global config.** Always check `.opencode/oh-my-openagent.jsonc` for agent/category model settings before concluding a model is "hardcoded." The global `~/.config/opencode/oh-my-openagent.json` is the fallback.

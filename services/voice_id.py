@@ -80,7 +80,8 @@ class VoiceIdentificationService:
             if self._backend == "none":
                 raise ValueError(
                     "No voice embedding backend available. "
-                    "Install speechbrain (pip install speechbrain) or librosa "
+                    "Install speechbrain (pip install speechbrain), pyannote.audio "
+                    "(pip install pyannote.audio torch), or librosa "
                     "(pip install librosa) to enable voice enrollment."
                 )
             reason = f" ({self._last_backend_error})" if self._last_backend_error else ""

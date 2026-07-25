@@ -86,7 +86,7 @@ You can re-diarize an existing transcript at any time; it runs as a `rediarize` 
 
 Enroll a roster of known speakers, each with one or more voice clips, and WhisperDeck relabels matching speakers across a transcript via a `voice_match` job. You can also enroll a speaker directly from a transcript segment you've already identified by ear.
 
-Embedding backends are auto-detected in priority order: **speechbrain** (most accurate, `pip install speechbrain torchaudio`), then **librosa MFCC** (always available, basic). A pyannote.audio-based embedding backend is planned but not yet wired up (see [docs/ROADMAP.md](docs/ROADMAP.md)).
+Embedding backends are auto-detected in priority order: **speechbrain** (most accurate, `pip install speechbrain torchaudio`), then **pyannote.audio** (`pip install pyannote.audio torch`, requires HuggingFace token for gated model access), then **librosa MFCC** (always available, basic).
 
 ![Voice roster — enrolled speaker profiles with their voice-clip samples, ready for voice-match across new transcripts](screenshots/07-voice-roster.png)
 
