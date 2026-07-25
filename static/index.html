@@ -33,6 +33,11 @@
         <label class="t-label" for="auth-pass">Passcode</label>
         <input class="inp" id="auth-pass" type="password" autocomplete="current-password">
       </div>
+      <div class="field" id="auth-pass-confirm-wrap" style="display:none">
+        <label class="t-label" for="auth-pass-confirm">Confirm Passcode</label>
+        <input class="inp" id="auth-pass-confirm" type="password" autocomplete="new-password">
+      </div>
+      <div id="auth-req-hint" style="display:none;font-size:11px;color:var(--label-dim);margin-bottom:4px">Min 8 chars, at least one letter and one number.</div>
       <div style="display:flex;flex-direction:column;align-items:center;gap:6px;margin-top:8px">
         <div id="auth-led" class="led-dot"></div>
         <button id="auth-submit" type="submit" class="key key--wide" style="width:100%;height:40px">Power on</button>

@@ -28,7 +28,10 @@ def _non_admin_client():
     fresh = TestClient(app_module.app)
     csrf_token = fresh.get("/api/csrf-token").json()["token"]
     fresh.headers["X-CSRF-Token"] = csrf_token
-    fresh.post("/api/register", json={"username": "nonadmin", "password": "pass123"})
+    fresh.post("/api/register", json={"username": "nonadmin", "password": "pass1234"})
+    # Register rotates the CSRF token -- refresh the header
+    csrf_token = fresh.get("/api/csrf-token").json()["token"]
+    fresh.headers["X-CSRF-Token"] = csrf_token
     return fresh
 
 

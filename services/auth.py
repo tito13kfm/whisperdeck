@@ -5,6 +5,7 @@ No FastAPI/HTTP concerns here, same convention as the other services —
 callers pass in an already-open db session.
 """
 import datetime
+import os
 import hashlib
 import secrets
 from typing import Optional
@@ -158,3 +159,21 @@ def get_all_users(db) -> list[dict]:
         }
         for u in users
     ]
+
+
+def validate_password(password: str) -> tuple[bool, str]:
+    """Validate password against the minimum policy.
+    Returns (ok, reason). Reads PASSWORD_MIN_LENGTH at call time (not import)
+    so tests that set env vars work correctly.
+    """
+    min_length = int(os.environ.get("PASSWORD_MIN_LENGTH", "8"))
+    if len(password) < min_length:
+        return False, f"Password must be at least {min_length} characters"
+    has_letter = any(c.isalpha() for c in password)
+    has_digit = any(c.isdigit() for c in password)
+    if not has_letter:
+        return False, "Password must contain at least one letter"
+    if not has_digit:
+        return False, "Password must contain at least one digit"
+    return True, ""
+

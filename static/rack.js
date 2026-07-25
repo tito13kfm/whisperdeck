@@ -630,6 +630,18 @@ async function checkAuth() {
   }
 }
 
+
+/* ── client-side password mirror ──
+   Best-effort UX match for the server policy. Hardcodes min length 8 to
+   match the server default; a self-hoster who overrides PASSWORD_MIN_LENGTH
+   gets the real rejection from the server, surfaced via toast on API error. */
+function clientValidatePassword(pw) {
+  if (pw.length < 8) { return { ok: false, reason: 'Password must be at least 8 characters' }; }
+  if (!/[a-zA-Z]/.test(pw)) { return { ok: false, reason: 'Password must contain at least one letter' }; }
+  if (!/[0-9]/.test(pw)) { return { ok: false, reason: 'Password must contain at least one digit' }; }
+  return { ok: true, reason: '' };
+}
+
 function toggleAuthMode() {
   S.authMode = S.authMode === 'login' ? 'register' : 'login';
   $('auth-title').textContent = S.authMode === 'login' ? 'Operator sign-in' : 'Register operator';
@@ -637,6 +649,9 @@ function toggleAuthMode() {
   $('auth-toggle').textContent = S.authMode === 'login' ? 'No account? Register' : 'Have an account? Sign in';
   // "Find username" only makes sense on the login side; reset code flows work either way.
   $('auth-forgot-username').style.display = S.authMode === 'login' ? '' : 'none';
+  $('auth-pass-confirm-wrap').style.display = S.authMode === 'register' ? '' : 'none';
+  $('auth-req-hint').style.display = S.authMode === 'register' ? '' : 'none';
+  $('auth-pass').autocomplete = S.authMode === 'register' ? 'new-password' : 'current-password';
 }
 
 
@@ -711,6 +726,7 @@ async function showResetCode() {
       <label class="t-label" style="font-size:12px">New password</label>
       <input class="inp" id="rc-password" type="password" placeholder="Choose a new password" style="font-size:13px;padding:8px 10px;width:100%">
     </div>
+    <div style="font-size:11px;color:var(--label-dim);margin-bottom:10px">Min 8 chars, at least one letter and one number.</div>
     <div class="modal-actions">
       <button id="rc-close" class="btn btn--ghost btn--sm">Cancel</button>
       <button id="rc-submit" class="btn btn--amber btn--sm">Reset password</button>
@@ -739,6 +755,12 @@ async function submitAuth(ev) {
   const username = $('auth-user').value.trim();
   const password = $('auth-pass').value;
   if (!username || !password) { toast('Operator and password required', 'error'); return; }
+  if (S.authMode === 'register') {
+    const confirm = $('auth-pass-confirm').value;
+    if (password !== confirm) { toast('Passwords do not match', 'error'); return; }
+    const cv = clientValidatePassword(password);
+    if (!cv.ok) { toast(cv.reason, 'error'); return; }
+  }
   return withBusy($('auth-submit'), async () => {
     try {
       await api('/api/' + S.authMode /* api-paths: /api/login /api/register */, {

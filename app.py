@@ -26,7 +26,7 @@ from sqlalchemy.orm import Session
 
 from database import init_db, backfill_user_id, Transcript, Summary, VoiceProfile, VoiceClip, ProviderConfig, User, LlmJob, TranscriptionJob, utcnow_naive
 from services.auth import (
-    get_or_create_fallback_user, create_user, authenticate_user,
+    get_or_create_fallback_user, create_user, authenticate_user, validate_password,
     list_usernames, generate_reset_token, reset_password,
     set_admin_status, get_all_users,
 )
@@ -344,6 +344,9 @@ async def register(request: Request, data: dict = Body(...), db: Session = Depen
     password = data.get("password") or ""
     if not username or not password:
         raise HTTPException(status_code=400, detail="username and password are required")
+    ok, reason = validate_password(password)
+    if not ok:
+        raise HTTPException(status_code=400, detail=reason)
     if db.query(User).filter(User.username == username).first():
         raise HTTPException(status_code=400, detail="Username already taken")
     user = create_user(db, username, password)
@@ -428,6 +431,9 @@ async def reset_password_route(request: Request, data: dict = Body(...), db: Ses
     new_password = data.get("new_password") or ""
     if not token or not new_password:
         raise HTTPException(status_code=400, detail="token and new_password are required")
+    ok, reason = validate_password(new_password)
+    if not ok:
+        raise HTTPException(status_code=400, detail=reason)
     user = reset_password(db, token, new_password)
     if not user:
         raise HTTPException(status_code=400, detail="Invalid or expired reset token")

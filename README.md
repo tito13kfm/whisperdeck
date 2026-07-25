@@ -151,6 +151,7 @@ All optional. The app runs with none of them set.
 | `HUGGINGFACE_TOKEN` | pyannote model access, needed for ML diarization | unset |
 | `FFMPEG_DIR` | Directory containing ffmpeg, if it's not on PATH | use PATH |
 | `WHISPER_CACHE_DIR` | faster-whisper model cache | `~/.cache/whisper` |
+| `PASSWORD_MIN_LENGTH` | Minimum password length for registration and reset | `8` |
 
 There is no `DATABASE_URL`: storage is always local SQLite under the data directory.
 
