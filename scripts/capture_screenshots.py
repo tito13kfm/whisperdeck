@@ -312,6 +312,8 @@ with sync_playwright() as p:
     pg.wait_for_timeout(300)
     pg.fill("#tx-title", "test_meeting")
     pg.fill("#tx-speakers", "3")
+    pg.locator("summary:has-text('Fine adjust')").click()  # collapse - keep 02-transcribe.png uncluttered
+    pg.wait_for_timeout(300)
     pg.set_input_files("#file-input", SHORT_AUDIO)
     pg.wait_for_timeout(800)
     # Re-assert right before starting in case loading the file reset anything.
@@ -330,8 +332,15 @@ with sync_playwright() as p:
     pg.wait_for_selector('[id^="page-"].active', timeout=10000)
     pg.wait_for_timeout(1000)
 
-    # 5. Queue: catch the correction job while it's still running - non-error
-    #    state either way, since the backend configured above always succeeds.
+    # Queue a summary pass alongside the auto-triggered correction pass, so
+    # the Queue screen below shows more than one job kind/state at once.
+    summarize_btn = pg.locator('[data-dact="summarize"]')
+    if summarize_btn.count() > 0 and summarize_btn.first.is_enabled():
+        summarize_btn.first.click()
+        pg.wait_for_timeout(300)
+
+    # 5. Queue: catch the correction + summary jobs while still running/queued -
+    #    non-error state either way, since the backend configured above always succeeds.
     pg.evaluate("navigate('queue')")
     pg.wait_for_timeout(1200)
     pg.screenshot(path=os.path.join(OUT_DIR, "06-queue.png"))
@@ -368,8 +377,8 @@ with sync_playwright() as p:
     pg.evaluate("navigate('settings')")
     pg.wait_for_selector("#page-settings .unit--svc", state="visible", timeout=10000)
     pg.wait_for_timeout(500)
-    pg.screenshot(path=os.path.join(OUT_DIR, "08-service-panel.png"))
-    print("Captured: 08-service-panel.png")
+    pg.screenshot(path=os.path.join(OUT_DIR, "08-service-panel.png"), full_page=True)
+    print("Captured: 08-service-panel.png (full page, includes Faceplate/Phosphor theme controls below the fold)")
 
     # 9. Hotwords: there's no separate route - crop to just the Term Glossary
     #    widget instead of the full Settings page.

@@ -2908,8 +2908,8 @@ async function openCompareModal(title, fetchItems, extractText, renderDiff) {
   openModal(`
     <h2 class="modal-title">${escapeHtml(title)}</h2>
     <div style="display:flex;gap:10px;margin-bottom:14px">
-      <select id="compare-item-a" class="inp" style="flex:1;font-size:12px;padding:8px 10px">${optionHtml}</select>
-      <select id="compare-item-b" class="inp" style="flex:1;font-size:12px;padding:8px 10px">${optionHtml}</select>
+      <select id="compare-item-a" class="inp" style="flex:1;min-width:0;font-size:12px;padding:8px 10px">${optionHtml}</select>
+      <select id="compare-item-b" class="inp" style="flex:1;min-width:0;font-size:12px;padding:8px 10px">${optionHtml}</select>
     </div>
     <div id="compare-diff-out" style="max-height:50vh;overflow:auto;font-size:13px;line-height:1.6;white-space:pre-wrap;padding:10px;border:1px solid var(--inset-edge)"></div>
     <div style="display:flex;justify-content:flex-end;margin-top:14px">

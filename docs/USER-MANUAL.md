@@ -338,7 +338,7 @@ Switch between tabs to compare the original transcript against corrections or su
 
 Every correction, summary, re-diarization, and voice-match run is recorded per transcript. Each pass has its own history button in the transcript detail header - **Compare versions** (re-transcriptions), **Correction history**, **Summary history**, and **Rediarize history** - each opening a diff view to compare any two runs of that pass.
 
-![Compare correction runs - pick two runs from the dropdowns to see their output side by side](../screenshots/15-version-compare.png)
+![Compare correction runs - pick any two runs from the dropdowns; words that changed between them are highlighted](../screenshots/15-version-compare.png)
 
 **Figure 7-3: Comparing two correction runs**
 
