@@ -406,3 +406,40 @@ class TestPasswordPolicy:
         resp = fresh.post("/api/reset-password", json={"token": token, "new_password": "validnew1"})
         assert resp.status_code == 200
         assert resp.json()["username"] == "pw_reset_valid"
+
+    # ── hardening: non-numeric env var falls back to 8 ──
+
+    def test_non_numeric_min_length_falls_back(self, client, db_session, monkeypatch):
+        """A non-numeric PASSWORD_MIN_LENGTH must not crash the route.
+        Falls back to the default (8) so an 8-char valid password passes
+        and a 7-char one is rejected — no 500."""
+        monkeypatch.setenv("PASSWORD_MIN_LENGTH", "abc")
+        fresh = _fresh_client()
+        resp_ok = fresh.post("/api/register", json={"username": "pw_env_ok", "password": "valid1234"})
+        assert resp_ok.status_code == 200
+        fresh2 = _fresh_client()
+        resp_bad = fresh2.post("/api/register", json={"username": "pw_env_bad", "password": "short12"})
+        assert resp_bad.status_code == 400
+        assert "Password must be at least 8 characters" in resp_bad.json()["detail"]
+
+    # ── check order: the "real" error wins over the password error ──
+
+    def test_register_taken_username_beats_password_error(self, client, db_session):
+        """A taken username + weak password reports 'Username already taken',
+        not the password-policy error."""
+        _register(client, "dupuser", "pass1234")
+        fresh = _fresh_client()
+        resp = fresh.post("/api/register", json={"username": "dupuser", "password": "abc"})
+        assert resp.status_code == 400
+        assert "Username already taken" in resp.json()["detail"]
+
+    def test_reset_bad_token_beats_password_error(self, client, db_session):
+        """A bad reset token + weak password reports 'Invalid or expired reset
+        token', not the password-policy error."""
+        _make_admin(db_session)
+        fresh = _fresh_client()
+        resp = fresh.post("/api/reset-password", json={
+            "token": "deadbeef" * 8, "new_password": "abc"
+        })
+        assert resp.status_code == 400
+        assert "Invalid or expired reset token" in resp.json()["detail"]

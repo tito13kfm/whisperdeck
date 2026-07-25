@@ -27,7 +27,7 @@ from sqlalchemy.orm import Session
 from database import init_db, backfill_user_id, Transcript, Summary, VoiceProfile, VoiceClip, ProviderConfig, User, LlmJob, TranscriptionJob, utcnow_naive
 from services.auth import (
     get_or_create_fallback_user, create_user, authenticate_user, validate_password,
-    list_usernames, generate_reset_token, reset_password,
+    get_user_by_reset_token, list_usernames, generate_reset_token, reset_password,
     set_admin_status, get_all_users,
 )
 from services.settings import get_user_settings, update_user_settings
@@ -344,11 +344,11 @@ async def register(request: Request, data: dict = Body(...), db: Session = Depen
     password = data.get("password") or ""
     if not username or not password:
         raise HTTPException(status_code=400, detail="username and password are required")
+    if db.query(User).filter(User.username == username).first():
+        raise HTTPException(status_code=400, detail="Username already taken")
     ok, reason = validate_password(password)
     if not ok:
         raise HTTPException(status_code=400, detail=reason)
-    if db.query(User).filter(User.username == username).first():
-        raise HTTPException(status_code=400, detail="Username already taken")
     user = create_user(db, username, password)
     request.session["user_id"] = user.id
     rotate_csrf_token(request.session)
@@ -431,6 +431,10 @@ async def reset_password_route(request: Request, data: dict = Body(...), db: Ses
     new_password = data.get("new_password") or ""
     if not token or not new_password:
         raise HTTPException(status_code=400, detail="token and new_password are required")
+    # Check token validity BEFORE password policy so a bad token + weak
+    # password reports the token error, not the password error.
+    if not get_user_by_reset_token(db, token):
+        raise HTTPException(status_code=400, detail="Invalid or expired reset token")
     ok, reason = validate_password(new_password)
     if not ok:
         raise HTTPException(status_code=400, detail=reason)

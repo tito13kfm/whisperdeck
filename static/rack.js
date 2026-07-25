@@ -652,6 +652,7 @@ function toggleAuthMode() {
   $('auth-pass-confirm-wrap').style.display = S.authMode === 'register' ? '' : 'none';
   $('auth-req-hint').style.display = S.authMode === 'register' ? '' : 'none';
   $('auth-pass').autocomplete = S.authMode === 'register' ? 'new-password' : 'current-password';
+  if (S.authMode === 'login') { $('auth-pass-confirm').value = ''; }
 }
 
 
@@ -736,6 +737,8 @@ async function showResetCode() {
     const token = $('rc-token').value.trim();
     const password = $('rc-password').value;
     if (!token || !password) { toast('Both fields are required', 'error'); return; }
+    const cv = clientValidatePassword(password);
+    if (!cv.ok) { toast(cv.reason, 'error'); return; }
     try {
       const r = await api('/api/reset-password', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token, new_password: password }) });
       toast('Password reset — signed in as ' + r.username);
