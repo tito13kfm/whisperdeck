@@ -618,7 +618,9 @@ function stopBackgroundJobPoll() {
 async function checkAuth() {
   try {
     await refreshCsrfToken();
-    const me = await api('/api/me');
+    const res = await fetch('/api/me', { credentials: 'same-origin' });
+    if (!res.ok) { await res.text(); showLogin(); return; }
+    const me = await res.json();
     S.user = me && (me.username || me.user || null);
     S.isAdmin = !!(me && me.is_admin);
     if (S.user) $('rail-operator').textContent = 'Operator: ' + S.user + (S.isAdmin ? ' (admin)' : '');

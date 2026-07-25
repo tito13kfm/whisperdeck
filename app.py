@@ -378,6 +378,12 @@ async def me(current_user: User = Depends(get_current_user)):
     return {"username": current_user.username, "is_admin": bool(current_user.is_admin)}
 
 
+@app.get("/favicon.ico")
+async def favicon():
+    """Return 204 for missing favicon to silence browser console noise."""
+    return Response(status_code=204)
+
+
 # ── Account Recovery ──────────────────────────────────────────────────────
 
 
