@@ -2908,8 +2908,8 @@ async function openCompareModal(title, fetchItems, extractText, renderDiff) {
   openModal(`
     <h2 class="modal-title">${escapeHtml(title)}</h2>
     <div style="display:flex;gap:10px;margin-bottom:14px">
-      <select id="compare-item-a" class="inp" style="flex:1;font-size:12px;padding:8px 10px">${optionHtml}</select>
-      <select id="compare-item-b" class="inp" style="flex:1;font-size:12px;padding:8px 10px">${optionHtml}</select>
+      <select id="compare-item-a" class="inp" style="flex:1;min-width:0;font-size:12px;padding:8px 10px">${optionHtml}</select>
+      <select id="compare-item-b" class="inp" style="flex:1;min-width:0;font-size:12px;padding:8px 10px">${optionHtml}</select>
     </div>
     <div id="compare-diff-out" style="max-height:50vh;overflow:auto;font-size:13px;line-height:1.6;white-space:pre-wrap;padding:10px;border:1px solid var(--inset-edge)"></div>
     <div style="display:flex;justify-content:flex-end;margin-top:14px">
@@ -4070,7 +4070,7 @@ async function loadSettingsPage() {
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:30px">
       <div>
         <div class="t-cap" style="font-size:10.5px;letter-spacing:0.14em;margin:0 0 8px 36px">Term glossary</div>
-        <div class="unit unit--svc" style="border-radius:3px;padding:16px 30px;height:100%">
+        <div id="term-glossary-panel" class="unit unit--svc" style="border-radius:3px;padding:16px 30px;height:100%">
           <div style="font-size:11.5px;color:var(--label-dim);margin-bottom:10px">Names and jargon the correction pass should recognize. Added by hand or auto-extracted from a pasted meeting context.</div>
           <div style="display:flex;gap:8px;margin-bottom:12px">
             <input id="hotword-new" type="text" placeholder="Add a term…" style="flex:1;font-family:var(--f-mono);font-size:11.5px;background:var(--input);border:1px solid var(--input-edge);color:var(--label);padding:7px 9px;border-radius:2px;min-width:0">
