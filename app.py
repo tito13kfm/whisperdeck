@@ -2211,18 +2211,35 @@ async def get_voice_clip_audio(
 
 # ── Frontend ──────────────────────────────────────────────────────────────
 
+# The password-min-length replace is intentionally per-request: tests
+# assert that PASSWORD_MIN_LENGTH changes are visible on the next GET,
+# so caching the full transformed HTML would break that contract.
+_INDEX_HTML_FALLBACK = "<h1>WhisperDeck</h1><p>Frontend not built yet.</p>"
+_index_html_cache: Optional[str] = None
+
+
+def _load_index_html() -> str:
+    global _index_html_cache
+    if _index_html_cache is None:
+        index_path = BASE_DIR / "static" / "index.html"
+        if index_path.exists():
+            _index_html_cache = index_path.read_text(encoding="utf-8")
+        else:
+            _index_html_cache = _INDEX_HTML_FALLBACK
+    return _index_html_cache
+
+
 @app.get("/", response_class=HTMLResponse)
 async def index():
-    """Serve the SPA frontend."""
-    index_path = BASE_DIR / "static" / "index.html"
-    if index_path.exists():
-        html = index_path.read_text(encoding="utf-8")
-        html = html.replace(
+    body = _load_index_html()
+    if body is _INDEX_HTML_FALLBACK:
+        return HTMLResponse(body)
+    return HTMLResponse(
+        body.replace(
             '<meta name="wd-password-min-length" content="8">',
             f'<meta name="wd-password-min-length" content="{password_min_length()}">',
         )
-        return HTMLResponse(html)
-    return HTMLResponse("<h1>WhisperDeck</h1><p>Frontend not built yet.</p>")
+    )
 
 
 @app.get("/api/status")
