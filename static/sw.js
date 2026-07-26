@@ -10,6 +10,14 @@ const PRECACHE = [
   '/',
   '/static/rack.js',
   '/static/rack.css',
+  '/static/fonts/barlow-400.woff2',
+  '/static/fonts/barlow-500.woff2',
+  '/static/fonts/barlow-600.woff2',
+  '/static/fonts/barlow-condensed-600.woff2',
+  '/static/fonts/barlow-condensed-700.woff2',
+  '/static/fonts/ibm-plex-mono-500.woff2',
+  '/static/fonts/ibm-plex-mono-700.woff2',
+  '/static/fonts/share-tech-mono-400.woff2',
 ];
 
 /* ── install: precache static assets ── */
