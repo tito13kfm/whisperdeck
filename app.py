@@ -189,6 +189,20 @@ async def enforce_csrf(request: Request, call_next):
     return await call_next(request)
 
 
+async def static_cache_headers(request: Request, call_next):
+    """Add Cache-Control headers for static assets and index.html (issue #140).
+
+    /static/*  → Cache-Control: public, max-age=3600 (browser caches for 1 hour)
+    GET /      → Cache-Control: no-cache (browser revalidates every time, allows 304)
+    """
+    response = await call_next(request)
+    if request.url.path.startswith("/static/"):
+        response.headers["Cache-Control"] = "public, max-age=3600"
+    elif request.method == "GET" and request.url.path == "/":
+        response.headers["Cache-Control"] = "no-cache"
+    return response
+
+
 # Starlette's add_middleware() prepends to the stack, so the *last* middleware
 # added here runs *first* on each request — enforce_csrf must therefore be
 # registered before SessionMiddleware so that, at request time, Session runs
@@ -202,6 +216,9 @@ app.add_middleware(BaseHTTPMiddleware, dispatch=enforce_csrf)
 # explicitly anyway so a Starlette default change can't silently weaken the
 # defense-in-depth layer.
 app.add_middleware(SessionMiddleware, secret_key=SESSION_SECRET, same_site="lax")
+# Static asset caching (issue #140): add Cache-Control headers after the
+# response is produced but before GZip compression.
+app.add_middleware(BaseHTTPMiddleware, dispatch=static_cache_headers)
 # GZip compression for responses > 500 bytes. Added last (outermost in
 # middleware stack) so it compresses the final response after all other
 # middleware has processed it.
