@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# ghc — gh CLI wrapper for PowerShell 5.1 environments where PowerShell
+# mangles arguments containing | (pipe) characters.
+#
+# Usage from PowerShell:
+#   & "C:\Program Files\Git\bin\bash.exe" tools/ghc "issue list --state open --json number --jq '.[].number'"
+#
+# The entire argument string is passed to gh verbatim via bash, bypassing
+# PowerShell's broken argument-passing for external commands (PS #1995).
+set -euo pipefail
+exec gh $@
