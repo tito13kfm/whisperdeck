@@ -36,3 +36,35 @@ def test_static_cache_middleware_ordering():
     resp = fresh.get("/static/rack.js")
     assert resp.status_code == 200
     assert resp.headers.get("Cache-Control") == "public, max-age=3600"
+
+
+def test_index_html_read_from_disk_at_most_once(client, monkeypatch):
+    """issue #142: static/index.html body is read from disk at most once
+    across many GET / requests. The disk read is the hot-path cost on
+    Windows; the in-memory password min-length replace is unaffected.
+    """
+    from pathlib import Path
+    import app as app_module
+    # Force the cache empty so the first request after patching is the
+    # one that triggers the read (other tests in this session may have
+    # already populated it).
+    monkeypatch.setattr(app_module, "_index_html_cache", None)
+
+    read_count = {"n": 0}
+    real_read_text = Path.read_text
+
+    def counting_read_text(self, *args, **kwargs):
+        if self.name == "index.html":
+            read_count["n"] += 1
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", counting_read_text)
+
+    for _ in range(5):
+        resp = client.get("/")
+        assert resp.status_code == 200
+
+    assert read_count["n"] == 1, (
+        f"expected static/index.html to be read from disk once, "
+        f"was read {read_count['n']} times"
+    )
