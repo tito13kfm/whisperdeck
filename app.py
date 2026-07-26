@@ -194,11 +194,13 @@ async def static_cache_headers(request: Request, call_next):
 
     /static/*  → Cache-Control: public, max-age=3600 (browser caches for 1 hour)
     GET /      → Cache-Control: no-cache (browser revalidates every time, allows 304)
+    /sw.js     → Cache-Control: no-cache (issue #146, so deploys reach clients
+                 promptly instead of the browser pinning a stale worker script)
     """
     response = await call_next(request)
     if request.url.path.startswith("/static/"):
         response.headers["Cache-Control"] = "public, max-age=3600"
-    elif request.method == "GET" and request.url.path == "/":
+    elif request.method == "GET" and request.url.path in ("/", "/sw.js"):
         response.headers["Cache-Control"] = "no-cache"
     return response
 
@@ -2362,6 +2364,19 @@ async def index():
             f'<meta name="wd-password-min-length" content="{password_min_length()}">',
         )
     )
+
+
+@app.get("/sw.js")
+async def service_worker():
+    """Serve the service worker from root path so its scope covers the entire
+    origin.  Serving from /static/sw.js would limit scope to /static/ only,
+    making it impossible to intercept /api/* or /."""
+    sw_path = BASE_DIR / "static" / "sw.js"
+    if not sw_path.exists():
+        return Response(status_code=404)
+    response = FileResponse(sw_path, media_type="application/javascript")
+    response.headers["Service-Worker-Allowed"] = "/"
+    return response
 
 
 @app.get("/api/status")
