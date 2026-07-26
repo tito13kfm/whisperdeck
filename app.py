@@ -22,7 +22,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.gzip import GZipMiddleware
-from sqlalchemy import or_
+from sqlalchemy import or_, func
 from sqlalchemy.orm import Session
 
 from database import init_db, backfill_user_id, Transcript, Summary, VoiceProfile, VoiceClip, ProviderConfig, User, LlmJob, TranscriptionJob, utcnow_naive
@@ -46,7 +46,7 @@ from services.hotwords import list_hotwords, add_hotword, delete_hotword
 from services.correction import extract_hotwords_from_doc
 from services.model_catalog import get_correction_models
 from services.llm_jobs import (
-    enqueue_llm_job, enqueue_auto_correction, enqueue_auto_classify, serialize_llm_job, latest_job,
+    enqueue_llm_job, enqueue_auto_correction, enqueue_auto_classify, serialize_llm_job,
     cancel_llm_job, rerun_llm_job, llm_worker_loop, reset_stuck_llm_jobs,
     dismiss_llm_job, clear_finished_llm_jobs,
 )
@@ -259,7 +259,43 @@ def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
     return user
 
 
-def _serialize_transcript(db: Session, t: Transcript, include_relabel: bool = False) -> dict:
+# `rediarize` is in services.llm_jobs.VALID_KINDS but the serializer
+# doesn't consume it; keeping it out of the batch filter avoids fetching
+# rows that would just be discarded.
+_SERIALIZED_JOB_KINDS = (
+    "correction", "summary", "voice_match",
+    "format_markdown", "format_email", "format_coding_prompt", "classify_intent",
+)
+
+
+def _batch_latest_jobs(db: Session, transcript_ids: list[int]) -> dict[tuple[int, str], LlmJob]:
+    """Return the latest LlmJob row per (transcript_id, kind). Missing
+    pairs (no row exists for that transcript+kind) are simply absent from
+    the dict; callers use `jobs_map.get((tid, kind))`."""
+    if not transcript_ids:
+        return {}
+    max_id_subq = (
+        db.query(
+            LlmJob.transcript_id.label("tid"),
+            LlmJob.kind.label("kind"),
+            func.max(LlmJob.id).label("max_id"),
+        )
+        .filter(
+            LlmJob.transcript_id.in_(transcript_ids),
+            LlmJob.kind.in_(_SERIALIZED_JOB_KINDS),
+        )
+        .group_by(LlmJob.transcript_id, LlmJob.kind)
+        .subquery()
+    )
+    jobs = (
+        db.query(LlmJob)
+        .join(max_id_subq, LlmJob.id == max_id_subq.c.max_id)
+        .all()
+    )
+    return {(j.transcript_id, j.kind): j for j in jobs}
+
+
+def _serialize_transcript(db: Session, t: Transcript, *, jobs_map: dict[tuple[int, str], LlmJob], include_relabel: bool = False) -> dict:
     jobs = t.jobs or []
     job_progress = None
     if jobs:
@@ -298,12 +334,10 @@ def _serialize_transcript(db: Session, t: Transcript, include_relabel: bool = Fa
         "job_progress": job_progress,
         "processed_size_bytes": t.processed_size_bytes,
         "queue_status": compute_queue_status(db, t),
-        # latest LLM job per kind — the detail tabs render live progress
-        # ("correction running — section X of Y") straight from these.
-        "correction_job": serialize_llm_job(cj) if (cj := latest_job(db, t.id, "correction")) else None,
-        "summary_job": serialize_llm_job(sj) if (sj := latest_job(db, t.id, "summary")) else None,
-        "voice_match_job": serialize_llm_job(vj) if (vj := latest_job(db, t.id, "voice_match")) else None,
-        **_dictation_job_fields(db, t),
+        "correction_job": serialize_llm_job(jobs_map[(t.id, "correction")]) if (t.id, "correction") in jobs_map else None,
+        "summary_job": serialize_llm_job(jobs_map[(t.id, "summary")]) if (t.id, "summary") in jobs_map else None,
+        "voice_match_job": serialize_llm_job(jobs_map[(t.id, "voice_match")]) if (t.id, "voice_match") in jobs_map else None,
+        **_dictation_job_fields(jobs_map, t),
     }
     if include_relabel:
         last = latest_relabel(db, t.id)
@@ -313,21 +347,20 @@ def _serialize_transcript(db: Session, t: Transcript, include_relabel: bool = Fa
     return data
 
 
-def _dictation_job_fields(db: Session, t: Transcript) -> dict:
+def _dictation_job_fields(jobs_map: dict[tuple[int, str], LlmJob], t: Transcript) -> dict:
     """format_*_job / classify_intent_job / classify_intent_hint — gated on
     t.kind so meeting transcripts (the majority, and which can never have
-    these jobs) skip the 4 extra LlmJob queries entirely. Matters because
-    _serialize_transcript runs per-row in list_transcripts (up to 50 rows)."""
+    these jobs) skip the 4 extra fields entirely."""
     if t.kind != "dictation":
         return {
             "format_markdown_job": None, "format_email_job": None, "format_coding_prompt_job": None,
             "classify_intent_job": None, "classify_intent_hint": None,
         }
-    classify_job = latest_job(db, t.id, "classify_intent")
+    classify_job = jobs_map.get((t.id, "classify_intent"))
     return {
-        "format_markdown_job": serialize_llm_job(fmj) if (fmj := latest_job(db, t.id, "format_markdown")) else None,
-        "format_email_job": serialize_llm_job(fej) if (fej := latest_job(db, t.id, "format_email")) else None,
-        "format_coding_prompt_job": serialize_llm_job(fcj) if (fcj := latest_job(db, t.id, "format_coding_prompt")) else None,
+        "format_markdown_job": serialize_llm_job(jobs_map[(t.id, "format_markdown")]) if (t.id, "format_markdown") in jobs_map else None,
+        "format_email_job": serialize_llm_job(jobs_map[(t.id, "format_email")]) if (t.id, "format_email") in jobs_map else None,
+        "format_coding_prompt_job": serialize_llm_job(jobs_map[(t.id, "format_coding_prompt")]) if (t.id, "format_coding_prompt") in jobs_map else None,
         "classify_intent_job": serialize_llm_job(classify_job) if classify_job else None,
         # Auto-computed suggestion — a UI hint for which format button to
         # highlight, not a gate on any of them.
@@ -1056,7 +1089,7 @@ async def _run_transcription_pipeline(
             raise
         stereo_persisted = True
         create_chunk_jobs(db, transcript.id, chunks)
-        return _serialize_transcript(db, transcript)
+        return _serialize_transcript(db, transcript, jobs_map=_batch_latest_jobs(db, [transcript.id]))
 
     try:
         transcript = await transcription_service.transcribe(
@@ -1106,7 +1139,7 @@ async def _run_transcription_pipeline(
             enqueue_auto_correction(db, transcript, user_settings)
         enqueue_auto_classify(db, transcript, user_settings)
 
-        return _serialize_transcript(db, transcript)
+        return _serialize_transcript(db, transcript, jobs_map=_batch_latest_jobs(db, [transcript.id]))
 
     except Exception as e:
         # transcribe() marked its row failed without ever persisting
@@ -1188,7 +1221,7 @@ async def get_transcript(transcript_id: int, db: Session = Depends(get_db), curr
     ).first()
     if not t:
         raise HTTPException(status_code=404, detail="Transcript not found")
-    return _serialize_transcript(db, t, include_relabel=True)
+    return _serialize_transcript(db, t, jobs_map=_batch_latest_jobs(db, [t.id]), include_relabel=True)
 
 
 # Job states whose chunk files are still needed: pending/running are
@@ -1439,7 +1472,7 @@ async def update_transcript(transcript_id: int, data: dict = Body(...), db: Sess
         t.kind = data["kind"]
     t.updated_at = utcnow_naive()
     db.commit()
-    return _serialize_transcript(db, t)
+    return _serialize_transcript(db, t, jobs_map=_batch_latest_jobs(db, [t.id]))
 
 
 @app.post("/api/transcripts/{transcript_id}/retry-failed-chunks")
@@ -1626,7 +1659,7 @@ async def rename_transcript_speaker(
 
     t.updated_at = utcnow_naive()
     db.commit()
-    return {"renamed": renamed, "transcript": _serialize_transcript(db, t, include_relabel=True)}
+    return {"renamed": renamed, "transcript": _serialize_transcript(db, t, jobs_map=_batch_latest_jobs(db, [t.id]), include_relabel=True)}
 
 
 @app.post("/api/transcripts/{transcript_id}/segments/retag")
@@ -1667,7 +1700,7 @@ async def retag_transcript_segments(
     t.segments = new_segments
     t.updated_at = utcnow_naive()
     db.commit()
-    return {"retagged": len(index_set), "transcript": _serialize_transcript(db, t, include_relabel=True)}
+    return {"retagged": len(index_set), "transcript": _serialize_transcript(db, t, jobs_map=_batch_latest_jobs(db, [t.id]), include_relabel=True)}
 
 
 @app.post("/api/transcripts/{transcript_id}/relabel-undo")
@@ -1708,7 +1741,7 @@ async def undo_last_relabel(
     t.updated_at = utcnow_naive()
     db.commit()
     return {"undone": undone_kind, "description": undone_desc,
-            "transcript": _serialize_transcript(db, t, include_relabel=True)}
+            "transcript": _serialize_transcript(db, t, jobs_map=_batch_latest_jobs(db, [t.id]), include_relabel=True)}
 
 
 @app.post("/api/transcripts/{transcript_id}/enroll-speaker")
