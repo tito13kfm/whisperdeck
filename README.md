@@ -242,8 +242,24 @@ whisperdeck/
 Run the tests:
 
 ```bash
-.venv\Scripts\python.exe -m pytest              # unit/API tests, no browser needed
-.venv\Scripts\python.exe -m pytest tests/e2e -m e2e   # real-browser tests (see INSTALL.md §7)
+# Linux/macOS
+./test.sh                              # all unit/API tests
+./test.sh tests/test_smoke.py          # single file
+./test.sh -k test_auth                 # pattern match
+./test.sh tests/e2e -m e2e            # real-browser tests (see INSTALL.md §7)
+
+# Windows
+test.bat                               # all unit/API tests
+test.bat tests\test_smoke.py           # single file
+test.bat -k test_auth                  # pattern match
+test.bat tests\e2e -m e2e             # real-browser tests (see INSTALL.md §7)
+```
+
+Or run pytest directly with the venv:
+
+```bash
+.venv\Scripts\python.exe -m pytest    # Windows
+.venv/bin/python -m pytest            # Linux/macOS
 ```
 
 Adding a transcription provider:
