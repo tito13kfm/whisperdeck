@@ -237,13 +237,22 @@ def get_db():
         db.close()
 
 
-def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
+def _resolve_session_user(request: Request, db: Session) -> User | None:
+    """Look up the user for the current session, clearing a stale session
+    (one whose user_id no longer maps to a User row) as a side effect."""
     user_id = request.session.get("user_id")
     if not user_id:
-        raise HTTPException(status_code=401, detail="Not logged in")
+        return None
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
         request.session.clear()
+        return None
+    return user
+
+
+def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
+    user = _resolve_session_user(request, db)
+    if not user:
         raise HTTPException(status_code=401, detail="Not logged in")
     return user
 
@@ -402,6 +411,126 @@ async def logout(request: Request):
 @app.get("/api/me")
 async def me(current_user: User = Depends(get_current_user)):
     return {"username": current_user.username, "is_admin": bool(current_user.is_admin)}
+
+
+# ── /api/bootstrap ─────────────────────────────────────────────────────────
+
+
+def _build_status_payload(db: Session, current_user: User) -> dict:
+    total = db.query(Transcript).filter(Transcript.user_id == current_user.id).count()
+    completed = db.query(Transcript).filter(
+        Transcript.user_id == current_user.id, Transcript.status == "completed"
+    ).count()
+    processing = db.query(Transcript).filter(
+        Transcript.user_id == current_user.id, Transcript.status == "processing"
+    ).count()
+    failed = db.query(Transcript).filter(
+        Transcript.user_id == current_user.id, Transcript.status == "failed"
+    ).count()
+    total_duration = (
+        db.query(Transcript.duration_seconds)
+        .filter(Transcript.user_id == current_user.id, Transcript.status == "completed")
+        .all()
+    )
+    total_minutes = sum(d[0] for d in total_duration if d[0]) / 60
+    voice_count = db.query(VoiceProfile).filter(VoiceProfile.user_id == current_user.id).count()
+
+    active_prov = db.query(ProviderConfig).filter(
+        ProviderConfig.user_id == current_user.id, ProviderConfig.is_active == True  # noqa: E712
+    ).first()
+
+    return {
+        "total_transcripts": total,
+        "completed": completed,
+        "processing": processing,
+        "failed": failed,
+        "total_minutes": round(total_minutes, 1),
+        "voice_profiles": voice_count,
+        "diarization_available": diarization_service._check_pyannote(),
+        "voice_id_backend": voice_id_service._backend,
+        "backend_name": voice_id_service.backend_name,
+    }
+
+
+def _build_recent_transcripts(db: Session, current_user: User, limit: int, offset: int = 0) -> list:
+    transcripts = (
+        db.query(Transcript)
+        .filter(Transcript.user_id == current_user.id)
+        .order_by(Transcript.created_at.desc())
+        .offset(offset)
+        .limit(limit)
+        .all()
+    )
+    return [_serialize_transcript(db, t) for t in transcripts]
+
+
+def _build_jobs_payload(db: Session, current_user: User, limit: int) -> dict:
+    llm = (
+        db.query(LlmJob)
+        .filter(LlmJob.user_id == current_user.id, LlmJob.dismissed.is_(False))
+        .order_by(LlmJob.id.desc())
+        .limit(limit)
+        .all()
+    )
+    transcripts = (
+        db.query(Transcript)
+        .filter(Transcript.user_id == current_user.id, Transcript.queue_dismissed.is_(False))
+        .order_by(Transcript.created_at.desc())
+        .limit(limit)
+        .all()
+    )
+    titles = {t.id: (t.title or t.filename) for t in transcripts}
+    missing = [j.transcript_id for j in llm if j.transcript_id not in titles]
+    if missing:
+        for t in db.query(Transcript).filter(Transcript.id.in_(missing)).all():
+            titles[t.id] = t.title or t.filename
+
+    entries = []
+    for t in transcripts:
+        if t.status == "processing" or t.jobs:
+            entries.append(_transcription_queue_entry(db, t))
+    for j in llm:
+        e = serialize_llm_job(j)
+        e["title"] = titles.get(j.transcript_id, f"Transcript {j.transcript_id}")
+        entries.append(e)
+
+    entries.sort(key=lambda e: e["created_at"] or "", reverse=True)
+    active = sum(1 for e in entries if e["status"] in ("pending", "running", "queued", "waiting"))
+    return {"jobs": entries[:limit], "active": active}
+
+
+@app.get("/api/bootstrap")
+async def bootstrap(request: Request, db: Session = Depends(get_db)):
+    """One-shot boot payload for the frontend's initial dashboard render.
+
+    Returns the CSRF token, the current user (or null if signed out), and
+    every piece of data the Monitor page needs on first paint: full status,
+    the five most recent transcripts, and the active jobs. Cuts the boot
+    waterfall from 4-5 sequential requests to one (issue #143). Resolves
+    the user from the session manually so the unauthenticated path returns
+    a clean shape instead of 401.
+    """
+    csrf = generate_csrf_token(request.session)
+
+    user_payload = None
+    status_payload = None
+    recents_payload: list = []
+    jobs_payload = {"jobs": [], "active": 0}
+
+    user = _resolve_session_user(request, db)
+    if user:
+        user_payload = {"username": user.username, "is_admin": bool(user.is_admin)}
+        status_payload = _build_status_payload(db, user)
+        recents_payload = _build_recent_transcripts(db, user, limit=5)
+        jobs_payload = _build_jobs_payload(db, user, limit=20)
+
+    return {
+        "csrf_token": csrf,
+        "user": user_payload,
+        "status": status_payload,
+        "recent_transcripts": recents_payload,
+        "jobs": jobs_payload,
+    }
 
 
 @app.get("/favicon.ico")
@@ -1015,15 +1144,7 @@ async def transcribe_audio(
 
 @app.get("/api/transcripts")
 async def list_transcripts(limit: int = 50, offset: int = 0, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    transcripts = (
-        db.query(Transcript)
-        .filter(Transcript.user_id == current_user.id)
-        .order_by(Transcript.created_at.desc())
-        .offset(offset)
-        .limit(limit)
-        .all()
-    )
-    return [_serialize_transcript(db, t) for t in transcripts]
+    return _build_recent_transcripts(db, current_user, limit=limit, offset=offset)
 
 
 @app.get("/api/transcripts/{transcript_id}")
@@ -1982,38 +2103,7 @@ def _transcription_queue_entry(db, t: Transcript) -> dict:
 async def list_jobs(limit: int = Query(50, le=200), db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     """Master queue: newest-first LLM jobs + transcription pipelines that
     are active or ran through the chunk queue."""
-    llm = (
-        db.query(LlmJob)
-        .filter(LlmJob.user_id == current_user.id, LlmJob.dismissed.is_(False))
-        .order_by(LlmJob.id.desc())
-        .limit(limit)
-        .all()
-    )
-    transcripts = (
-        db.query(Transcript)
-        .filter(Transcript.user_id == current_user.id, Transcript.queue_dismissed.is_(False))
-        .order_by(Transcript.created_at.desc())
-        .limit(limit)
-        .all()
-    )
-    titles = {t.id: (t.title or t.filename) for t in transcripts}
-    missing = [j.transcript_id for j in llm if j.transcript_id not in titles]
-    if missing:
-        for t in db.query(Transcript).filter(Transcript.id.in_(missing)).all():
-            titles[t.id] = t.title or t.filename
-
-    entries = []
-    for t in transcripts:
-        if t.status == "processing" or t.jobs:
-            entries.append(_transcription_queue_entry(db, t))
-    for j in llm:
-        e = serialize_llm_job(j)
-        e["title"] = titles.get(j.transcript_id, f"Transcript {j.transcript_id}")
-        entries.append(e)
-
-    entries.sort(key=lambda e: e["created_at"] or "", reverse=True)
-    active = sum(1 for e in entries if e["status"] in ("pending", "running", "queued", "waiting"))
-    return {"jobs": entries[:limit], "active": active}
+    return _build_jobs_payload(db, current_user, limit=limit)
 
 
 @app.post("/api/jobs/{job_id}/cancel")
@@ -2245,40 +2335,7 @@ async def index():
 @app.get("/api/status")
 async def full_status(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     """Return comprehensive app status for the frontend dashboard."""
-    total = db.query(Transcript).filter(Transcript.user_id == current_user.id).count()
-    completed = db.query(Transcript).filter(
-        Transcript.user_id == current_user.id, Transcript.status == "completed"
-    ).count()
-    processing = db.query(Transcript).filter(
-        Transcript.user_id == current_user.id, Transcript.status == "processing"
-    ).count()
-    failed = db.query(Transcript).filter(
-        Transcript.user_id == current_user.id, Transcript.status == "failed"
-    ).count()
-    total_duration = (
-        db.query(Transcript.duration_seconds)
-        .filter(Transcript.user_id == current_user.id, Transcript.status == "completed")
-        .all()
-    )
-    total_minutes = sum(d[0] for d in total_duration if d[0]) / 60
-    voice_count = db.query(VoiceProfile).filter(VoiceProfile.user_id == current_user.id).count()
-
-    # Get active provider
-    active_prov = db.query(ProviderConfig).filter(
-        ProviderConfig.user_id == current_user.id, ProviderConfig.is_active == True  # noqa: E712
-    ).first()
-
-    return {
-        "total_transcripts": total,
-        "completed": completed,
-        "processing": processing,
-        "failed": failed,
-        "total_minutes": round(total_minutes, 1),
-        "voice_profiles": voice_count,
-        "diarization_available": diarization_service._check_pyannote(),
-        "voice_id_backend": voice_id_service._backend,
-        "backend_name": voice_id_service.backend_name,
-    }
+    return _build_status_payload(db, current_user)
 
 
 # ── Serve Static Files ───────────────────────────────────────────────────
