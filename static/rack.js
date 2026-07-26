@@ -544,6 +544,15 @@ function resetDeckState() {
   S.stereoLive = false;
   S.permPending = false;
   stopCorrectionPoll();
+  stopBackgroundJobPoll();
+  clearTimeout(bankPollTimer);
+  bankPollTimer = null;
+  clearTimeout(detailPollTimer);
+  detailPollTimer = null;
+  clearTimeout(dashPollTimer);
+  dashPollTimer = null;
+  clearTimeout(queuePollTimer);
+  queuePollTimer = null;
   detailData = null;
   bankListCache = [];
   seedClips = {};
