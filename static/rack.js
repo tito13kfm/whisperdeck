@@ -2392,14 +2392,14 @@ function scheduleDetailPoll() {
   if (!t || !(llmJobActive(t.correction_job) || llmJobActive(t.summary_job) || llmJobActive(t.voice_match_job) ||
     llmJobActive(t.format_markdown_job) || llmJobActive(t.format_email_job) || llmJobActive(t.format_coding_prompt_job) ||
     llmJobActive(t.classify_intent_job))) return;
-  const fp = _jobFingerprint(t), id = t.id;
+  const fp = _jobFingerprint(t), id = t.id, prevActive = jobActiveSnapshot(t);
   detailPollTimer = setTimeout(async () => {
     if (S.page !== 'detail' || !detailData || detailData.id !== id) return;
     try {
       const fresh = await api('/api/transcripts/' + id);
       if (S.page !== 'detail' || !detailData || detailData.id !== id) return;
       detailData = fresh;
-      if (_jobFingerprint(fresh) !== fp) renderDetail();
+      if (_jobFingerprint(fresh) !== fp) await updateDetailJobStatus(fresh, prevActive);
       scheduleDetailPoll();
     } catch { /* transient — poll dies, next action revives it */ }
   }, 2500);
@@ -2812,6 +2812,70 @@ function llmJobActive(job) {
   return job && (job.status === 'pending' || job.status === 'running');
 }
 
+// Snapshot of which jobs are active, keyed by the same fields _jobFingerprint
+// tracks. Used to detect a job crossing into or out of "active" between poll
+// ticks — the one case that needs a full detail-body rebuild (completed
+// content appearing, voice-match relabeling segments, a Format-tab "Suggested"
+// badge changing once classify_intent_job lands).
+function jobActiveSnapshot(t) {
+  return {
+    correction: llmJobActive(t.correction_job),
+    summary: llmJobActive(t.summary_job),
+    voice_match: llmJobActive(t.voice_match_job),
+    format_markdown: llmJobActive(t.format_markdown_job),
+    format_email: llmJobActive(t.format_email_job),
+    format_coding_prompt: llmJobActive(t.format_coding_prompt_job),
+    classify_intent: llmJobActive(t.classify_intent_job),
+  };
+}
+
+// Poll-tick DOM patch: update the status badge, the three job-gated action
+// buttons, and any currently-rendered job-running-progress container, all
+// in place. Only when a job actually crosses into/out of "active" do we pay
+// for a full renderDetailBody() — the segment list and page chrome are never
+// touched by this path.
+async function updateDetailJobStatus(t, prevActive) {
+  const badge = $('detail-status-badge');
+  if (badge) {
+    const sv = statusView(t);
+    badge.className = 'status-badge status-badge--' + sv.word;
+    badge.dataset.word = sv.word;
+    badge.textContent = sv.word;
+  }
+  const gatedButtons = [
+    // voicematch has a second, permanent disable reason (no stored audio)
+    // that never changes during polling — skip it entirely rather than
+    // fight over which reason currently owns the disabled state.
+    { id: 'btn-voicematch', job: t.voice_match_job, title: 'Voice match job already queued', skip: !t.has_audio },
+    { id: 'btn-summarize', job: t.summary_job, title: 'Summary job already queued' },
+    { id: 'btn-rerun', job: t.correction_job, title: 'Correction job already queued' },
+  ];
+  for (const { id: btnId, job, title, skip } of gatedButtons) {
+    if (skip) continue;
+    const btn = $(btnId);
+    if (!btn) continue;
+    const active = llmJobActive(job);
+    btn.disabled = active;
+    btn.title = active ? title : '';
+  }
+  const runningContainers = [
+    { id: 'job-correction', job: t.correction_job, label: 'Correction' },
+    { id: 'job-summary', job: t.summary_job, label: 'Summary' },
+    { id: 'job-voice-match', job: t.voice_match_job, label: 'Voice match' },
+    { id: 'job-format-markdown', job: t.format_markdown_job, label: 'Markdown note' },
+    { id: 'job-format-email', job: t.format_email_job, label: 'Email draft' },
+    { id: 'job-format-coding_prompt', job: t.format_coding_prompt_job, label: 'Claude Code prompt' },
+  ];
+  for (const { id: containerId, job, label } of runningContainers) {
+    if (!llmJobActive(job)) continue;
+    const el = $(containerId);
+    if (el) el.innerHTML = jobRunningUnit(job, label);
+  }
+  const newActive = jobActiveSnapshot(t);
+  const crossed = Object.keys(prevActive).some(k => prevActive[k] !== newActive[k]);
+  if (crossed) await renderDetailBody();
+}
+
 function jobRunningUnit(job, label) {
   const total = (job.progress && job.progress.total) || 0;
   const done = job.progress ? job.progress.done : 0;
@@ -3031,7 +3095,7 @@ async function handleExportClick(kind, copy) {
 }
 
 function correctedHtml(t) {
-  if (llmJobActive(t.correction_job)) return jobRunningUnit(t.correction_job, 'Correction');
+  if (llmJobActive(t.correction_job)) return '<div id="job-correction">' + jobRunningUnit(t.correction_job, 'Correction') + '</div>';
   if (t.correction_error) {
     return '<div class="unit" style="padding:20px 32px;font-size:13px;color:var(--red)">' +
       '<div class="t-cap" style="color:var(--red);margin-bottom:6px">Correction ' +
@@ -3095,7 +3159,7 @@ async function formatHtml(t) {
 
     let body;
     if (llmJobActive(job)) {
-      body = jobRunningUnit(job, target.label);
+      body = '<div id="job-format-' + target.key + '">' + jobRunningUnit(job, target.label) + '</div>';
     } else if (job && job.status === 'failed') {
       body = '<div style="padding:14px 0;font-size:13px;color:var(--red)">' + escapeHtml(humanizeJobError(job.error)) + '</div>';
     } else if (job && job.status === 'completed') {
@@ -3125,7 +3189,7 @@ async function formatHtml(t) {
 }
 
 async function summaryHtml(t) {
-  if (llmJobActive(t.summary_job)) return jobRunningUnit(t.summary_job, 'Summary');
+  if (llmJobActive(t.summary_job)) return '<div id="job-summary">' + jobRunningUnit(t.summary_job, 'Summary') + '</div>';
   const failedBanner = (t.summary_job && t.summary_job.status === 'failed')
     ? '<div class="unit" style="padding:14px 32px;margin-bottom:10px;font-size:13px;color:var(--red)">' +
       '<div class="t-cap" style="color:var(--red);margin-bottom:6px">Summary failed</div>' +
@@ -3204,13 +3268,13 @@ function renderDetail() {
         <button class="btn" style="font-size:12px;padding:7px 14px;border-color:var(--inset-edge)" data-dact="rediarize-history">Rediarize history</button>
         `}
         <span style="font-family:var(--f-mono);font-size:9px;color:var(--label-faint);text-transform:uppercase;letter-spacing:0.06em">Voice</span>
-        <button class="btn" style="font-size:12px;padding:7px 14px;border-color:var(--inset-edge)" data-dact="voicematch" ${!t.has_audio ? 'disabled title="No stored audio for this transcript"' : (llmJobActive(t.voice_match_job) ? 'disabled title="Voice match job already queued"' : '')}>Match against voice roster</button>
+        <button id="btn-voicematch" class="btn" style="font-size:12px;padding:7px 14px;border-color:var(--inset-edge)" data-dact="voicematch" ${!t.has_audio ? 'disabled title="No stored audio for this transcript"' : (llmJobActive(t.voice_match_job) ? 'disabled title="Voice match job already queued"' : '')}>Match against voice roster</button>
         ${t.last_relabel ? `<button class="btn" style="font-size:12px;padding:7px 14px;border-color:var(--inset-edge)" data-dact="relabel-undo" title="${escapeHtml(t.last_relabel.description || '')}">Undo relabel</button>` : ''}
         <span style="font-family:var(--f-mono);font-size:9px;color:var(--label-faint);text-transform:uppercase;letter-spacing:0.06em">Correction</span>
         <button class="btn" style="font-size:12px;padding:7px 14px;border-color:var(--inset-edge)" data-dact="context">Add context</button>
-        <button class="btn" style="font-size:12px;padding:7px 14px;border-color:var(--inset-edge)" data-dact="summarize" ${llmJobActive(t.summary_job) ? 'disabled title="Summary job already queued"' : ''}>Summarize</button>
+        <button id="btn-summarize" class="btn" style="font-size:12px;padding:7px 14px;border-color:var(--inset-edge)" data-dact="summarize" ${llmJobActive(t.summary_job) ? 'disabled title="Summary job already queued"' : ''}>Summarize</button>
         <button class="btn" style="font-size:12px;padding:7px 14px;border-color:var(--inset-edge)" data-dact="summary-history">Summary history</button>
-        <button class="btn" style="font-size:12px;padding:7px 14px;border-color:var(--inset-edge)" data-dact="rerun" ${llmJobActive(t.correction_job) ? 'disabled title="Correction job already queued"' : ''}>Re-run correction</button>
+        <button id="btn-rerun" class="btn" style="font-size:12px;padding:7px 14px;border-color:var(--inset-edge)" data-dact="rerun" ${llmJobActive(t.correction_job) ? 'disabled title="Correction job already queued"' : ''}>Re-run correction</button>
         <button class="btn" style="font-size:12px;padding:7px 14px;border-color:var(--inset-edge)" data-dact="correction-history">Correction history</button>
         <span style="display:inline-block;width:1px;height:24px;background:var(--edge);margin:0 4px;align-self:center"></span>
         <button class="btn btn--red" style="font-size:12px;padding:7px 14px" data-dact="delete">Delete</button>
@@ -3224,7 +3288,7 @@ function renderDetail() {
       <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:14px">
         <div style="font-size:12.5px"><div style="font-family:var(--f-mono);font-size:10px;text-transform:uppercase;letter-spacing:0.08em;color:var(--label-dim);margin-bottom:3px">Duration</div>${formatDur(t.duration_seconds)}</div>
         <div style="font-size:12.5px"><div style="font-family:var(--f-mono);font-size:10px;text-transform:uppercase;letter-spacing:0.08em;color:var(--label-dim);margin-bottom:3px">Provider</div>${escapeHtml((t.provider || '—') + (t.model ? ' · ' + t.model : ''))}</div>
-        <div style="font-size:12.5px"><div style="font-family:var(--f-mono);font-size:10px;text-transform:uppercase;letter-spacing:0.08em;color:var(--label-dim);margin-bottom:3px">Status</div><span class="status-badge status-badge--${escapeHtml(sv.word)}" data-word="${escapeHtml(sv.word)}">${escapeHtml(sv.word)}</span></div>
+        <div style="font-size:12.5px"><div style="font-family:var(--f-mono);font-size:10px;text-transform:uppercase;letter-spacing:0.08em;color:var(--label-dim);margin-bottom:3px">Status</div><span id="detail-status-badge" class="status-badge status-badge--${escapeHtml(sv.word)}" data-word="${escapeHtml(sv.word)}">${escapeHtml(sv.word)}</span></div>
         <div style="font-size:12.5px"><div style="font-family:var(--f-mono);font-size:10px;text-transform:uppercase;letter-spacing:0.08em;color:var(--label-dim);margin-bottom:3px">Speakers</div>${t.speaker_count || '—'}${t.diarization_method ? ` <span style="font-size:10px;color:var(--label-dim)">${escapeHtml(t.diarization_method)}${t.num_speakers ? '' : ' (auto)'}</span>` : ''}${(() => { const u = (t.segments || []).filter(isLowConfidence).length; return u ? ` <span style="font-size:10px;color:var(--nixie)" title="Lines where the speaker assignment is uncertain">${u} uncertain</span>` : ''; })()}</div>
         <div style="font-size:12.5px"><div style="font-family:var(--f-mono);font-size:10px;text-transform:uppercase;letter-spacing:0.08em;color:var(--label-dim);margin-bottom:3px">Segments</div>${(t.segments || []).length}</div>
         <div style="font-size:12.5px"><div style="font-family:var(--f-mono);font-size:10px;text-transform:uppercase;letter-spacing:0.08em;color:var(--label-dim);margin-bottom:3px">Mode</div><button class="btn" style="font-size:11px;padding:2px 10px;border-color:var(--inset-edge);cursor:pointer" title="Switch between meeting and dictation mode" data-dact="toggle-kind">${escapeHtml(kindLabel)}</button></div>
@@ -3273,7 +3337,7 @@ async function renderDetailBody() {
   const t = detailData;
   const body = $('detail-body');
   if (S.detailTab === 'transcript') {
-    const vm = llmJobActive(t.voice_match_job) ? jobRunningUnit(t.voice_match_job, 'Voice match') : '';
+    const vm = llmJobActive(t.voice_match_job) ? '<div id="job-voice-match">' + jobRunningUnit(t.voice_match_job, 'Voice match') + '</div>' : '';
     let nudge = '';
     if (!vm && t.kind !== 'dictation' && t.has_audio && hasUnlabeledSpeakers(t)) {
       try {
