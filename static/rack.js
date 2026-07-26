@@ -438,7 +438,7 @@ function navigate(page, data) {
     transcribe: renderTranscribe,
     transcripts: loadTranscripts,
     voicenotes: loadVoiceNotes,
-    queue: loadQueue,
+    queue: () => loadQueue({force: true}),
     detail: () => loadTranscriptDetail(S.detailId),
     voices: loadVoices,
     files: renderFilesPage,
@@ -831,6 +831,33 @@ function showApp() {
   startBackgroundJobPoll();
 }
 
+/* ══════════════════ shared job cache ══════════════════
+   Every /api/jobs consumer reads from this single cache instead of
+   independently fetching. The always-on background poll is the only
+   periodic writer; pages that need fresher data after a user action
+   (queue job, cancel, etc.) call getJobs({force:true}) for a one-shot
+   refresh. */
+let _jobCache = { data: null, ts: 0, pending: null };
+const _JOB_CACHE_TTL = 15000;  // 15s: longer than background poll's 8s interval with margin for jitter
+
+async function getJobs(opts = {}) {
+  const now = Date.now();
+  if (!opts.force && _jobCache.data && (now - _jobCache.ts) < _JOB_CACHE_TTL) {
+    return _jobCache.data;
+  }
+  if (_jobCache.pending) return _jobCache.pending;
+  _jobCache.pending = api('/api/jobs?limit=50').then(data => {
+    _jobCache.data = data;
+    _jobCache.ts = Date.now();
+    _jobCache.pending = null;
+    return data;
+  }).catch(e => {
+    _jobCache.pending = null;
+    throw e;
+  });
+  return _jobCache.pending;
+}
+
 // Watches every LLM job regardless of which page is open, so a summary/
 // correction/etc. job that finishes failing while the user has navigated
 // away still gets a toast (the page-scoped pollers in loadQueue/
@@ -841,7 +868,7 @@ const bgJobStatusSeen = new Map();
 
 async function pollBackgroundJobs() {
   try {
-    const data = await api('/api/jobs?limit=50');
+    const data = await getJobs();
     for (const j of (data.jobs || [])) {
       // will_retry is only set on LLM job entries (services/llm_jobs.py); it's
       // undefined on transcription queue entries, so they never match here —
@@ -1185,7 +1212,7 @@ async function loadDashboardJobs(initialJobs) {
   if (initialJobs) {
     jobs = initialJobs.jobs || [];
   } else {
-    try { data = await api('/api/jobs?limit=20'); } catch { return; }
+    try { data = await getJobs(); } catch { return; }
     jobs = data && data.jobs || [];
   }
   var active = jobs.filter(function(j) { return j.status === 'running' || j.status === 'pending'; });
@@ -2610,10 +2637,10 @@ const KIND_LABELS = {
   format_markdown: 'MD NOTE', format_email: 'EMAIL DRAFT', format_coding_prompt: 'CODE PROMPT', classify_intent: 'CLASSIFY',
 };
 
-async function loadQueue() {
+async function loadQueue(opts = {}) {
   const root = $('page-queue');
   let data;
-  try { data = await api('/api/jobs?limit=50'); } catch (e) { toast(e.message, 'error'); return; }
+  try { data = await getJobs({force: opts.force || false}); } catch (e) { toast(e.message, 'error'); return; }
   const jobs = data.jobs || [];
   updateQueueBadge(data.active || 0);
   refreshRailChrome(); // covers a job finishing while parked here across poll ticks
@@ -2675,7 +2702,7 @@ async function loadQueue() {
         if (act === 't-retry') { const r = await api('/api/transcripts/' + tid + '/retry-failed-chunks', { method: 'POST' }); toast('Retrying ' + r.retried + ' sections', 'info'); }
         if (act === 'j-dismiss') { await api('/api/jobs/' + jid + '/dismiss', { method: 'POST' }); toast('Cleared', 'info'); }
         if (act === 'clear-finished') { const r = await api('/api/jobs/clear', { method: 'POST' }); toast('Cleared ' + r.cleared + ' finished job(s)', 'info'); }
-        loadQueue();
+        loadQueue({force: true});
       } catch (err) { toast(err.message, 'error'); }
     });
   }));
@@ -2690,9 +2717,9 @@ function updateQueueBadge(active) {
   $('nav-badge-queue').textContent = active ? String(active).padStart(2, '0') : '';
 }
 
-async function refreshQueueBadge() {
+async function refreshQueueBadge(force = false) {
   try {
-    const data = await api('/api/jobs?limit=50');
+    const data = await getJobs({force});
     updateQueueBadge(data.active || 0);
   } catch { /* badge is best-effort */ }
 }
@@ -3974,7 +4001,7 @@ async function detailAction(act, btn) {
       await api('/api/transcripts/' + t.id + '/summarize', { method: 'POST', body: fd });
       toast('Summary queued — progress shows on the Summary tab and the Queue screen', 'info');
       S.detailTab = 'summary';
-      refreshQueueBadge();
+      refreshQueueBadge(true);
       await loadTranscriptDetail(t.id);
       return;
     }
@@ -3988,7 +4015,7 @@ async function detailAction(act, btn) {
       await api('/api/transcripts/' + t.id + '/format/' + target, { method: 'POST', body: fd });
       toast('Generating — progress shows on this tab and the Queue screen', 'info');
       S.detailTab = 'format';
-      refreshQueueBadge();
+      refreshQueueBadge(true);
       await loadTranscriptDetail(t.id);
       return;
     }
@@ -4193,7 +4220,7 @@ async function rerunCorrection() {
     toast('Correction queued — progress shows on the Corrected tab and the Queue screen', 'info');
     $('rerun-picker').style.display = 'none';
     S.detailTab = 'corrected';
-    refreshQueueBadge();
+    refreshQueueBadge(true);
     await loadTranscriptDetail(t.id);
   } catch (e) { toast(e.message, 'error'); }
 }
@@ -4239,7 +4266,7 @@ async function toggleRetranscribePicker() {
     try {
       const nt = await api('/api/transcripts/' + t.id + '/retranscribe', { method: 'POST', body: fd });
       toast('Re-transcription started — opened the new transcript', 'info');
-      refreshQueueBadge();
+      refreshQueueBadge(true);
       await loadTranscriptDetail(nt.id);
     } catch (e) { toast(e.message, 'error'); }
   }));
@@ -4268,7 +4295,7 @@ async function toggleRediarizePicker() {
       await api('/api/transcripts/' + t.id + '/rediarize', { method: 'POST', body: fd });
       toast('Re-diarization queued — watch the Queue screen', 'info');
       box.style.display = 'none';
-      refreshQueueBadge();
+      refreshQueueBadge(true);
       await loadTranscriptDetail(t.id);
     } catch (e) { toast(e.message, 'error'); }
   }));
