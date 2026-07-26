@@ -237,13 +237,22 @@ def get_db():
         db.close()
 
 
-def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
+def _resolve_session_user(request: Request, db: Session) -> User | None:
+    """Look up the user for the current session, clearing a stale session
+    (one whose user_id no longer maps to a User row) as a side effect."""
     user_id = request.session.get("user_id")
     if not user_id:
-        raise HTTPException(status_code=401, detail="Not logged in")
+        return None
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
         request.session.clear()
+        return None
+    return user
+
+
+def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
+    user = _resolve_session_user(request, db)
+    if not user:
         raise HTTPException(status_code=401, detail="Not logged in")
     return user
 
@@ -508,14 +517,12 @@ async def bootstrap(request: Request, db: Session = Depends(get_db)):
     recents_payload: list = []
     jobs_payload = {"jobs": [], "active": 0}
 
-    user_id = request.session.get("user_id")
-    if user_id:
-        user = db.query(User).filter(User.id == user_id).first()
-        if user:
-            user_payload = {"username": user.username, "is_admin": bool(user.is_admin)}
-            status_payload = _build_status_payload(db, user)
-            recents_payload = _build_recent_transcripts(db, user, limit=5)
-            jobs_payload = _build_jobs_payload(db, user, limit=20)
+    user = _resolve_session_user(request, db)
+    if user:
+        user_payload = {"username": user.username, "is_admin": bool(user.is_admin)}
+        status_payload = _build_status_payload(db, user)
+        recents_payload = _build_recent_transcripts(db, user, limit=5)
+        jobs_payload = _build_jobs_payload(db, user, limit=20)
 
     return {
         "csrf_token": csrf,

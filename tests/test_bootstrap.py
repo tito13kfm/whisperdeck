@@ -39,6 +39,27 @@ def test_bootstrap_unauthenticated_returns_null_user_and_empty_data(anonymous_cl
     assert body["jobs"] == {"jobs": [], "active": 0}
 
 
+def test_bootstrap_clears_stale_session_for_deleted_user(client, db_session):
+    """If the session's user_id points at a User row that no longer exists
+    (account deleted mid-session), /api/bootstrap must clear the session —
+    same invariant get_current_user enforces for every other authenticated
+    route. Verified indirectly: generate_csrf_token only mints a new token
+    when the session has none, so a cleared session produces a fresh token
+    on the next call; an uncleared session would keep returning the same
+    one."""
+    from database import User
+    user = db_session.query(User).filter(User.username == "testuser").first()
+    db_session.delete(user)
+    db_session.commit()
+
+    first = client.get("/api/bootstrap").json()
+    assert first["user"] is None
+    assert first["status"] is None
+
+    second = client.get("/api/bootstrap").json()
+    assert second["csrf_token"] != first["csrf_token"]
+
+
 def test_bootstrap_csrf_token_works_for_subsequent_mutation(anonymous_client):
     """The token /api/bootstrap issues must be accepted by a real mutation
     on the same session — proves the session cookie was created and the

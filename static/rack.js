@@ -510,6 +510,7 @@ function styledPrompt(message, defaultValue) {
 // account to sign in inherits the previous account's deck status, detail
 // view, and caches (issue #54).
 function resetDeckState() {
+  bootData = null;
   S.user = null;
   S.isAdmin = false;
   S.detailId = null;
@@ -834,10 +835,14 @@ function updateRailStorage(totalMinutes) {
     : '<span></span>').join('');
 }
 
-// BACKGROUND: on first boot, status + recent_transcripts come from bootData
-// (cached by checkAuth from /api/bootstrap).  The poll path (scheduleDashPoll)
-// only re-checks jobs; status and recents are static for the session lifetime.
+// BACKGROUND: on the FIRST call after boot, status + recent_transcripts come
+// from bootData (cached by checkAuth from /api/bootstrap) so first paint
+// skips the extra round trip. bootData is consumed (nulled) right after, so
+// every later visit to Monitor re-fetches live — otherwise stats/recents
+// would stay frozen at boot-time values for the rest of the session.
 async function loadDashboard() {
+  const boot = bootData;
+  bootData = null;
   const root = $('page-dashboard');
   root.innerHTML = `
     <div class="page-head">
@@ -848,8 +853,9 @@ async function loadDashboard() {
     <div class="t-cap" style="font-size:10.5px;letter-spacing:0.14em;margin:20px 0 8px 36px">Recent signals</div>
     <div id="dash-recents"></div>`;
   try {
-    const st = (bootData && bootData.status) || {};
-    const recents = (bootData && bootData.recent_transcripts) || [];
+    const [st, recents] = boot
+      ? [boot.status || {}, boot.recent_transcripts || []]
+      : await Promise.all([api('/api/status'), api('/api/transcripts?limit=5')]);
     const stats = [
       { nix: String(Math.round(st.total_minutes ?? 0)), label: 'Minutes transcribed', glow: 'var(--nixie)' },
       { nix: String(st.total_transcripts ?? 0).padStart(2, '0'), label: 'Transcripts', glow: 'var(--nixie)' },
@@ -885,7 +891,7 @@ async function loadDashboard() {
   } catch (e) {
     toast(e.message, 'error');
   }
-  loadDashboardJobs(bootData && bootData.jobs);
+  loadDashboardJobs(boot && boot.jobs);
   scheduleDashPoll();
 }
 
