@@ -4399,5 +4399,11 @@ document.addEventListener('DOMContentLoaded', () => {
   var dockPip = $('video-dock-pip');
   if (dockPip) dockPip.addEventListener('click', togglePiP);
   initVideoDockDrag();
+  // Register service worker for static asset caching (cache-first) and
+  // offline shell support. Fire-and-forget — the SW's install/activate
+  // lifecycle runs independently and doesn't block the app.
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('/sw.js');
+  }
   checkAuth();
 });
