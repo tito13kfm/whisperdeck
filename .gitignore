@@ -32,6 +32,10 @@ scripts/settings_payload.json
 # Local unsloth studio scratch/working dir (machine-local, unrelated to this project)
 unsloth_compiled_cache/
 
+# oh-my-openagent (OpenCode) runtime state: session-continuation blobs and
+# working plan docs, machine-local like .opencode/ above
+.omo/
+
 # Scheduled-review runtime artifacts (machine-local; log.md, archive/ and
 # last-review-date.txt stay tracked, the wrapper script commits them)
 skill-observations/last-scheduled-review-output.txt
