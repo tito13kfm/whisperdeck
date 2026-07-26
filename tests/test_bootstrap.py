@@ -155,3 +155,48 @@ def test_bootstrap_with_data_returns_expected_lists(client, db_session):
     assert boot["status"] == client.get("/api/status").json()
     assert boot["recent_transcripts"] == client.get("/api/transcripts?limit=5").json()
     assert boot["jobs"] == client.get("/api/jobs?limit=20").json()
+
+
+def test_list_and_dashboard_payloads_are_lightweight(client, db_session):
+    """Issue #144: /api/transcripts and /api/bootstrap's recent_transcripts
+    must omit full_text/segments/corrected_text/per-kind LLM job fields —
+    the tape library and dashboard only ever render summary fields, and a
+    1-hour transcript's segments can be multi-MB. This locks in the
+    lightweight contract itself: the mirror tests above only prove the two
+    callers agree with each other, not that either is actually lightweight —
+    a revert to the full serializer in both would still pass those."""
+    from database import Transcript
+    t = Transcript(
+        user_id=1,
+        title="Standup",
+        filename="standup.wav",
+        duration_seconds=120.0,
+        status="completed",
+        full_text="this is the full transcript text",
+        segments=[{"text": "hi", "start": 0, "end": 1, "speaker": "SPEAKER_00"}],
+        corrected_text="this is the corrected text",
+    )
+    db_session.add(t)
+    db_session.commit()
+    db_session.refresh(t)
+
+    heavy_fields = {
+        "full_text", "segments", "corrected_text",
+        "format_markdown_job", "format_email_job", "format_coding_prompt_job",
+        "classify_intent_job", "classify_intent_hint",
+    }
+    required_fields = {
+        "id", "kind", "title", "filename", "status", "duration_seconds",
+        "provider", "model", "language", "speaker_count", "diarize_requested",
+        "error", "created_at", "updated_at", "queue_status", "job_progress",
+    }
+
+    for row in (client.get("/api/transcripts").json()[0], client.get("/api/bootstrap").json()["recent_transcripts"][0]):
+        assert not (heavy_fields & row.keys()), f"lightweight payload leaked heavy fields: {heavy_fields & row.keys()}"
+        assert required_fields <= row.keys(), f"lightweight payload missing fields: {required_fields - row.keys()}"
+
+    # Detail endpoint is untouched — still returns the full payload.
+    detail = client.get(f"/api/transcripts/{t.id}").json()
+    assert detail["full_text"] == "this is the full transcript text"
+    assert detail["segments"] == [{"text": "hi", "start": 0, "end": 1, "speaker": "SPEAKER_00"}]
+    assert detail["corrected_text"] == "this is the corrected text"
