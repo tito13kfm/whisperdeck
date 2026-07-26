@@ -9,7 +9,7 @@ Drives 6 realistic user journeys through a real browser against a
 throwaway server instance, judging whether the app is usable — not just
 whether the backend did what was asked. This complements
 `.claude/skills/e2e-regression-http/SKILL.md` (scripted PASS/FAIL backend
-regression, HTTP-only) and `.claude/skills/e2e-ux-audit/SKILL.md`
+regression, also Playwright-driven) and `.claude/skills/e2e-ux-audit/SKILL.md`
 (Playwright MCP version); this skill is specifically for the UI-TARS
 browser MCP available in this environment.
 

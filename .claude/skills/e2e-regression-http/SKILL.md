@@ -1,9 +1,9 @@
 ---
 name: e2e-regression-http
-description: Scripted 16-scenario feature-regression test of WhisperDeck, validated via direct HTTP API calls (not a real browser — see "Validation status" below) against an isolated local server instance (Moonshine STT, local diarization, Lemonade LLM). Use when asked to regression-test WhisperDeck's backend behavior before a release. For a real-browser, exploratory UX pass, use e2e-ux-audit instead.
+description: Scripted 16-scenario feature-regression test of WhisperDeck, driven through a real Playwright browser (Chromium with fake media devices) against an isolated local server instance (Moonshine STT, local diarization, Lemonade LLM). Requires a live Playwright MCP browser tool — see "Validation status" below for what has and hasn't been run for real. Use when asked to regression-test WhisperDeck's backend behavior before a release. For an open-ended, judgment-based exploratory UX pass instead of scripted PASS/FAIL checks, use e2e-ux-audit.
 ---
 
-# WhisperDeck End-to-End Regression Test (HTTP-only)
+# WhisperDeck End-to-End Regression Test (Playwright browser-driven)
 
 Drives every feature of WhisperDeck through a real browser against a
 throwaway server instance. Local/keyless backends only — no API keys, no

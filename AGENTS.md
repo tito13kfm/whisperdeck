@@ -161,7 +161,7 @@ If the worktree has uncommitted or unmerged work, stop and confirm with the user
 Don't run full browser-driven e2e audits for every small change; reserve them for milestones. Pick the tier by what the change actually touches:
 
 1. **Unit/integration test for the touched path** — default for any change. Fast, run every time, no exception.
-2. **`e2e-regression-http` (scripted HTTP, no browser)** — before merging anything that changes request/response contracts or cross-feature flow (queue/job routing, serializer shape, multi-step API behavior).
+2. **`e2e-regression-http` (scripted 16-scenario Playwright regression, requires a live browser tool)** — before merging anything that changes request/response contracts or cross-feature flow (queue/job routing, serializer shape, multi-step API behavior). If no Playwright MCP tool is available, substitute a static contract check (verify the serializer/field list directly in source) plus the existing unit/integration suite, and say so explicitly rather than silently skipping the tier.
 3. **Full browser e2e (`e2e-ux-audit`, `e2e-ux-audit-deep`)** — reserve for pre-release checkpoints or after a batch of changes lands, not per-PR. Any change with a runtime/UI surface should drive the affected flow in a targeted manual/scripted check, not the full 6-journey or deep audit suite.
 
 Rule of thumb: a backend fix scoped to one module doesn't need a browser; a UI-visible or cross-cutting change does, but scope the runtime check to the flow that changed, not the whole app.
