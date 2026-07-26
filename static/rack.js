@@ -129,6 +129,7 @@ function motionAllowed() {
 const $ = (id) => document.getElementById(id);
 
 let csrfToken = null;
+let bootData = null;  // cached /api/bootstrap response, used by checkAuth + loadDashboard
 
 async function refreshCsrfToken() {
   try {
@@ -616,16 +617,24 @@ function stopBackgroundJobPoll() {
   bgJobPollTimer = null;
 }
 
+// BACKGROUND: checkAuth is the first call in the boot sequence. It used to
+// chain refreshCsrfToken + GET /api/me, but /api/bootstrap returns csrf_token,
+// user, status, recent_transcripts, and jobs in ONE round-trip (issue #143).
+// The response is cached as `bootData` so loadDashboard can consume it without
+// a second fetch.  Raw fetch() is deliberate: bootstrap is a public GET that
+// must not go through the api() helper (api() adds CSRF headers and retries on
+// 403 — irrelevant for a GET, and it triggers setInFlight).
 async function checkAuth() {
   try {
-    await refreshCsrfToken();
-    const res = await fetch('/api/me', { credentials: 'same-origin' });
+    const res = await fetch('/api/bootstrap', { credentials: 'same-origin' });
     if (!res.ok) { await res.text(); showLogin(); return; }
-    const me = await res.json();
-    S.user = me && (me.username || me.user || null);
-    S.isAdmin = !!(me && me.is_admin);
+    const body = await res.json();
+    bootData = body;
+    csrfToken = body.csrf_token || null;
+    S.user = body.user ? (body.user.username || null) : null;
+    S.isAdmin = !!(body.user && body.user.is_admin);
     if (S.user) $('rail-operator').textContent = 'Operator: ' + S.user + (S.isAdmin ? ' (admin)' : '');
-    showApp();
+    if (body.user) { showApp(); } else { showLogin(); }
   } catch {
     showLogin();
   }
@@ -825,6 +834,9 @@ function updateRailStorage(totalMinutes) {
     : '<span></span>').join('');
 }
 
+// BACKGROUND: on first boot, status + recent_transcripts come from bootData
+// (cached by checkAuth from /api/bootstrap).  The poll path (scheduleDashPoll)
+// only re-checks jobs; status and recents are static for the session lifetime.
 async function loadDashboard() {
   const root = $('page-dashboard');
   root.innerHTML = `
@@ -836,10 +848,8 @@ async function loadDashboard() {
     <div class="t-cap" style="font-size:10.5px;letter-spacing:0.14em;margin:20px 0 8px 36px">Recent signals</div>
     <div id="dash-recents"></div>`;
   try {
-    const [st, recents] = await Promise.all([
-      api('/api/status'),
-      api('/api/transcripts?limit=5'),
-    ]);
+    const st = (bootData && bootData.status) || {};
+    const recents = (bootData && bootData.recent_transcripts) || [];
     const stats = [
       { nix: String(Math.round(st.total_minutes ?? 0)), label: 'Minutes transcribed', glow: 'var(--nixie)' },
       { nix: String(st.total_transcripts ?? 0).padStart(2, '0'), label: 'Transcripts', glow: 'var(--nixie)' },
@@ -875,7 +885,7 @@ async function loadDashboard() {
   } catch (e) {
     toast(e.message, 'error');
   }
-  loadDashboardJobs();
+  loadDashboardJobs(bootData && bootData.jobs);
   scheduleDashPoll();
 }
 
@@ -891,10 +901,19 @@ const DASH_STAGE_KINDS = [
   { light: 'voicematch', kind: 'voice_match' },
 ];
 
-async function loadDashboardJobs() {
+// BACKGROUND: on first call (from loadDashboard), initialJobs comes from
+// bootData.jobs (cached /api/bootstrap) — no fetch needed.  On subsequent
+// poll ticks (scheduleDashPoll), initialJobs is undefined, so the existing
+// /api/jobs fetch runs normally.
+async function loadDashboardJobs(initialJobs) {
   var data;
-  try { data = await api('/api/jobs?limit=20'); } catch { return; }
-  var jobs = data && data.jobs || [];
+  var jobs;
+  if (initialJobs) {
+    jobs = initialJobs.jobs || [];
+  } else {
+    try { data = await api('/api/jobs?limit=20'); } catch { return; }
+    jobs = data && data.jobs || [];
+  }
   var active = jobs.filter(function(j) { return j.status === 'running' || j.status === 'pending'; });
   INST.dashActive = active.length > 0;
   var wrap = $('dash-activity');
