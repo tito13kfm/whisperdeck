@@ -451,6 +451,38 @@ def _build_status_payload(db: Session, current_user: User) -> dict:
         "backend_name": voice_id_service.backend_name,
     }
 
+def _serialize_transcript_summary(db: Session, t: Transcript) -> dict:
+    """Lightweight transcript payload for list/dashboard views. Omits
+    full_text, segments, corrected_text, and per-kind LLM job details —
+    every field retained here is consumed by at least one frontend row
+    renderer (statusView / transcriptPct / transcriptMeta / bankDetailFields)."""
+    jobs = t.jobs or []
+    job_progress = None
+    if jobs:
+        job_progress = {
+            "total": len(jobs),
+            "completed": sum(1 for j in jobs if j.status == "completed"),
+            "failed": sum(1 for j in jobs if j.status == "failed"),
+        }
+    return {
+        "id": t.id,
+        "kind": t.kind or "meeting",
+        "title": t.title,
+        "filename": t.filename,
+        "status": t.status,
+        "duration_seconds": t.duration_seconds,
+        "provider": t.provider,
+        "model": t.model,
+        "language": t.language,
+        "speaker_count": t.speaker_count,
+        "diarize_requested": t.diarize_requested,
+        "error": t.error,
+        "created_at": t.created_at.isoformat() if t.created_at else None,
+        "updated_at": t.updated_at.isoformat() if t.updated_at else None,
+        "queue_status": compute_queue_status(db, t),
+        "job_progress": job_progress,
+    }
+
 
 def _build_recent_transcripts(db: Session, current_user: User, limit: int, offset: int = 0) -> list:
     transcripts = (
@@ -461,7 +493,7 @@ def _build_recent_transcripts(db: Session, current_user: User, limit: int, offse
         .limit(limit)
         .all()
     )
-    return [_serialize_transcript(db, t) for t in transcripts]
+    return [_serialize_transcript_summary(db, t) for t in transcripts]
 
 
 def _build_jobs_payload(db: Session, current_user: User, limit: int) -> dict:
