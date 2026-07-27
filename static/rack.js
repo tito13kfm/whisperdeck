@@ -1166,9 +1166,12 @@ function startInstruments() {
 }
 
 /* ══════════════════ transcribe screen ══════════════════ */
+let providersLoadGen = 0; // generation counter to prevent race on rapid provider loads
 async function ensureProviders() {
   if (S.providers.length) return;
+  const gen = ++providersLoadGen;
   const provs = await api('/api/providers');
+  if (gen !== providersLoadGen) return; // stale response
   // `configured` already reflects reality for both kinds: for local
   // providers the backend probed check_health (package actually
   // importable), for hosted providers it means a key is saved.
@@ -2337,6 +2340,7 @@ async function refreshQueueBadge() {
 
 /* ══════════════════ transcript detail ══════════════════ */
 let detailData = null;
+let detailLoadGen = 0; // generation counter to prevent race conditions on rapid clicks
 
 let detailPollTimer = null;
 
@@ -2371,10 +2375,14 @@ function resetSegAudio() {
 
 async function loadTranscriptDetail(id, opts = {}) {
   if (id == null) { navigate('transcripts'); return; }
+  const gen = ++detailLoadGen;
   const prevId = detailData ? detailData.id : null;
+  let fetched;
   try {
-    detailData = await api('/api/transcripts/' + id);
+    fetched = await api('/api/transcripts/' + id);
   } catch (e) { toast(e.message, 'error'); return; }
+  if (gen !== detailLoadGen) return; // stale response, a newer load is in flight
+  detailData = fetched;
   if (prevId !== null && prevId !== detailData.id) resetSegAudio();
   if (!opts.preserveQuery) S.query = '';
   // S.detailTab is a global that survives navigation between transcripts —
