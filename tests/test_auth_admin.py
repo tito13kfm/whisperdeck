@@ -469,3 +469,90 @@ class TestPasswordPolicy:
         resp = client.get("/")
         assert resp.status_code == 200
         assert 'name="wd-password-min-length" content="8"' in resp.text
+
+
+# ── concurrent registration race (issue #125) ──────────────────────────────
+
+
+class TestConcurrentRegistration:
+    """Issue #125: concurrent /api/register with the same username must
+    yield one 200 + rest 400, never a 500 from an unhandled IntegrityError
+    on users.username. Bypasses the conftest `client` fixture (which shares
+    one session across all requests and would structurally mask the race)."""
+
+    def test_concurrent_registrations_same_username_no_500(self, tmp_path):
+        """N concurrent registers with one username: exactly one 200,
+        the rest 400 'Username already taken', no 500s."""
+        from concurrent.futures import ThreadPoolExecutor
+        from threading import Barrier
+
+        from fastapi.testclient import TestClient
+
+        import app as app_module
+        from database import init_db
+        from services.security import rate_limiter
+
+        # Per-test SQLite + per-request session factory: only way to give
+        # each concurrent request its own connection to race on.
+        db_path = tmp_path / "race.db"
+        engine, SessionLocal, _ = init_db(str(db_path))
+
+        def _override_get_db():
+            db = SessionLocal()
+            try:
+                yield db
+            finally:
+                db.close()
+
+        app_module.app.dependency_overrides[app_module.get_db] = _override_get_db
+        # Rate limiter is a process-wide singleton; clear so the N
+        # concurrent "testclient" requests don't 429 on the 5/5min bucket.
+        rate_limiter._buckets.clear()
+        try:
+            N = 5  # 5 fits the 5/5min register bucket
+            barrier = Barrier(N)
+            username = "raceuser_issue125"
+            captured: list = []
+
+            def _attempt():
+                c = TestClient(app_module.app)
+                tok = c.get("/api/csrf-token").json()["token"]
+                # Release all threads together to maximize race exposure
+                # on the SELECT-then-INSERT window.
+                barrier.wait(timeout=10)
+                return c.post(
+                    "/api/register",
+                    json={"username": username, "password": "valid1234"},
+                    headers={"X-CSRF-Token": tok},
+                )
+
+            with ThreadPoolExecutor(max_workers=N) as pool:
+                futures = [pool.submit(_attempt) for _ in range(N)]
+                for f in futures:
+                    captured.append(f.result(timeout=30))
+
+            statuses = [r.status_code for r in captured]
+            success = [r for r in captured if r.status_code == 200]
+            conflicts = [
+                r for r in captured
+                if r.status_code == 400
+                and "Username already taken" in r.json().get("detail", "")
+            ]
+            fives = [r for r in captured if r.status_code == 500]
+
+            assert fives == [], (
+                f"Got {len(fives)} 500s on concurrent register; the "
+                f"IntegrityError on users.username is unhandled. "
+                f"Statuses: {statuses}"
+            )
+            assert len(success) == 1, (
+                f"Expected exactly 1 successful registration, got "
+                f"{len(success)}. Statuses: {statuses}"
+            )
+            assert len(conflicts) == N - 1, (
+                f"Expected {N - 1} 400 'Username already taken' responses, "
+                f"got {len(conflicts)}. Statuses: {statuses}"
+            )
+        finally:
+            app_module.app.dependency_overrides.clear()
+            engine.dispose()
