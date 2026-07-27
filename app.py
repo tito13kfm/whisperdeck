@@ -26,7 +26,7 @@ from sqlalchemy import or_, func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from database import init_db, backfill_user_id, Transcript, Summary, VoiceNote, VoiceProfile, VoiceClip, ProviderConfig, User, LlmJob, TranscriptionJob, utcnow_naive
+from database import init_db, backfill_user_id, Transcript, Summary, VoiceNote, VoiceProfile, VoiceClip, ProviderConfig, User, LlmJob, TranscriptionJob, TranscriptTag, utcnow_naive
 from services.auth import (
     get_or_create_fallback_user, create_user, authenticate_user, validate_password,
     password_min_length, get_user_by_reset_token,
@@ -47,7 +47,7 @@ from services.hotwords import list_hotwords, add_hotword, delete_hotword
 from services.correction import extract_hotwords_from_doc
 from services.model_catalog import get_correction_models
 from services.llm_jobs import (
-    enqueue_llm_job, enqueue_auto_correction, enqueue_auto_classify, enqueue_auto_voice_note,
+    enqueue_llm_job, enqueue_auto_correction, enqueue_auto_classify, enqueue_auto_voice_note, enqueue_auto_tagging,
     serialize_llm_job,
     cancel_llm_job, rerun_llm_job, llm_worker_loop, reset_stuck_llm_jobs,
     dismiss_llm_job, clear_finished_llm_jobs,
@@ -267,7 +267,7 @@ def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
 _SERIALIZED_JOB_KINDS = (
     "correction", "summary", "voice_match",
     "format_markdown", "format_email", "format_coding_prompt", "classify_intent",
-    "voice_note",
+    "voice_note", "tagging",
 )
 
 
@@ -340,6 +340,7 @@ def _serialize_transcript(db: Session, t: Transcript, *, jobs_map: dict[tuple[in
         "correction_job": serialize_llm_job(jobs_map[(t.id, "correction")]) if (t.id, "correction") in jobs_map else None,
         "summary_job": serialize_llm_job(jobs_map[(t.id, "summary")]) if (t.id, "summary") in jobs_map else None,
         "voice_match_job": serialize_llm_job(jobs_map[(t.id, "voice_match")]) if (t.id, "voice_match") in jobs_map else None,
+        "tags": _tags_for_transcript(db, t.id),
         **_dictation_job_fields(jobs_map, t),
     }
     if include_relabel:
@@ -352,11 +353,13 @@ def _serialize_transcript(db: Session, t: Transcript, *, jobs_map: dict[tuple[in
 
 def _dictation_job_fields(jobs_map: dict[tuple[int, str], LlmJob], t: Transcript) -> dict:
     """format_*_job / classify_intent_job / classify_intent_hint /
-    voice_note_job — kind-gated, but every field is always present
-    (null for kinds that can never have that job). The shape is
-    uniform across all kinds so the frontend doesn't have to switch
-    on kind to read the response (test_meeting_and_dictation_have_same_job_field_names
-    pins this)."""
+    voice_note_job / tagging_job — kind-gated, but every field is always
+    present (null for kinds that can never have that job). The shape is
+    uniform across all kinds so the frontend doesn't have to switch on
+    kind to read the response (test_meeting_and_dictation_have_same_job_field_names
+    pins this). `tagging_job` is uniform because tagging runs on every
+    kind, not just one."""
+    tagging_job = jobs_map.get((t.id, "tagging"))
     if t.kind == "dictation":
         classify_job = jobs_map.get((t.id, "classify_intent"))
         return {
@@ -372,6 +375,7 @@ def _dictation_job_fields(jobs_map: dict[tuple[int, str], LlmJob], t: Transcript
                 else None
             ),
             "voice_note_job": None,
+            "tagging_job": serialize_llm_job(tagging_job) if tagging_job else None,
         }
     if t.kind == "voice_note":
         vn_job = jobs_map.get((t.id, "voice_note"))
@@ -379,11 +383,13 @@ def _dictation_job_fields(jobs_map: dict[tuple[int, str], LlmJob], t: Transcript
             "format_markdown_job": None, "format_email_job": None, "format_coding_prompt_job": None,
             "classify_intent_job": None, "classify_intent_hint": None,
             "voice_note_job": serialize_llm_job(vn_job) if vn_job else None,
+            "tagging_job": serialize_llm_job(tagging_job) if tagging_job else None,
         }
     return {
         "format_markdown_job": None, "format_email_job": None, "format_coding_prompt_job": None,
         "classify_intent_job": None, "classify_intent_hint": None,
         "voice_note_job": None,
+        "tagging_job": serialize_llm_job(tagging_job) if tagging_job else None,
     }
 
 
@@ -511,7 +517,38 @@ def _build_status_payload(db: Session, current_user: User) -> dict:
         "backend_name": voice_id_service.backend_name,
     }
 
-def _serialize_transcript_summary(db: Session, t: Transcript) -> dict:
+def _tags_for_transcripts(db: Session, transcript_ids: list[int]) -> dict[int, list[str]]:
+    """Batch-load tag strings for a list of transcripts. Returns a dict
+    keyed by transcript_id, value is the tag list in insertion order
+    (the tagging job writes in prompt-order, no need to sort). Used by
+    the list view to avoid the N+1 trap of one query per row."""
+    if not transcript_ids:
+        return {}
+    rows = (
+        db.query(TranscriptTag)
+        .filter(TranscriptTag.transcript_id.in_(transcript_ids))
+        .all()
+    )
+    out: dict[int, list[str]] = {tid: [] for tid in transcript_ids}
+    for row in rows:
+        out.setdefault(row.transcript_id, []).append(row.tag)
+    return out
+
+
+def _tags_for_transcript(db: Session, transcript_id: int) -> list[str]:
+    """Single-transcript variant for the detail serializer. The detail
+    view serializes one row at a time, so a per-row query is fine and
+    avoids threading a tags map through the call chain."""
+    rows = (
+        db.query(TranscriptTag.tag)
+        .filter(TranscriptTag.transcript_id == transcript_id)
+        .order_by(TranscriptTag.created_at.asc())
+        .all()
+    )
+    return [r[0] for r in rows]
+
+
+def _serialize_transcript_summary(db: Session, t: Transcript, tags: list[str] | None = None) -> dict:
     """Lightweight transcript payload for list/dashboard views. Omits
     full_text, segments, corrected_text, and per-kind LLM job details —
     every field retained here is consumed by at least one frontend row
@@ -541,6 +578,7 @@ def _serialize_transcript_summary(db: Session, t: Transcript) -> dict:
         "updated_at": t.updated_at.isoformat() if t.updated_at else None,
         "queue_status": compute_queue_status(db, t),
         "job_progress": job_progress,
+        "tags": tags if tags is not None else [],
     }
 
 
@@ -553,7 +591,8 @@ def _build_recent_transcripts(db: Session, current_user: User, limit: int, offse
         .limit(limit)
         .all()
     )
-    return [_serialize_transcript_summary(db, t) for t in transcripts]
+    tags_map = _tags_for_transcripts(db, [t.id for t in transcripts])
+    return [_serialize_transcript_summary(db, t, tags=tags_map.get(t.id, [])) for t in transcripts]
 
 
 def _build_jobs_payload(db: Session, current_user: User, limit: int) -> dict:
@@ -1174,6 +1213,9 @@ async def _run_transcription_pipeline(
             enqueue_auto_classify(db, transcript, user_settings)
         else:
             enqueue_auto_voice_note(db, transcript, user_settings)
+        # Tagging fires for every kind — keep this site in lockstep
+        # with services/queue.py:_finalize_if_done (issue #171).
+        enqueue_auto_tagging(db, transcript, user_settings)
 
         return _serialize_transcript(db, transcript, jobs_map=_batch_latest_jobs(db, [transcript.id]))
 

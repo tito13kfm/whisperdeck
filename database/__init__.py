@@ -179,6 +179,29 @@ class VoiceNote(Base):
     transcript = relationship("Transcript", back_populates="voice_note")
 
 
+class TranscriptTag(Base):
+    """One tag (free-form short label) attached to a transcript. Multiple
+    rows per transcript are allowed; the LLM tagging job derives 1-5 tags
+    per transcript and writes one row per tag. The (transcript_id, tag) pair
+    is the natural primary key — no surrogate id needed, and it dedupes
+    the same tag across re-tagging runs (a re-run replaces the prior set,
+    not appends; see run_llm_job's `tagging` branch). `tag` is stored
+    canonicalized (lowercased + trimmed) so the same topic collapses to
+    one row across display, dedupe, and filter queries. Issue #171.
+
+    Indexed on `tag` alone so the browse-by-tag query
+    (`SELECT transcript_id FROM transcript_tags WHERE tag = ?`) is a
+    covering index lookup, not a full scan. The primary key already covers
+    the (transcript_id → tags) direction.
+    """
+    __tablename__ = "transcript_tags"
+    transcript_id = Column(
+        Integer, ForeignKey("transcripts.id", ondelete="CASCADE"), primary_key=True,
+    )
+    tag = Column(String(64), primary_key=True)
+    created_at = Column(DateTime, default=utcnow_naive)
+
+
 class VoiceProfile(Base):
     __tablename__ = "voice_profiles"
     __table_args__ = (UniqueConstraint("user_id", "name", name="uq_voice_profile_user_name"),)
@@ -375,6 +398,20 @@ def init_db(db_path: str = "data/whisperdesk.db") -> tuple:
     ensure_columns(engine, "summaries", {"provider": "TEXT"})
     ensure_columns(engine, "users", {"is_admin": "BOOLEAN DEFAULT 0", "reset_token": "TEXT", "reset_token_expires_at": "TEXT"})
     ensure_columns(engine, "voice_clips", {"embedding_model": "TEXT"})
+    # Brand-new table for issue #171; create_all() above handles fresh DBs,
+    # this idempotent CREATE handles DBs that pre-date the model.
+    with engine.begin() as conn:
+        conn.execute(text(
+            "CREATE TABLE IF NOT EXISTS transcript_tags ("
+            "transcript_id INTEGER NOT NULL REFERENCES transcripts(id) ON DELETE CASCADE, "
+            "tag VARCHAR(64) NOT NULL, "
+            "created_at DATETIME, "
+            "PRIMARY KEY (transcript_id, tag)"
+            ")"
+        ))
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS ix_transcript_tags_tag ON transcript_tags (tag)"
+        ))
     SessionLocal = sessionmaker(bind=engine)
     backfill_llm_job_result_snapshots(SessionLocal)
 
@@ -397,6 +434,6 @@ def init_db(db_path: str = "data/whisperdesk.db") -> tuple:
 
 
 __all__ = [
-    "Base", "User", "Transcript", "Summary", "VoiceNote", "VoiceProfile", "VoiceClip", "ProviderConfig", "TranscriptionJob", "LlmJob", "RelabelHistory", "HotwordEntry",
+    "Base", "User", "Transcript", "Summary", "VoiceNote", "VoiceProfile", "VoiceClip", "ProviderConfig", "TranscriptionJob", "LlmJob", "RelabelHistory", "HotwordEntry", "TranscriptTag",
     "init_db", "migrate_schema", "backfill_user_id", "ensure_columns", "backfill_llm_job_result_snapshots",
 ]

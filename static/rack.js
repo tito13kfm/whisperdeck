@@ -2248,7 +2248,9 @@ function renderBankRows(preservedOpenIds) {
 
   const q = (S.bankQuery || '').trim().toLowerCase();
   const filtered = q
-    ? bankListCache.filter(t => (t.title || '').toLowerCase().includes(q) || (t.filename || '').toLowerCase().includes(q))
+    ? bankListCache.filter(t => (t.title || '').toLowerCase().includes(q)
+      || (t.filename || '').toLowerCase().includes(q)
+      || (t.tags || []).some(tag => tag.toLowerCase().includes(q)))
     : bankListCache.slice();
   const sortFns = {
     'date-desc': (a, b) => new Date(b.created_at) - new Date(a.created_at),
@@ -2284,6 +2286,10 @@ function renderBankRows(preservedOpenIds) {
       acts.push('<button class="btn" style="font-size:12px;padding:6px 12px;border-color:var(--inset-edge)" data-act="retry" data-id="' + t.id + '">Retry</button>');
     acts.push('<button class="btn" style="font-size:12px;padding:6px 12px;border-color:var(--inset-edge)" data-act="rename" data-id="' + t.id + '">Rename</button>');
     acts.push('<button class="btn btn--red" style="font-size:12px;padding:6px 12px" data-act="delete" data-id="' + t.id + '">Delete</button>');
+    const tags = Array.isArray(t.tags) ? t.tags : [];
+    const tagPills = tags.length
+      ? `<div style="display:flex;flex-wrap:wrap;gap:4px;margin-top:4px">${tags.map(tag => `<span style="display:inline-block;font-family:var(--f-mono);font-size:10px;padding:2px 7px;border:1px solid var(--panel-lo);border-radius:9px;background:var(--panel-lo);color:var(--label);text-transform:lowercase;letter-spacing:0.02em" title="Tag from issue #171 auto-tagging">${escapeHtml(tag)}</span>`).join('')}</div>`
+      : '';
     return `
     <details class="unit" data-tid="${t.id}" ${openIds.has(String(t.id)) ? 'open' : ''}>
       <summary style="list-style:none;cursor:pointer;padding:12px 22px 12px 34px;display:grid;grid-template-columns:16px 1fr 190px 112px;align-items:center;gap:16px">
@@ -2291,6 +2297,7 @@ function renderBankRows(preservedOpenIds) {
         <div style="min-width:0">
           <div style="font-weight:600;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(t.title || t.filename || 'Untitled')}</div>
           <div style="font-family:var(--f-mono);font-size:11px;color:var(--label-dim);margin-top:2px">${escapeHtml(transcriptMeta(t))} · click to expand</div>
+          ${tagPills}
         </div>
         ${sv.segments ? stageSegmentBar(sv.segments) : bargraph(sv.cells, 16)}
         <div style="display:flex;flex-direction:column;align-items:flex-end;gap:3px">
@@ -2345,7 +2352,7 @@ function jobActions(j) {
 
 const KIND_LABELS = {
   transcription: 'TRANSCRIBE', correction: 'CORRECT', summary: 'SUMMARIZE', rediarize: 'DIARIZE',
-  voice_match: 'VOICE MATCH', voice_note: 'VOICE NOTE',
+  voice_match: 'VOICE MATCH', voice_note: 'VOICE NOTE', tagging: 'TAG',
   format_markdown: 'MD NOTE', format_email: 'EMAIL DRAFT', format_coding_prompt: 'CODE PROMPT', classify_intent: 'CLASSIFY',
 };
 
@@ -2508,7 +2515,7 @@ function scheduleDetailPoll() {
   const t = detailData;
   if (!t || !(llmJobActive(t.correction_job) || llmJobActive(t.summary_job) || llmJobActive(t.voice_match_job) ||
     llmJobActive(t.format_markdown_job) || llmJobActive(t.format_email_job) || llmJobActive(t.format_coding_prompt_job) ||
-    llmJobActive(t.classify_intent_job))) return;
+    llmJobActive(t.classify_intent_job) || llmJobActive(t.tagging_job))) return;
   const fp = _jobFingerprint(t), id = t.id, prevActive = jobActiveSnapshot(t);
   detailPollTimer = setTimeout(async () => {
     if (S.page !== 'detail' || !detailData || detailData.id !== id) return;
@@ -2944,6 +2951,7 @@ function jobActiveSnapshot(t) {
     format_email: llmJobActive(t.format_email_job),
     format_coding_prompt: llmJobActive(t.format_coding_prompt_job),
     classify_intent: llmJobActive(t.classify_intent_job),
+    tagging: llmJobActive(t.tagging_job),
   };
 }
 
@@ -2983,6 +2991,7 @@ async function updateDetailJobStatus(t, prevActive) {
     { id: 'job-format-markdown', job: t.format_markdown_job, label: 'Markdown note' },
     { id: 'job-format-email', job: t.format_email_job, label: 'Email draft' },
     { id: 'job-format-coding_prompt', job: t.format_coding_prompt_job, label: 'Claude Code prompt' },
+    { id: 'job-tagging', job: t.tagging_job, label: 'Tagging' },
   ];
   for (const { id: containerId, job, label } of runningContainers) {
     if (!llmJobActive(job)) continue;
@@ -3562,7 +3571,14 @@ async function renderDetailBody() {
         }
       } catch { /* roster fetch failing is non-fatal — just skip the nudge */ }
     }
-    body.innerHTML = vm + nudge + exportToolbarHtml('transcript') + '<div class="unit" style="border-radius:3px;margin-top:' + (vm || nudge ? '10px' : '0') + ';padding:6px 32px">' + segmentsHtml(t) + '</div>';
+    const tags = Array.isArray(t.tags) ? t.tags : [];
+    const tagRow = tags.length
+      ? '<div class="unit" style="padding:10px 32px;margin-bottom:10px;font-size:12.5px;color:var(--body);display:flex;align-items:center;gap:10px;flex-wrap:wrap">' +
+        '<span style="font-family:var(--f-mono);font-size:10px;text-transform:uppercase;letter-spacing:0.08em;color:var(--label-dim)">Tags</span>' +
+        tags.map(tag => `<span style="display:inline-block;font-family:var(--f-mono);font-size:10px;padding:3px 9px;border:1px solid var(--panel-lo);border-radius:10px;background:var(--panel-lo);color:var(--label);text-transform:lowercase;letter-spacing:0.02em">${escapeHtml(tag)}</span>`).join('') +
+        '</div>'
+      : '';
+    body.innerHTML = vm + nudge + tagRow + exportToolbarHtml('transcript') + '<div class="unit" style="border-radius:3px;margin-top:' + (vm || nudge ? '10px' : '0') + ';padding:6px 32px">' + segmentsHtml(t) + '</div>';
     body.querySelectorAll('[data-dact]').forEach(b => b.addEventListener('click', () => detailAction(b.dataset.dact, b)));
   } else if (S.detailTab === 'corrected') {
     body.innerHTML = (t.corrected_text ? exportToolbarHtml('corrected') : '') + correctedHtml(t);
