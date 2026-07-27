@@ -23,6 +23,7 @@ from starlette.middleware.sessions import SessionMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.gzip import GZipMiddleware
 from sqlalchemy import or_, func
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from database import init_db, backfill_user_id, Transcript, Summary, VoiceProfile, VoiceClip, ProviderConfig, User, LlmJob, TranscriptionJob, utcnow_naive
@@ -416,7 +417,15 @@ async def register(request: Request, data: dict = Body(...), db: Session = Depen
     ok, reason = validate_password(password)
     if not ok:
         raise HTTPException(status_code=400, detail=reason)
-    user = create_user(db, username, password)
+    try:
+        user = create_user(db, username, password)
+    except IntegrityError:
+        # Concurrent registrations can both pass the SELECT-then-INSERT
+        # check above; the loser's commit hits users.username UNIQUE.
+        # Rollback to keep the session usable, then return the same 400
+        # the synchronous path returns. Issue #125.
+        db.rollback()
+        raise HTTPException(status_code=400, detail="Username already taken")
     request.session["user_id"] = user.id
     rotate_csrf_token(request.session)
     return {"ok": True, "username": user.username}
