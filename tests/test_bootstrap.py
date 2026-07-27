@@ -91,7 +91,7 @@ def test_bootstrap_authenticated_returns_full_payload(client):
     assert set(body["status"].keys()) == {
         "total_transcripts", "completed", "processing", "failed",
         "total_minutes", "voice_profiles", "diarization_available",
-        "voice_id_backend", "backend_name",
+        "voice_id_backend", "backend_name", "voice_notes",
     }
     assert body["recent_transcripts"] == []  # fresh DB
     assert body["jobs"] == {"jobs": [], "active": 0}

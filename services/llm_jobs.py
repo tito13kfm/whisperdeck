@@ -20,6 +20,7 @@ TERMINAL_LLM_STATUSES = ("completed", "failed", "cancelled")
 VALID_KINDS = (
     "correction", "summary", "rediarize", "voice_match",
     "format_markdown", "format_email", "format_coding_prompt", "classify_intent",
+    "voice_note",
 )
 # Auto-retry (issue #14) is scoped to network-dependent kinds only —
 # correction/summary/format_*/classify_intent call a provider API and can
@@ -31,14 +32,14 @@ VALID_KINDS = (
 # "Open Design Questions" in
 # docs/superpowers/plans/2026-07-07-queue-audit-llmjob-auto-retry.md
 # if reconsidering.
-AUTO_RETRY_KINDS = ("correction", "summary", "format_markdown", "format_email", "format_coding_prompt", "classify_intent")
+AUTO_RETRY_KINDS = ("correction", "summary", "format_markdown", "format_email", "format_coding_prompt", "classify_intent", "voice_note")
 # Two independent concurrency pools, capped separately (issue #14): I/O-bound
 # kinds are provider API calls (bounded by provider rate limits, not local
 # resources), CPU-bound kinds are local compute (diarization clustering /
 # embedding extraction) and stay small so they don't fight each other for
 # the same CPU. IO_KINDS/CPU_KINDS must partition VALID_KINDS exactly — see
 # test_io_cpu_pools_partition_valid_kinds.
-IO_KINDS = ("correction", "summary", "format_markdown", "format_email", "format_coding_prompt", "classify_intent")
+IO_KINDS = ("correction", "summary", "format_markdown", "format_email", "format_coding_prompt", "classify_intent", "voice_note")
 CPU_KINDS = ("rediarize", "voice_match")
 _MAX_CONCURRENT_IO_JOBS = 2
 _MAX_CONCURRENT_CPU_JOBS = 1
@@ -191,6 +192,27 @@ def enqueue_auto_classify(db, transcript, user_settings: dict) -> LlmJob | None:
     return enqueue_llm_job(db, transcript.user_id, transcript.id, "classify_intent", provider, model, error=error)
 
 
+def enqueue_auto_voice_note(db, transcript, user_settings: dict) -> LlmJob | None:
+    """Auto-voice-note entry point for the inline and chunked-finalize paths
+    — voice_note transcripts only. Reuses the user's `format_provider` /
+    `format_model` settings (the same LLM that powers the dictation
+    reformat flow, since both are LLM-only text-in/text-out). The chain
+    itself never raises (classify falls back to "general", structure
+    falls back to a stub body), so the only error path is the missing
+    API key skip — same shape as the other auto-enqueue helpers."""
+    if transcript.kind != "voice_note":
+        return None
+    from services.settings import resolve_provider_key, KEYLESS_PROVIDERS
+
+    provider = user_settings.get("format_provider", "groq")
+    model = user_settings.get("format_model", "llama-3.3-70b-versatile")
+    api_key, _ = resolve_provider_key(db, transcript.user_id, provider)
+    error = None
+    if provider not in KEYLESS_PROVIDERS and not api_key:
+        error = f"voice-note chain skipped: no {provider} API key saved (see service panel)"
+    return enqueue_llm_job(db, transcript.user_id, transcript.id, "voice_note", provider, model, error=error)
+
+
 def cancel_llm_job(db, user_id: int, job_id: int) -> LlmJob:
     job = db.query(LlmJob).filter(LlmJob.id == job_id, LlmJob.user_id == user_id).first()
     if not job:
@@ -232,6 +254,7 @@ async def run_llm_job(SessionLocal, job_id: int, transcription_service, diarizat
     from services.reformatting import (
         format_as_markdown, format_as_email, format_as_coding_prompt, classify_intent,
     )
+    from services.voice_notes import run_voice_note_chain
     from services.settings import resolve_provider_key, KEYLESS_PROVIDERS
 
     db = SessionLocal()
@@ -323,6 +346,74 @@ async def run_llm_job(SessionLocal, job_id: int, transcription_service, diarizat
             job.progress_done = 1
             db.commit()
             _finish(db, job, "completed")
+        elif job.kind == "voice_note":
+            # Two-call chain (classify → structure) inside one job. The
+            # progress contract: progress_total = 2; progress_done flips
+            # 0 → 1 between the awaits so the Queue screen shows the
+            # first call as in-flight, then 1 → 2 once the structure
+            # call returns. On any raise from the chain, _finish routes
+            # to failed with the message. Cancellation is checked
+            # between the two awaits — a cancel that lands during the
+            # first call's await won't be noticed until that call
+            # returns, which is the same shape as the other multi-step
+            # LLM jobs in this file (the existing trade-off vs adding
+            # per-token cancellation).
+            job.progress_total = 2
+            db.commit()
+            try:
+                result = await run_voice_note_chain(
+                    transcript, api_key=api_key, provider_name=job.provider,
+                    provider_config=provider_config, model=job.model,
+                )
+                # Honor a cancel that raced the second call: if the job
+                # was cancelled while we awaited, leave status as
+                # 'cancelled' and don't write the artifact. The
+                # transcript itself is unchanged — the user can re-run.
+                db.refresh(job)
+                if job.status == "cancelled":
+                    return
+                job.progress_done = 1
+                db.commit()
+                # Persist the structured payload to the durable
+                # VoiceNote row (one per transcript, in-place update).
+                # The job's result_json carries the same payload for
+                # the run-history view, mirroring how summary does it.
+                from database import VoiceNote
+                existing = (
+                    db.query(VoiceNote)
+                    .filter(VoiceNote.transcript_id == transcript.id)
+                    .first()
+                )
+                if existing:
+                    existing.note_type = result.get("type", "general")
+                    existing.title = (result.get("title") or "")[:255]
+                    existing.body = result.get("body", "")
+                    existing.structured = result.get("structured", {})
+                    existing.model = job.model
+                    existing.provider = job.provider
+                    existing.created_at = utcnow_naive()
+                else:
+                    db.add(VoiceNote(
+                        user_id=transcript.user_id,
+                        transcript_id=transcript.id,
+                        note_type=result.get("type", "general"),
+                        title=(result.get("title") or "")[:255],
+                        body=result.get("body", ""),
+                        structured=result.get("structured", {}),
+                        model=job.model,
+                        provider=job.provider,
+                    ))
+                job.result_json = {
+                    "type": result.get("type", "general"),
+                    "title": result.get("title", ""),
+                    "body": result.get("body", ""),
+                    "structured": result.get("structured", {}),
+                }
+                job.progress_done = 2
+                db.commit()
+                _finish(db, job, "completed")
+            except Exception as e:
+                _finish(db, job, "failed", str(e))
         elif job.kind == "rediarize":
             job.progress_total = 1
             db.commit()

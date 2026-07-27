@@ -26,7 +26,7 @@ from sqlalchemy import or_, func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from database import init_db, backfill_user_id, Transcript, Summary, VoiceProfile, VoiceClip, ProviderConfig, User, LlmJob, TranscriptionJob, utcnow_naive
+from database import init_db, backfill_user_id, Transcript, Summary, VoiceNote, VoiceProfile, VoiceClip, ProviderConfig, User, LlmJob, TranscriptionJob, utcnow_naive
 from services.auth import (
     get_or_create_fallback_user, create_user, authenticate_user, validate_password,
     password_min_length, get_user_by_reset_token,
@@ -47,7 +47,8 @@ from services.hotwords import list_hotwords, add_hotword, delete_hotword
 from services.correction import extract_hotwords_from_doc
 from services.model_catalog import get_correction_models
 from services.llm_jobs import (
-    enqueue_llm_job, enqueue_auto_correction, enqueue_auto_classify, serialize_llm_job,
+    enqueue_llm_job, enqueue_auto_correction, enqueue_auto_classify, enqueue_auto_voice_note,
+    serialize_llm_job,
     cancel_llm_job, rerun_llm_job, llm_worker_loop, reset_stuck_llm_jobs,
     dismiss_llm_job, clear_finished_llm_jobs,
 )
@@ -266,6 +267,7 @@ def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
 _SERIALIZED_JOB_KINDS = (
     "correction", "summary", "voice_match",
     "format_markdown", "format_email", "format_coding_prompt", "classify_intent",
+    "voice_note",
 )
 
 
@@ -349,27 +351,39 @@ def _serialize_transcript(db: Session, t: Transcript, *, jobs_map: dict[tuple[in
 
 
 def _dictation_job_fields(jobs_map: dict[tuple[int, str], LlmJob], t: Transcript) -> dict:
-    """format_*_job / classify_intent_job / classify_intent_hint — gated on
-    t.kind so meeting transcripts (the majority, and which can never have
-    these jobs) skip the 4 extra fields entirely."""
-    if t.kind != "dictation":
+    """format_*_job / classify_intent_job / classify_intent_hint /
+    voice_note_job — kind-gated, but every field is always present
+    (null for kinds that can never have that job). The shape is
+    uniform across all kinds so the frontend doesn't have to switch
+    on kind to read the response (test_meeting_and_dictation_have_same_job_field_names
+    pins this)."""
+    if t.kind == "dictation":
+        classify_job = jobs_map.get((t.id, "classify_intent"))
+        return {
+            "format_markdown_job": serialize_llm_job(jobs_map[(t.id, "format_markdown")]) if (t.id, "format_markdown") in jobs_map else None,
+            "format_email_job": serialize_llm_job(jobs_map[(t.id, "format_email")]) if (t.id, "format_email") in jobs_map else None,
+            "format_coding_prompt_job": serialize_llm_job(jobs_map[(t.id, "format_coding_prompt")]) if (t.id, "format_coding_prompt") in jobs_map else None,
+            "classify_intent_job": serialize_llm_job(classify_job) if classify_job else None,
+            # Auto-computed suggestion — a UI hint for which format button to
+            # highlight, not a gate on any of them.
+            "classify_intent_hint": (
+                classify_job.result_json.get("format")
+                if classify_job and classify_job.status == "completed" and classify_job.result_json
+                else None
+            ),
+            "voice_note_job": None,
+        }
+    if t.kind == "voice_note":
+        vn_job = jobs_map.get((t.id, "voice_note"))
         return {
             "format_markdown_job": None, "format_email_job": None, "format_coding_prompt_job": None,
             "classify_intent_job": None, "classify_intent_hint": None,
+            "voice_note_job": serialize_llm_job(vn_job) if vn_job else None,
         }
-    classify_job = jobs_map.get((t.id, "classify_intent"))
     return {
-        "format_markdown_job": serialize_llm_job(jobs_map[(t.id, "format_markdown")]) if (t.id, "format_markdown") in jobs_map else None,
-        "format_email_job": serialize_llm_job(jobs_map[(t.id, "format_email")]) if (t.id, "format_email") in jobs_map else None,
-        "format_coding_prompt_job": serialize_llm_job(jobs_map[(t.id, "format_coding_prompt")]) if (t.id, "format_coding_prompt") in jobs_map else None,
-        "classify_intent_job": serialize_llm_job(classify_job) if classify_job else None,
-        # Auto-computed suggestion — a UI hint for which format button to
-        # highlight, not a gate on any of them.
-        "classify_intent_hint": (
-            classify_job.result_json.get("format")
-            if classify_job and classify_job.status == "completed" and classify_job.result_json
-            else None
-        ),
+        "format_markdown_job": None, "format_email_job": None, "format_coding_prompt_job": None,
+        "classify_intent_job": None, "classify_intent_hint": None,
+        "voice_note_job": None,
     }
 
 
@@ -478,6 +492,7 @@ def _build_status_payload(db: Session, current_user: User) -> dict:
     )
     total_minutes = sum(d[0] for d in total_duration if d[0]) / 60
     voice_count = db.query(VoiceProfile).filter(VoiceProfile.user_id == current_user.id).count()
+    voice_note_count = db.query(VoiceNote).filter(VoiceNote.user_id == current_user.id).count()
 
     active_prov = db.query(ProviderConfig).filter(
         ProviderConfig.user_id == current_user.id, ProviderConfig.is_active == True  # noqa: E712
@@ -490,6 +505,7 @@ def _build_status_payload(db: Session, current_user: User) -> dict:
         "failed": failed,
         "total_minutes": round(total_minutes, 1),
         "voice_profiles": voice_count,
+        "voice_notes": voice_note_count,
         "diarization_available": diarization_service._check_pyannote(),
         "voice_id_backend": voice_id_service._backend,
         "backend_name": voice_id_service.backend_name,
@@ -935,7 +951,7 @@ async def _run_transcription_pipeline(
     forced off here, server-side, rather than trusting the client to have
     sent diarize=false. Enforced once at this convergence point so it can't
     be bypassed by calling either entry point directly."""
-    if kind == "dictation":
+    if kind in ("dictation", "voice_note"):
         diarize = False
     if capture_source not in (None, "live_stereo"):
         capture_source = None  # unknown values from stale clients are ignored, not errors
@@ -1142,11 +1158,22 @@ async def _run_transcription_pipeline(
 
         # Post-hoc correction pass — queued as a background LlmJob (visible
         # on the Queue screen) instead of blocking this response.
+        # Voice-note transcripts get a different post-pipeline set: the
+        # voice-note chain IS the post-pipeline. They don't want
+        # correction (the structure call already cleans up prose) and
+        # they don't want classify_intent (that's a dictation-only
+        # format-tab hint). Both enqueue helpers no-op on wrong kind
+        # anyway, but skipping the call sites is the cheap belt-and-
+        # braces so a future change to one helper can't quietly
+        # cross-pollinate the wrong kind's flow.
         if auto_correct is None:
             auto_correct = user_settings.get("auto_correct", True)
-        if auto_correct:
-            enqueue_auto_correction(db, transcript, user_settings)
-        enqueue_auto_classify(db, transcript, user_settings)
+        if kind != "voice_note":
+            if auto_correct:
+                enqueue_auto_correction(db, transcript, user_settings)
+            enqueue_auto_classify(db, transcript, user_settings)
+        else:
+            enqueue_auto_voice_note(db, transcript, user_settings)
 
         return _serialize_transcript(db, transcript, jobs_map=_batch_latest_jobs(db, [transcript.id]))
 
@@ -1176,8 +1203,8 @@ async def transcribe_audio(
     current_user: User = Depends(get_current_user),
 ):
     """Upload and transcribe an audio file."""
-    if kind not in ("meeting", "dictation"):
-        raise HTTPException(status_code=400, detail="kind must be 'meeting' or 'dictation'")
+    if kind not in ("meeting", "dictation", "voice_note"):
+        raise HTTPException(status_code=400, detail="kind must be 'meeting', 'dictation', or 'voice_note'")
     # Save uploaded file
     file_ext = os.path.splitext(file.filename or "audio.mp3")[1] or ".mp3"
     safe_name = f"{utcnow_naive().strftime('%Y%m%d_%H%M%S')}_{hash(file.filename or 'audio')}{file_ext}"
@@ -1471,8 +1498,8 @@ async def update_transcript(transcript_id: int, data: dict = Body(...), db: Sess
     if "full_text" in data:
         t.full_text = data["full_text"]
     if "kind" in data:
-        if data["kind"] not in ("meeting", "dictation"):
-            raise HTTPException(status_code=400, detail="kind must be 'meeting' or 'dictation'")
+        if data["kind"] not in ("meeting", "dictation", "voice_note"):
+            raise HTTPException(status_code=400, detail="kind must be 'meeting', 'dictation', or 'voice_note'")
         # The pipeline reads kind mid-job (dictation skips diarization), so a
         # flip during processing would diarize later chunks differently than
         # earlier ones. Only allow changing kind on settled transcripts.
@@ -1889,6 +1916,8 @@ async def summarize_transcript(
     ).first()
     if not t:
         raise HTTPException(status_code=404, detail="Transcript not found")
+    if t.kind == "voice_note":
+        raise HTTPException(status_code=400, detail="Voice notes have their own structured summary — see the Notes tab; the meeting-style summary doesn't apply")
     if t.status != "completed":
         raise HTTPException(status_code=400, detail=f"Transcript {transcript_id} is not completed")
     from services.settings import resolve_provider_key, KEYLESS_PROVIDERS
@@ -1930,6 +1959,8 @@ async def format_transcript(
     if not t:
         raise HTTPException(status_code=404, detail="Transcript not found")
     if t.kind != "dictation":
+        if t.kind == "voice_note":
+            raise HTTPException(status_code=400, detail="Voice notes have their own structured view — see the Notes tab or Voice notes board; reformatting doesn't apply")
         raise HTTPException(status_code=400, detail="Reformatting is only available for dictation transcripts")
     if t.status != "completed":
         raise HTTPException(status_code=400, detail=f"Transcript {transcript_id} is not completed")
@@ -1984,7 +2015,9 @@ async def rediarize_transcript(
     ).first()
     if not t:
         raise HTTPException(status_code=404, detail="Transcript not found")
-    if t.kind == "dictation":
+    if t.kind in ("dictation", "voice_note"):
+        if t.kind == "voice_note":
+            raise HTTPException(status_code=400, detail="Voice notes are single-speaker — re-diarize doesn't apply")
         raise HTTPException(status_code=400, detail="Dictation transcripts are single-speaker — re-diarize doesn't apply")
     if t.status not in ("completed", "partial"):
         raise HTTPException(status_code=400, detail=f"Transcript {transcript_id} is not completed")
@@ -2015,7 +2048,9 @@ async def voice_match_transcript(
     ).first()
     if not t:
         raise HTTPException(status_code=404, detail="Transcript not found")
-    if t.kind == "dictation":
+    if t.kind in ("dictation", "voice_note"):
+        if t.kind == "voice_note":
+            raise HTTPException(status_code=400, detail="Voice notes are single-speaker — voice matching doesn't apply")
         raise HTTPException(status_code=400, detail="Dictation transcripts are single-speaker — voice matching doesn't apply")
     if not (t.audio_path and os.path.exists(t.audio_path)):
         raise HTTPException(status_code=400, detail="No stored audio for this transcript")
@@ -2034,7 +2069,7 @@ async def transcript_runs(
     including dismissed ones (dismiss only hides a job from the Queue
     screen — the row and its result_json snapshot persist). Powers the
     run-comparison picker on the detail page."""
-    if kind not in ("correction", "summary", "rediarize", "format_markdown", "format_email", "format_coding_prompt", "classify_intent"):
+    if kind not in ("correction", "summary", "rediarize", "format_markdown", "format_email", "format_coding_prompt", "classify_intent", "voice_note"):
         raise HTTPException(status_code=400, detail=f"Unknown run kind '{kind}'")
     t = db.query(Transcript).filter(
         Transcript.id == transcript_id, Transcript.user_id == current_user.id
@@ -2055,6 +2090,126 @@ async def transcript_runs(
         }
         for j in jobs
     ]}
+
+
+def _serialize_voice_note(n: VoiceNote) -> dict:
+    if not n:
+        return None
+    return {
+        "id": n.id,
+        "transcript_id": n.transcript_id,
+        "note_type": n.note_type,
+        "title": n.title or "",
+        "body": n.body or "",
+        "structured": n.structured or {},
+        "model": n.model or "",
+        "provider": n.provider or "",
+        "created_at": n.created_at.isoformat() if n.created_at else None,
+    }
+
+
+@app.get("/api/transcripts/{transcript_id}/voice-note")
+async def get_transcript_voice_note(
+    transcript_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Fetch the latest VoiceNote row for this transcript (one per
+    transcript, in-place update on re-run). Returns null when no chain
+    has completed yet — the frontend renders the Notes tab as an
+    empty-state with a "still processing" message in that case."""
+    t = db.query(Transcript).filter(
+        Transcript.id == transcript_id, Transcript.user_id == current_user.id
+    ).first()
+    if not t:
+        raise HTTPException(status_code=404, detail="Transcript not found")
+    note = (
+        db.query(VoiceNote)
+        .filter(VoiceNote.transcript_id == transcript_id)
+        .order_by(VoiceNote.id.desc())
+        .first()
+    )
+    return {"voice_note": _serialize_voice_note(note)}
+
+
+@app.get("/api/voice-notes")
+async def list_voice_notes(
+    limit: int = 100,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """List this user's voice notes, most recent first. Each row
+    includes the source transcript's title and duration so the board
+    page can render a card without a follow-up fetch per card."""
+    rows = (
+        db.query(VoiceNote, Transcript)
+        .join(Transcript, VoiceNote.transcript_id == Transcript.id)
+        .filter(VoiceNote.user_id == current_user.id)
+        .order_by(VoiceNote.created_at.desc(), VoiceNote.id.desc())
+        .limit(limit)
+        .all()
+    )
+    return {"voice_notes": [
+        {
+            **_serialize_voice_note(n),
+            "transcript_title": t.title or "",
+            "transcript_duration_seconds": t.duration_seconds or 0,
+            "transcript_status": t.status,
+        }
+        for n, t in rows
+    ]}
+
+
+@app.delete("/api/voice-notes/{voice_note_id}")
+async def delete_voice_note(
+    voice_note_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Remove a single voice-note row. The underlying transcript is
+    untouched — the note is a derived artifact, the transcript is the
+    user's source recording. Allows the user to discard a bad chain
+    output without losing the source audio/text."""
+    n = (
+        db.query(VoiceNote)
+        .filter(VoiceNote.id == voice_note_id, VoiceNote.user_id == current_user.id)
+        .first()
+    )
+    if not n:
+        raise HTTPException(status_code=404, detail="Voice note not found")
+    db.delete(n)
+    db.commit()
+    return {"deleted": voice_note_id}
+
+
+@app.post("/api/transcripts/{transcript_id}/voice-note/rerun")
+async def rerun_voice_note_chain(
+    transcript_id: int,
+    provider: str = Form("groq"),
+    model: str = Form(""),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """(Re)run the voice-note LLM chain against a completed voice-note
+    transcript. Used by the Notes tab's "Rerun chain" button — the user
+    might want a fresh classification if the first attempt was wrong,
+    or to try a different LLM. Pre-fails with a clear message when no
+    key is saved, mirroring the other LLM-job rerun routes."""
+    t = db.query(Transcript).filter(
+        Transcript.id == transcript_id, Transcript.user_id == current_user.id
+    ).first()
+    if not t:
+        raise HTTPException(status_code=404, detail="Transcript not found")
+    if t.kind != "voice_note":
+        raise HTTPException(status_code=400, detail="Voice-note chain only applies to voice_note transcripts")
+    if t.status not in ("completed", "partial"):
+        raise HTTPException(status_code=400, detail=f"Transcript {transcript_id} is not completed")
+    from services.settings import resolve_provider_key, KEYLESS_PROVIDERS
+    api_key, _ = resolve_provider_key(db, current_user.id, provider)
+    if provider not in KEYLESS_PROVIDERS and not api_key:
+        raise HTTPException(status_code=400, detail=f"No {provider} API key saved — add one in the service panel")
+    job = enqueue_llm_job(db, current_user.id, transcript_id, "voice_note", provider, model)
+    return {"job": serialize_llm_job(job)}
 
 
 @app.get("/api/transcripts/{transcript_id}/versions")
