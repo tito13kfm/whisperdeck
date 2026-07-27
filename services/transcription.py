@@ -184,6 +184,40 @@ class TranscriptionService:
 
         text = transcript_text_for_prompt(transcript)
 
+        if transcript.kind == "voice_note":
+            # The voice-note chain IS the structured summary for this kind
+            # (title/body/per-type fields already written to the VoiceNote
+            # row). Re-running a meeting-style summary on top would be
+            # duplicate work the chain already did. Return a stub pointing
+            # the caller at the Notes tab. Defensive — the /summarize
+            # route already guards this, but the LlmJob "summary" dispatch
+            # is callable from other entry points, so the service stands
+            # on its own.
+            existing = db.query(Summary).filter(Summary.transcript_id == transcript_id).first()
+            short = "Voice note — see the Notes tab for the structured write-up."
+            if existing:
+                existing.short_summary = short
+                existing.key_points = []
+                existing.action_items = []
+                existing.decisions = []
+                existing.model = model
+                existing.provider = provider_name
+                existing.created_at = utcnow_naive()
+                summary = existing
+            else:
+                summary = Summary(
+                    transcript_id=transcript_id,
+                    short_summary=short,
+                    key_points=[],
+                    action_items=[],
+                    decisions=[],
+                    model=model,
+                    provider=provider_name,
+                )
+                db.add(summary)
+            db.commit()
+            return summary
+
         if transcript.kind == "dictation":
             prompt = f"""You are summarizing a single person's spoken dictation (not a meeting — there is no "discussion" between multiple people). Analyze the following transcript and produce a structured summary.
 

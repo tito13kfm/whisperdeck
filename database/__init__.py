@@ -35,7 +35,7 @@ class Transcript(Base):
     user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     title = Column(String(255), nullable=False)
     filename = Column(String(255), nullable=False)
-    kind = Column(String(16), default="meeting")  # meeting | dictation — drives default diarization, summary prompt, and available reformat actions
+    kind = Column(String(16), default="meeting")  # meeting | dictation | voice_note — drives default diarization, summary prompt, available reformat actions, and whether the voice-note LLM chain fires
     duration_seconds = Column(Float, default=0)
     provider = Column(String(64), default="groq")
     model = Column(String(64), default="whisper-large-v3-turbo")
@@ -61,6 +61,7 @@ class Transcript(Base):
     updated_at = Column(DateTime, default=utcnow_naive, onupdate=utcnow_naive)
 
     summary = relationship("Summary", back_populates="transcript", uselist=False, cascade="all, delete-orphan")
+    voice_note = relationship("VoiceNote", back_populates="transcript", uselist=False, cascade="all, delete-orphan")
     jobs = relationship("TranscriptionJob", back_populates="transcript", cascade="all, delete-orphan")
     # ORM-level cascade is load-bearing: the FK's ondelete="CASCADE" never
     # fires because SQLite's foreign_keys pragma is off (never enabled by
@@ -149,6 +150,33 @@ class Summary(Base):
     created_at = Column(DateTime, default=utcnow_naive)
 
     transcript = relationship("Transcript", back_populates="summary")
+
+
+class VoiceNote(Base):
+    """Structured output of a voice-note capture (issue #169). One row per
+    transcript — a re-run of the chain overwrites the row in place, mirroring
+    how `Summary` is the only-summary per transcript. The chain itself
+    lives in `LlmJob(kind="voice_note")`; this table is the durable,
+    queryable artifact (title/body/structured fields, surfaced in the
+    Notes tab on detail and the board page). The job's own `result_json`
+    carries the same payload for the run-history view."""
+    __tablename__ = "voice_notes"
+    __table_args__ = (UniqueConstraint("transcript_id", name="uq_voice_note_transcript"),)
+
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    transcript_id = Column(
+        Integer, ForeignKey("transcripts.id", ondelete="CASCADE"), nullable=False,
+    )
+    note_type = Column(String(16), nullable=False)  # todo | idea | reminder | journal | general
+    title = Column(String(255), default="")
+    body = Column(Text, default="")
+    structured = Column(JSON, default=dict)  # per-type field bag (e.g. todo: {priority, due_date, items})
+    model = Column(String(128), default="")
+    provider = Column(String(64), default="")
+    created_at = Column(DateTime, default=utcnow_naive, onupdate=utcnow_naive)
+
+    transcript = relationship("Transcript", back_populates="voice_note")
 
 
 class VoiceProfile(Base):
@@ -369,6 +397,6 @@ def init_db(db_path: str = "data/whisperdesk.db") -> tuple:
 
 
 __all__ = [
-    "Base", "User", "Transcript", "Summary", "VoiceProfile", "VoiceClip", "ProviderConfig", "TranscriptionJob", "LlmJob", "RelabelHistory", "HotwordEntry",
+    "Base", "User", "Transcript", "Summary", "VoiceNote", "VoiceProfile", "VoiceClip", "ProviderConfig", "TranscriptionJob", "LlmJob", "RelabelHistory", "HotwordEntry",
     "init_db", "migrate_schema", "backfill_user_id", "ensure_columns", "backfill_llm_job_result_snapshots",
 ]

@@ -27,6 +27,17 @@ def test_patch_kind_toggles_and_serializes(client, db_session):
     assert t.kind == "dictation"
 
 
+def test_patch_kind_accepts_voice_note(client, db_session):
+    """Issue #169: voice_note is a third valid kind. PATCH must accept
+    it in the allowlist alongside meeting/dictation."""
+    t = _make_transcript(db_session, kind="meeting")
+    r = client.patch(f"/api/transcripts/{t.id}", json={"kind": "voice_note"})
+    assert r.status_code == 200
+    assert r.json()["kind"] == "voice_note"
+    db_session.refresh(t)
+    assert t.kind == "voice_note"
+
+
 def test_patch_kind_rejects_unknown_value(client, db_session):
     t = _make_transcript(db_session)
     r = client.patch(f"/api/transcripts/{t.id}", json={"kind": "podcast"})

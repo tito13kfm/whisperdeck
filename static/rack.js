@@ -38,7 +38,7 @@ const S = {
   autoCorrect: false,
   correctionPending: false,   // true while a non-blocking post-completion auto-correct poll is watching this run
   correctionStatus: null,     // pending | running | completed | failed — mirrors the run's correction_job.status
-  mode: 'meeting',            // meeting | dictation — dictation skips diarization, unlocks reformat actions on the detail page
+  mode: 'meeting',            // meeting | dictation | voice_note — dictation/voice_note skip diarization, unlock their own post-pipeline sets
   // live capture
   capturing: false,
   stereoLive: false,
@@ -401,7 +401,7 @@ function stageSegmentBar(segments, height = 16) {
 }
 
 /* ══════════════════ navigation ══════════════════ */
-const PAGES = ['dashboard', 'transcribe', 'transcripts', 'queue', 'detail', 'voices', 'files', 'settings'];
+const PAGES = ['dashboard', 'transcribe', 'transcripts', 'voicenotes', 'queue', 'detail', 'voices', 'files', 'settings'];
 
 // Rail chrome (Tape-library/Voice-roster nav badges, storage meter) is
 // otherwise only refreshed as a side effect of loadDashboard() — visiting
@@ -414,6 +414,8 @@ async function refreshRailChrome() {
     const st = await api('/api/status');
     $('nav-badge-transcripts').textContent = String(st.total_transcripts ?? 0).padStart(2, '0');
     $('nav-badge-voices').textContent = String(st.voice_profiles ?? 0).padStart(2, '0');
+    const vnBadge = $('nav-badge-voicenotes');
+    if (vnBadge) vnBadge.textContent = String(st.voice_notes ?? 0).padStart(2, '0');
     updateRailStorage(st.total_minutes ?? 0);
   } catch { /* chrome refresh is best-effort */ }
 }
@@ -433,6 +435,7 @@ function navigate(page, data) {
     dashboard: loadDashboard,
     transcribe: renderTranscribe,
     transcripts: loadTranscripts,
+    voicenotes: loadVoiceNotes,
     queue: loadQueue,
     detail: () => loadTranscriptDetail(S.detailId),
     voices: loadVoices,
@@ -881,6 +884,8 @@ async function loadDashboard() {
     updateRailStorage(st.total_minutes ?? 0);
     $('nav-badge-transcripts').textContent = String(st.total_transcripts ?? 0).padStart(2, '0');
     $('nav-badge-voices').textContent = String(st.voice_profiles ?? 0).padStart(2, '0');
+    const vnBadge2 = $('nav-badge-voicenotes');
+    if (vnBadge2) vnBadge2.textContent = String(st.voice_notes ?? 0).padStart(2, '0');
     refreshQueueBadge();
 
     $('dash-recents').innerHTML = (recents && recents.length) ? recents.map(t => {
@@ -1457,10 +1462,11 @@ function wireTranscribe() {
   $('ctl-mode').addEventListener('click', () => {
     if (S.running) return;
     // Don't touch S.diarize here: startJob() already forces diarize=false
-    // for dictation at submit time, and syncTranscribe() already renders
-    // the Speakers control locked to N/A in dictation mode — mutating the
-    // stored preference would silently clobber it on the next meeting job.
-    S.mode = S.mode === 'meeting' ? 'dictation' : 'meeting';
+    // for dictation/voice_note at submit time, and syncTranscribe() already
+    // renders the Speakers control locked to N/A in those modes —
+    // mutating the stored preference would silently clobber it on the
+    // next meeting job.
+    S.mode = S.mode === 'meeting' ? 'dictation' : S.mode === 'dictation' ? 'voice_note' : 'meeting';
     syncTranscribe();
   });
   $('ctl-diarize').addEventListener('click', () => {
@@ -1645,12 +1651,17 @@ function syncTranscribe() {
   setVfd('vfd-provider', prov.name);
   setVfd('vfd-model', curModel());
   setVfd('vfd-lang', LANGUAGES[S.langIdx]);
-  $('tog-mode').classList.toggle('on', S.mode === 'dictation');
-  setVfd('vfd-mode', S.mode === 'dictation' ? 'DICTATION' : 'MEETING');
-  $('ctl-diarize').classList.toggle('locked', S.running || S.mode === 'dictation');
-  $('tog-diarize').classList.toggle('on', S.diarize && S.mode !== 'dictation');
+  // Mode is a 3-state cycle (meeting / dictation / voice_note). The
+  // binary `tog-mode.on` visual still works for the off→on paddle
+  // flip, but the VFD label and the diarize lock need the full set.
+  const modeLabel = S.mode === 'dictation' ? 'DICTATION' : S.mode === 'voice_note' ? 'VOICE NOTE' : 'MEETING';
+  const singleSpeaker = S.mode === 'dictation' || S.mode === 'voice_note';
+  $('tog-mode').classList.toggle('on', singleSpeaker);
+  setVfd('vfd-mode', modeLabel);
+  $('ctl-diarize').classList.toggle('locked', S.running || singleSpeaker);
+  $('tog-diarize').classList.toggle('on', S.diarize && !singleSpeaker);
   $('tog-autocorrect').classList.toggle('on', S.autoCorrect);
-  setVfd('vfd-diarize', S.mode === 'dictation' ? 'N/A' : (S.diarize ? 'ON' : 'OFF'));
+  setVfd('vfd-diarize', singleSpeaker ? 'N/A' : (S.diarize ? 'ON' : 'OFF'));
   setVfd('vfd-autocorrect', S.autoCorrect ? 'ON' : 'OFF');
 
   // instruments monitor + nav badge
@@ -2060,6 +2071,93 @@ function bankDetailFields(t, sv) {
   }
 }
 
+async function loadVoiceNotes() {
+  // The board page: a card grid of recent voice notes, grouped by
+  // note_type. Mirrors the loadTranscripts() render shape so the
+  // chassis styling picks it up. Click a card to open the source
+  // transcript (the user reads/edits the note on the detail Notes
+  // tab, not here).
+  const root = $('page-voicenotes');
+  refreshRailChrome();
+  let data;
+  try { data = await api('/api/voice-notes'); } catch (e) { toast(e.message, 'error'); return; }
+  const notes = data.voice_notes || [];
+  if (!notes.length) {
+    root.innerHTML =
+      '<div class="page-head">' +
+        '<h1 class="t-title">Voice notes</h1>' +
+        '<div class="page-status page-status--ok">0 notes</div>' +
+      '</div>' +
+      '<div class="empty-unit">No voice notes yet. Record one in <a href="#" data-nav="transcribe" style="color:var(--nixie)">Transcribe</a> with the mode toggle set to VOICE NOTE.</div>';
+    root.querySelector('[data-nav]')?.addEventListener('click', (e) => { e.preventDefault(); navigate('transcribe'); });
+    return;
+  }
+  const cards = notes.map(n => {
+    const typeColor = NOTE_TYPE_COLORS[n.note_type] || NOTE_TYPE_COLORS.general;
+    const typeLabel = NOTE_TYPE_LABELS[n.note_type] || n.note_type;
+    const preview = (n.body || '').slice(0, 220) + ((n.body || '').length > 220 ? '…' : '');
+    let structuredBits = '';
+    if (n.note_type === 'todo' && n.structured && Array.isArray(n.structured.items)) {
+      structuredBits = n.structured.items.slice(0, 3).map(it =>
+        '<div style="font-size:12px;color:var(--body);padding:2px 0;border-top:1px solid var(--seg-edge)">' +
+          '<span style="font-size:9px;padding:1px 5px;border-radius:3px;background:' +
+            (it.priority === 'high' ? 'var(--red)' : it.priority === 'low' ? 'var(--label-dim)' : 'var(--nixie)') +
+            ';color:#04140C;text-transform:uppercase;letter-spacing:0.05em;font-family:var(--f-mono);margin-right:6px">' + escapeHtml(it.priority || 'med') + '</span>' +
+          escapeHtml((it.text || '').slice(0, 80)) +
+        '</div>'
+      ).join('');
+    } else if (n.note_type === 'reminder' && n.structured) {
+      structuredBits =
+        (n.structured.trigger ? '<div style="font-family:var(--f-mono);font-size:10px;color:var(--label-dim);text-transform:uppercase;letter-spacing:0.06em">When</div><div style="font-size:12px">' + escapeHtml(n.structured.trigger) + '</div>' : '') +
+        (n.structured.subject ? '<div style="font-family:var(--f-mono);font-size:10px;color:var(--label-dim);text-transform:uppercase;letter-spacing:0.06em;margin-top:4px">What</div><div style="font-size:12px">' + escapeHtml(n.structured.subject) + '</div>' : '');
+    } else if (n.note_type === 'idea' && n.structured && Array.isArray(n.structured.tags) && n.structured.tags.length) {
+      structuredBits = '<div style="display:flex;gap:4px;flex-wrap:wrap;margin-top:6px">' + n.structured.tags.slice(0, 4).map(t =>
+        '<span style="font-size:9px;padding:2px 7px;border-radius:9px;background:var(--panel-hi);color:var(--body);border:1px solid var(--inset-edge);text-transform:lowercase;letter-spacing:0.04em;font-family:var(--f-mono)">' + escapeHtml(t) + '</span>'
+      ).join('') + '</div>';
+    } else if (n.note_type === 'journal' && n.structured && Array.isArray(n.structured.themes) && n.structured.themes.length) {
+      structuredBits = '<div style="display:flex;gap:4px;flex-wrap:wrap;margin-top:6px">' + n.structured.themes.slice(0, 4).map(t =>
+        '<span style="font-size:9px;padding:2px 7px;border-radius:9px;background:var(--panel-hi);color:var(--body);border:1px solid var(--inset-edge);text-transform:lowercase;letter-spacing:0.04em;font-family:var(--f-mono)">' + escapeHtml(t) + '</span>'
+      ).join('') + '</div>';
+    }
+    return `
+      <div class="unit voice-note-card" data-tid="${n.transcript_id}" style="padding:18px 22px;cursor:pointer">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+          <span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${typeColor};box-shadow:0 0 5px ${typeColor}"></span>
+          <span style="font-family:var(--f-cond);font-weight:600;font-size:10.5px;text-transform:uppercase;letter-spacing:0.1em;color:${typeColor}">${escapeHtml(typeLabel)}</span>
+          <span style="font-family:var(--f-mono);font-size:10px;color:var(--label-dim);margin-left:auto">${timeAgo(n.created_at)}</span>
+        </div>
+        <h3 style="font-family:var(--f-cond);font-weight:700;font-size:16px;line-height:1.25;margin:0 0 6px">${escapeHtml(n.title || 'Voice note')}</h3>
+        <div style="font-family:var(--f-mono);font-size:10.5px;color:var(--label-dim);margin-bottom:10px">From "${escapeHtml(n.transcript_title || 'transcript')}" · ${formatDur(n.transcript_duration_seconds || 0)}</div>
+        ${preview ? '<div style="font-size:12.5px;line-height:1.5;color:var(--body);white-space:pre-wrap;margin-bottom:8px">' + escapeHtml(preview) + '</div>' : ''}
+        ${structuredBits ? '<div style="margin-top:8px">' + structuredBits + '</div>' : ''}
+        <div style="display:flex;gap:6px;margin-top:12px;justify-content:flex-end">
+          <button class="btn" data-vnact="discard" data-vnid="${n.id}" style="font-size:10px;padding:4px 10px">Discard</button>
+          <button class="btn" data-vnact="open" data-tid="${n.transcript_id}" style="font-size:10px;padding:4px 10px">Open →</button>
+        </div>
+      </div>`;
+  }).join('');
+  root.innerHTML = `
+    <div class="page-head">
+      <h1 class="t-title">Voice notes</h1>
+      <div class="page-status page-status--ok">${notes.length} note${notes.length !== 1 ? 's' : ''}</div>
+    </div>
+    <div class="voice-note-grid">${cards}</div>`;
+  root.querySelectorAll('[data-vnact]').forEach(b => b.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (b.dataset.vnact === 'open') navigate('detail', Number(b.dataset.tid));
+    else if (b.dataset.vnact === 'discard') discardVoiceNote(Number(b.dataset.vnid));
+  }));
+  root.querySelectorAll('.voice-note-card').forEach(c => c.addEventListener('click', () => {
+    navigate('detail', Number(c.dataset.tid));
+  }));
+}
+
+async function discardVoiceNote(id) {
+  if (!(await styledConfirm('Discard this voice note? The transcript stays.'))) return;
+  try { await api('/api/voice-notes/' + id, { method: 'DELETE' }); toast('Voice note discarded'); loadVoiceNotes(); }
+  catch (e) { toast(e.message, 'error'); }
+}
+
 async function loadTranscripts() {
   const root = $('page-transcripts');
   let list;
@@ -2247,7 +2345,7 @@ function jobActions(j) {
 
 const KIND_LABELS = {
   transcription: 'TRANSCRIBE', correction: 'CORRECT', summary: 'SUMMARIZE', rediarize: 'DIARIZE',
-  voice_match: 'VOICE MATCH',
+  voice_match: 'VOICE MATCH', voice_note: 'VOICE NOTE',
   format_markdown: 'MD NOTE', format_email: 'EMAIL DRAFT', format_coding_prompt: 'CODE PROMPT', classify_intent: 'CLASSIFY',
 };
 
@@ -2386,10 +2484,12 @@ async function loadTranscriptDetail(id, opts = {}) {
   if (prevId !== null && prevId !== detailData.id) resetSegAudio();
   if (!opts.preserveQuery) S.query = '';
   // S.detailTab is a global that survives navigation between transcripts —
-  // if it's pointed at the Format tab (dictation-only) and the newly-opened
-  // transcript is a meeting, fall back rather than leave a stale tab
-  // selection that renderDetailBody would otherwise still act on.
+  // if it's pointed at a kind-specific tab (format for dictation, notes
+  // for voice_note) and the newly-opened transcript is the wrong kind,
+  // fall back rather than leave a stale tab selection that
+  // renderDetailBody would otherwise still act on.
   if (S.detailTab === 'format' && detailData.kind !== 'dictation') S.detailTab = 'transcript';
+  if (S.detailTab === 'notes' && detailData.kind !== 'voice_note') S.detailTab = 'transcript';
   renderDetail();
   scheduleDetailPoll();
 }
@@ -2425,6 +2525,7 @@ function scheduleDetailPoll() {
 function detailTabsHtml() {
   const tabs = ['transcript', 'corrected', 'summary'];
   if (detailData && detailData.kind === 'dictation') tabs.push('format');
+  if (detailData && detailData.kind === 'voice_note') tabs.push('notes');
   return tabs.map(tb => {
     const on = S.detailTab === tb;
     return `
@@ -3165,6 +3266,98 @@ const FORMAT_TARGETS = [
   { key: 'coding_prompt', kind: 'format_coding_prompt', label: 'Claude Code prompt', hint: 'coding_prompt' },
 ];
 
+const NOTE_TYPE_LABELS = {
+  todo: 'Todo', idea: 'Idea', reminder: 'Reminder', journal: 'Journal', general: 'Note',
+};
+const NOTE_TYPE_COLORS = {
+  todo: '#FF8A3D',       // nixie amber
+  idea: '#7FE0C8',       // cyan
+  reminder: '#FFCB6B',   // yellow
+  journal: '#C8A6FF',    // violet
+  general: '#A9ACAF',    // neutral
+};
+
+async function voiceNoteHtml(t) {
+  // The chain writes to a VoiceNote row AND a LlmJob result_json. The
+  // serializer already exposes voice_note_job.result_json, so we read
+  // from there to avoid a follow-up /voice-note fetch — same shape
+  // either way (the API endpoint and the serializer populate
+  // identical JSON).
+  const job = t.voice_note_job;
+  const inFlight = job && (job.status === 'pending' || job.status === 'running');
+  if (inFlight) {
+    return '<div class="unit" style="padding:32px;text-align:center">' +
+      '<div class="t-cap" style="font-size:11px;letter-spacing:0.16em;margin-bottom:12px">Voice note · ' +
+        escapeHtml(job.progress ? (job.progress.done + ' of ' + job.progress.total) : 'queued') +
+      '</div>' +
+      '<div style="font-family:var(--f-mono);font-size:11.5px;color:var(--label-dim)">The LLM is figuring out what kind of note this is and writing it up. Watch the Queue screen for live progress.</div>' +
+    '</div>';
+  }
+  if (job && job.status === 'failed') {
+    return '<div class="unit" style="padding:32px">' +
+      '<div class="t-cap" style="font-size:11px;letter-spacing:0.16em;margin-bottom:12px;color:var(--red)">Voice note chain failed</div>' +
+      '<div style="font-family:var(--f-mono);font-size:11.5px;color:var(--label-dim)">' + escapeHtml(job.error || 'unknown error') + '</div>' +
+      '<div style="margin-top:14px"><button class="btn" data-dact="rerun-voice-note" style="font-size:12px;padding:7px 14px;border-color:var(--inset-edge)">Rerun chain</button></div>' +
+    '</div>';
+  }
+  if (!job || !job.result_json) {
+    return '<div class="empty-unit">No voice-note result yet. The chain runs automatically after transcription completes.</div>';
+  }
+  const r = job.result_json;
+  const noteType = r.type || 'general';
+  const typeLabel = NOTE_TYPE_LABELS[noteType] || noteType;
+  const typeColor = NOTE_TYPE_COLORS[noteType] || NOTE_TYPE_COLORS.general;
+  const title = r.title || t.title || 'Voice note';
+  const body = r.body || '';
+  const structured = r.structured || {};
+  let structuredHtml = '';
+  if (noteType === 'todo' && Array.isArray(structured.items) && structured.items.length) {
+    structuredHtml = '<div style="margin-top:14px"><div class="t-cap" style="font-size:10px;letter-spacing:0.14em;margin-bottom:8px">Items</div>' +
+      structured.items.map(it => {
+        const pri = it.priority || 'medium';
+        const priColor = pri === 'high' ? 'var(--red)' : pri === 'low' ? 'var(--label-dim)' : 'var(--nixie)';
+        return '<div style="display:flex;gap:10px;align-items:flex-start;padding:6px 0;border-bottom:1px solid var(--seg-edge)">' +
+          '<span style="font-size:9px;padding:2px 6px;border-radius:3px;background:' + priColor + ';color:#04140C;text-transform:uppercase;letter-spacing:0.05em;font-family:var(--f-mono);flex-shrink:0;margin-top:2px">' + escapeHtml(pri) + '</span>' +
+          '<div style="min-width:0"><div style="font-size:13.5px;line-height:1.5">' + escapeHtml(it.text || '') + '</div>' +
+            (it.due_date ? '<div style="font-family:var(--f-mono);font-size:10.5px;color:var(--label-dim);margin-top:2px">Due ' + escapeHtml(it.due_date) + '</div>' : '') +
+          '</div></div>';
+      }).join('') + '</div>';
+  } else if (noteType === 'idea') {
+    structuredHtml = '<div style="margin-top:14px">' +
+      (structured.summary ? '<div style="font-size:13.5px;line-height:1.55">' + escapeHtml(structured.summary) + '</div>' : '') +
+      (Array.isArray(structured.tags) && structured.tags.length
+        ? '<div style="margin-top:10px;display:flex;gap:6px;flex-wrap:wrap">' + structured.tags.map(t => '<span style="font-size:10px;padding:3px 9px;border-radius:9px;background:var(--panel-hi);color:var(--body);border:1px solid var(--inset-edge);text-transform:lowercase;letter-spacing:0.04em;font-family:var(--f-mono)">' + escapeHtml(t) + '</span>').join('') + '</div>'
+        : '') +
+    '</div>';
+  } else if (noteType === 'reminder') {
+    structuredHtml = '<div style="margin-top:14px">' +
+      (structured.trigger ? '<div style="font-family:var(--f-mono);font-size:10.5px;color:var(--label-dim);text-transform:uppercase;letter-spacing:0.08em;margin-bottom:3px">When</div><div style="font-size:13.5px;line-height:1.5;margin-bottom:10px">' + escapeHtml(structured.trigger) + '</div>' : '') +
+      (structured.subject ? '<div style="font-family:var(--f-mono);font-size:10.5px;color:var(--label-dim);text-transform:uppercase;letter-spacing:0.08em;margin-bottom:3px">What</div><div style="font-size:13.5px;line-height:1.5">' + escapeHtml(structured.subject) + '</div>' : '') +
+    '</div>';
+  } else if (noteType === 'journal') {
+    structuredHtml = '<div style="margin-top:14px">' +
+      (structured.mood ? '<div style="font-family:var(--f-mono);font-size:10.5px;color:var(--label-dim);text-transform:uppercase;letter-spacing:0.08em;margin-bottom:3px">Mood</div><div style="font-size:13.5px;line-height:1.5;margin-bottom:10px">' + escapeHtml(structured.mood) + '</div>' : '') +
+      (Array.isArray(structured.themes) && structured.themes.length
+        ? '<div style="display:flex;gap:6px;flex-wrap:wrap">' + structured.themes.map(t => '<span style="font-size:10px;padding:3px 9px;border-radius:9px;background:var(--panel-hi);color:var(--body);border:1px solid var(--inset-edge);text-transform:lowercase;letter-spacing:0.04em;font-family:var(--f-mono)">' + escapeHtml(t) + '</span>').join('') + '</div>'
+        : '') +
+    '</div>';
+  }
+  return '<div class="unit" style="padding:24px 32px">' +
+    '<div style="display:flex;align-items:center;gap:10px;margin-bottom:14px">' +
+      '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:' + typeColor + ';box-shadow:0 0 6px ' + typeColor + '"></span>' +
+      '<span style="font-family:var(--f-cond);font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:0.1em;color:' + typeColor + '">' + escapeHtml(typeLabel) + '</span>' +
+      (job.model ? '<span style="font-family:var(--f-mono);font-size:10px;color:var(--label-dim);margin-left:auto">' + escapeHtml((job.provider || '') + (job.model ? ' · ' + job.model : '')) + '</span>' : '') +
+    '</div>' +
+    '<h2 style="font-family:var(--f-cond);font-weight:700;font-size:22px;line-height:1.25;margin:0 0 12px">' + escapeHtml(title) + '</h2>' +
+    (body ? '<div style="font-size:14px;line-height:1.6;color:var(--body);white-space:pre-wrap">' + escapeHtml(body) + '</div>' : '') +
+    structuredHtml +
+    '<div style="margin-top:18px;display:flex;gap:8px;align-items:center">' +
+      '<button class="btn" data-dact="rerun-voice-note" style="font-size:11px;padding:6px 12px;border-color:var(--inset-edge)">Rerun chain</button>' +
+      '<button class="btn btn--red" data-dact="delete-voice-note" style="font-size:11px;padding:6px 12px">Discard note</button>' +
+    '</div>' +
+  '</div>';
+}
+
 async function formatHtml(t) {
   const cards = await Promise.all(FORMAT_TARGETS.map(async (target) => {
     const job = t[target.kind + '_job'];
@@ -3240,7 +3433,10 @@ function renderDetail() {
   const root = $('page-detail');
   const sv = statusView(t);
   const kind = t.kind || 'meeting';
-  const kindLabel = kind.charAt(0).toUpperCase() + kind.slice(1);
+  // voice_note renders as "Voice note" (the kind value with an
+  // underscore reads poorly as a UI label — the user sees the VFD
+  // value "VOICE NOTE" elsewhere, this is the matching title-case).
+  const kindLabel = kind === 'voice_note' ? 'Voice note' : (kind.charAt(0).toUpperCase() + kind.slice(1));
   const extraActs = [];
   if (t.status === 'partial')
     extraActs.push('<button class="btn" style="font-size:12px;padding:7px 14px;border-color:var(--inset-edge)" data-dact="retry">Retry failed sections</button>');
@@ -3308,7 +3504,7 @@ function renderDetail() {
         <div style="font-size:12.5px"><div style="font-family:var(--f-mono);font-size:10px;text-transform:uppercase;letter-spacing:0.08em;color:var(--label-dim);margin-bottom:3px">Status</div><span id="detail-status-badge" class="status-badge status-badge--${escapeHtml(sv.word)}" data-word="${escapeHtml(sv.word)}">${escapeHtml(sv.word)}</span></div>
         <div style="font-size:12.5px"><div style="font-family:var(--f-mono);font-size:10px;text-transform:uppercase;letter-spacing:0.08em;color:var(--label-dim);margin-bottom:3px">Speakers</div>${t.speaker_count || '—'}${t.diarization_method ? ` <span style="font-size:10px;color:var(--label-dim)">${escapeHtml(t.diarization_method)}${t.num_speakers ? '' : ' (auto)'}</span>` : ''}${(() => { const u = (t.segments || []).filter(isLowConfidence).length; return u ? ` <span style="font-size:10px;color:var(--nixie)" title="Lines where the speaker assignment is uncertain">${u} uncertain</span>` : ''; })()}</div>
         <div style="font-size:12.5px"><div style="font-family:var(--f-mono);font-size:10px;text-transform:uppercase;letter-spacing:0.08em;color:var(--label-dim);margin-bottom:3px">Segments</div>${(t.segments || []).length}</div>
-        <div style="font-size:12.5px"><div style="font-family:var(--f-mono);font-size:10px;text-transform:uppercase;letter-spacing:0.08em;color:var(--label-dim);margin-bottom:3px">Mode</div><button class="btn" style="font-size:11px;padding:2px 10px;border-color:var(--inset-edge);cursor:pointer" title="Switch between meeting and dictation mode" data-dact="toggle-kind">${escapeHtml(kindLabel)}</button></div>
+        <div style="font-size:12.5px"><div style="font-family:var(--f-mono);font-size:10px;text-transform:uppercase;letter-spacing:0.08em;color:var(--label-dim);margin-bottom:3px">Mode</div><button class="btn" style="font-size:11px;padding:2px 10px;border-color:var(--inset-edge);cursor:pointer" title="Switch between meeting, dictation, and voice-note modes" data-dact="toggle-kind">${escapeHtml(kindLabel)}</button></div>
       </div>
     </div>
     ${videoHtml}
@@ -3380,6 +3576,11 @@ async function renderDetailBody() {
     // navigation, but render defensively here too rather than show live
     // Generate buttons for a feature this transcript doesn't support.
     body.innerHTML = '<div class="empty-unit">Not available for meeting transcripts</div>';
+  } else if (S.detailTab === 'notes' && t.kind === 'voice_note') {
+    body.innerHTML = '<div class="empty-unit">Loading voice note…</div>';
+    body.innerHTML = await voiceNoteHtml(t);
+  } else if (S.detailTab === 'notes') {
+    body.innerHTML = '<div class="empty-unit">Not available for non-voice-note transcripts</div>';
   } else {
     body.innerHTML = '<div class="empty-unit">Loading summary…</div>';
     body.innerHTML = (t.has_summary ? exportToolbarHtml('summary') : '') + await summaryHtml(t);
@@ -3400,14 +3601,57 @@ async function detailAction(act, btn) {
       return;
     }
     if (act === 'toggle-kind') {
-      const newKind = t.kind === 'dictation' ? 'meeting' : 'dictation';
-      await api('/api/transcripts/' + t.id, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ kind: newKind }),
-      });
-      toast('Switched to ' + newKind + ' mode', 'info');
-      S.detailTab = 'transcript';
+      // 3-state cycle: meeting → dictation → voice_note → meeting.
+      // The PATCH endpoint guards against a kind change while the
+      // transcript is still processing (it reads kind mid-pipeline to
+      // decide diarization), so a status==='processing' transcript
+      // would 400 here — that's intentional, the user has to wait
+      // for the current job to settle.
+      const newKind = t.kind === 'meeting' ? 'dictation' : t.kind === 'dictation' ? 'voice_note' : 'meeting';
+      try {
+        await api('/api/transcripts/' + t.id, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ kind: newKind }),
+        });
+      } catch (e) {
+        if (e.message && e.message.includes('400')) {
+          toast('Wait for the current job to finish before changing kind', 'info');
+        } else {
+          throw e;
+        }
+        return;
+      }
+      toast('Switched to ' + (newKind === 'voice_note' ? 'voice note' : newKind) + ' mode', 'info');
+      S.detailTab = newKind === 'voice_note' ? 'notes' : 'transcript';
+      await loadTranscriptDetail(t.id);
+      return;
+    }
+    if (act === 'rerun-voice-note') {
+      // Re-enqueue the chain with the same provider/model the
+      // previous job used. The VoiceNote row is overwritten in place
+      // when the chain completes.
+      const j = t.voice_note_job;
+      const provider = (j && j.provider) || 'groq';
+      const model = (j && j.model) || '';
+      const form = new FormData();
+      form.append('provider', provider);
+      form.append('model', model);
+      await api('/api/transcripts/' + t.id + '/voice-note/rerun', { method: 'POST', body: form });
+      toast('Voice-note chain re-queued', 'info');
+      await loadTranscriptDetail(t.id);
+      return;
+    }
+    if (act === 'delete-voice-note') {
+      if (!(await styledConfirm('Discard this voice note? The transcript stays.'))) return;
+      const list = await api('/api/voice-notes');
+      const match = (list.voice_notes || []).find(n => n.transcript_id === t.id);
+      if (match) {
+        await api('/api/voice-notes/' + match.id, { method: 'DELETE' });
+        toast('Voice note discarded');
+      } else {
+        toast('No voice-note row to discard', 'info');
+      }
       await loadTranscriptDetail(t.id);
       return;
     }

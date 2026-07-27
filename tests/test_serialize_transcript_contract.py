@@ -34,6 +34,7 @@ EXPECTED_KEYS = {
     "correction_job", "summary_job", "voice_match_job",
     "format_markdown_job", "format_email_job", "format_coding_prompt_job",
     "classify_intent_job", "classify_intent_hint",
+    "voice_note_job",
 }
 
 
@@ -49,19 +50,32 @@ def test_dictation_transcript_key_set_matches_expected(db_session):
     assert set(out.keys()) == EXPECTED_KEYS
 
 
-def test_meeting_and_dictation_have_same_job_field_names(db_session):
-    """The dictation-only fields are always present (null for meeting);
-    the always-fetched fields are always present. No key is kind-gated."""
+def test_voice_note_transcript_key_set_matches_expected(db_session):
+    user, t = _build_transcript(db_session, kind="voice_note", username="contract-vn")
+    out = _serialize_transcript(db_session, t, jobs_map=_batch_latest_jobs(db_session, [t.id]))
+    assert set(out.keys()) == EXPECTED_KEYS
+
+
+def test_all_kinds_have_same_job_field_names(db_session):
+    """The dictation-only / voice-note-only fields are always present
+    (null for kinds that never have that job). The shape is uniform
+    across all kinds so the frontend doesn't have to switch on kind to
+    read the response."""
     _, meeting = _build_transcript(db_session, kind="meeting", username="contract-meeting")
     _, dictation = _build_transcript(db_session, kind="dictation", username="contract-dictation")
+    _, voice_note = _build_transcript(db_session, kind="voice_note", username="contract-vn2")
     m = _serialize_transcript(db_session, meeting, jobs_map=_batch_latest_jobs(db_session, [meeting.id]))
     d = _serialize_transcript(db_session, dictation, jobs_map=_batch_latest_jobs(db_session, [dictation.id]))
-    assert set(m.keys()) == set(d.keys())
-    # And the values for the dictation-only fields are null on the meeting
-    # side, exactly like before the refactor.
+    v = _serialize_transcript(db_session, voice_note, jobs_map=_batch_latest_jobs(db_session, [voice_note.id]))
+    assert set(m.keys()) == set(d.keys()) == set(v.keys())
     for k in ("format_markdown_job", "format_email_job", "format_coding_prompt_job",
-              "classify_intent_job", "classify_intent_hint"):
+              "classify_intent_job", "classify_intent_hint", "voice_note_job"):
         assert m[k] is None, f"{k} should be None for meeting, got {m[k]!r}"
+        assert d[k] is None, f"{k} should be None for dictation, got {d[k]!r}"
+    # voice_note has the format_* fields null (chain is separate) but
+    # voice_note_job is the new active field; the meeting/dictation
+    # rows have it null too.
+    assert v["voice_note_job"] is None  # no job yet in this fixture
 
 
 def test_include_relabel_adds_only_last_relabel_key(db_session):

@@ -562,13 +562,23 @@ async def _finalize_if_done(db, transcript_id: int, diarization_service) -> None
     if new_status in ("completed", "partial"):
         from services.settings import get_user_settings  # local import avoids a module-load cycle with app.py
         user_settings = get_user_settings(db, transcript.user_id)
-        if user_settings.get("auto_correct", True):
-            # Queued as a background LlmJob — the LLM worker loop picks it
-            # up, so chunk finalization never blocks on a correction pass.
-            from services.llm_jobs import enqueue_auto_correction
-            enqueue_auto_correction(db, transcript, user_settings)
-        from services.llm_jobs import enqueue_auto_classify
-        enqueue_auto_classify(db, transcript, user_settings)
+        if transcript.kind == "voice_note":
+            # Mirror the inline-path branch in app.py: voice_note runs
+            # the voice-note chain instead of the dictation
+            # correction+classify pair. Each enqueue helper is
+            # kind-gated, so the no-op guards are belt-and-braces; the
+            # branch is here so a long voice-note recording (above
+            # LOCAL_CHUNK_SECONDS) doesn't silently skip the chain.
+            from services.llm_jobs import enqueue_auto_voice_note
+            enqueue_auto_voice_note(db, transcript, user_settings)
+        else:
+            if user_settings.get("auto_correct", True):
+                # Queued as a background LlmJob — the LLM worker loop picks it
+                # up, so chunk finalization never blocks on a correction pass.
+                from services.llm_jobs import enqueue_auto_correction
+                enqueue_auto_correction(db, transcript, user_settings)
+            from services.llm_jobs import enqueue_auto_classify
+            enqueue_auto_classify(db, transcript, user_settings)
 
 
 async def _process_transcript_jobs(db, transcript_id: int, jobs: list, diarization_service,
