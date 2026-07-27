@@ -579,6 +579,10 @@ async def _finalize_if_done(db, transcript_id: int, diarization_service) -> None
                 enqueue_auto_correction(db, transcript, user_settings)
             from services.llm_jobs import enqueue_auto_classify
             enqueue_auto_classify(db, transcript, user_settings)
+        # Tagging fires for every kind — keep this site in lockstep
+        # with app.py:_run_transcription_pipeline (issue #171).
+        from services.llm_jobs import enqueue_auto_tagging
+        enqueue_auto_tagging(db, transcript, user_settings)
 
 
 async def _process_transcript_jobs(db, transcript_id: int, jobs: list, diarization_service,

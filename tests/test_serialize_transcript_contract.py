@@ -34,7 +34,8 @@ EXPECTED_KEYS = {
     "correction_job", "summary_job", "voice_match_job",
     "format_markdown_job", "format_email_job", "format_coding_prompt_job",
     "classify_intent_job", "classify_intent_hint",
-    "voice_note_job",
+    "voice_note_job", "tagging_job",
+    "tags",
 }
 
 
@@ -76,6 +77,15 @@ def test_all_kinds_have_same_job_field_names(db_session):
     # voice_note_job is the new active field; the meeting/dictation
     # rows have it null too.
     assert v["voice_note_job"] is None  # no job yet in this fixture
+    # tagging_job is uniform across all kinds (tagging runs on every
+    # kind, not just one); null in this fixture because no job exists yet.
+    assert m["tagging_job"] is None
+    assert d["tagging_job"] is None
+    assert v["tagging_job"] is None
+    # tags list is also uniform, empty when no job has completed.
+    assert m["tags"] == []
+    assert d["tags"] == []
+    assert v["tags"] == []
 
 
 def test_include_relabel_adds_only_last_relabel_key(db_session):
