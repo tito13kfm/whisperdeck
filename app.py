@@ -53,7 +53,7 @@ from services.llm_jobs import (
     cancel_llm_job, rerun_llm_job, llm_worker_loop, reset_stuck_llm_jobs,
     dismiss_llm_job, clear_finished_llm_jobs,
 )
-from services.relabel import record_relabel, latest_relabel
+from services.relabel import record_relabel, latest_relabel, clear_relabel_history
 from backends import list_providers, get_provider, LOCAL_PROVIDERS
 from services.security import (
     generate_csrf_token, rotate_csrf_token, validate_csrf_token,
@@ -1542,6 +1542,7 @@ async def update_transcript(transcript_id: int, data: dict = Body(...), db: Sess
     if "title" in data:
         t.title = data["title"]
     if "segments" in data:
+        clear_relabel_history(db, t.id)
         t.segments = data["segments"]
     if "full_text" in data:
         t.full_text = data["full_text"]
