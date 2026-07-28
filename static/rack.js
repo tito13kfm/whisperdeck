@@ -48,6 +48,7 @@ const S = {
   theme: 'charcoal',
   phosphor: '#5CFFAC',
   motion: true,
+  assistantHistory: [],
 };
 
 const LANGUAGES = ['English', 'Auto-detect', 'Spanish', 'French', 'German', 'Japanese', 'Chinese'];
@@ -402,7 +403,7 @@ function stageSegmentBar(segments, height = 16) {
 }
 
 /* ══════════════════ navigation ══════════════════ */
-const PAGES = ['dashboard', 'transcribe', 'transcripts', 'voicenotes', 'queue', 'detail', 'voices', 'files', 'settings'];
+const PAGES = ['dashboard', 'transcribe', 'transcripts', 'voicenotes', 'queue', 'detail', 'voices', 'files', 'settings', 'assistant'];
 
 // Rail chrome (Tape-library/Voice-roster nav badges, storage meter) is
 // otherwise only refreshed as a side effect of loadDashboard() — visiting
@@ -442,8 +443,259 @@ function navigate(page, data) {
     voices: loadVoices,
     files: renderFilesPage,
     settings: loadSettingsPage,
+    assistant: loadAssistant,
   };
   (loaders[page] || (() => {}))();
+}
+
+/* ══════════════════ assistant page ══════════════════ */
+async function loadAssistant() {
+  if (!S.user) { showLogin(); return; }
+  renderAssistant();
+}
+
+function renderAssistant() {
+  const el = $('page-assistant');
+  if (!el) return;
+
+  try {
+    const raw = sessionStorage.getItem('wd_assistant_history');
+    const parsed = raw ? JSON.parse(raw) : null;
+    S.assistantHistory = Array.isArray(parsed) ? parsed : [];
+  } catch { S.assistantHistory = []; }
+
+  el.innerHTML = `
+    <div class="unit" style="padding:24px 32px;margin-bottom:16px">
+      <h2 class="t-cap" style="font-size:14px;margin-bottom:16px">Assistant</h2>
+      <p style="font-size:13px;color:var(--label-dim);margin-bottom:16px">Ask anything about your transcripts — search, summarize, export.</p>
+      <div style="display:flex;gap:8px;align-items:flex-start">
+        <textarea id="assistant-input" class="inp" placeholder="Ask anything about your transcripts..." maxlength="2000" rows="2" style="flex:1;min-width:0;resize:vertical;font-family:var(--f-mono);font-size:12px"></textarea>
+        <button id="assistant-send" class="key" style="height:52px;padding:0 20px;font-size:12px">Send</button>
+      </div>
+      <div style="display:flex;justify-content:space-between;margin-top:6px">
+        <span id="assistant-char-count" style="font-family:var(--f-mono);font-size:10px;color:var(--label-dim)">0 / 2000</span>
+        <span id="assistant-status" style="font-family:var(--f-mono);font-size:10px;color:var(--label-dim)"></span>
+      </div>
+      <div id="assistant-progress" style="display:none;margin-top:16px">
+        <div class="t-cap" style="font-size:11px;margin-bottom:6px;color:var(--label-dim)" id="assistant-progress-label">Processing…</div>
+        <div class="bargraph slim" id="assistant-bargraph"></div>
+      </div>
+      <div id="assistant-result" style="display:none;margin-top:16px"></div>
+      <div id="assistant-error" style="display:none;margin-top:16px"></div>
+    </div>
+    <div class="unit" style="padding:20px 32px">
+      <h3 class="t-cap" style="font-size:12px;margin-bottom:12px;color:var(--label-dim)">Recent requests</h3>
+      <div id="assistant-history-list" style="display:flex;flex-direction:column;gap:8px"></div>
+    </div>
+  `;
+
+  const input = $('assistant-input');
+  const sendBtn = $('assistant-send');
+  const charCount = $('assistant-char-count');
+
+  input.addEventListener('input', () => {
+    charCount.textContent = input.value.length + ' / 2000';
+    charCount.style.color = input.value.length > 1900 ? 'var(--amber)' : 'var(--label-dim)';
+  });
+  sendBtn.addEventListener('click', () => submitAssistantRequest());
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submitAssistantRequest(); }
+  });
+
+  renderAssistantHistory();
+
+  if (S._assistantPrefill) {
+    input.value = S._assistantPrefill;
+    charCount.textContent = input.value.length + ' / 2000';
+    charCount.style.color = input.value.length > 1900 ? 'var(--amber)' : 'var(--label-dim)';
+    delete S._assistantPrefill;
+  }
+}
+
+function renderAssistantHistory() {
+  const list = $('assistant-history-list');
+  if (!list) return;
+  if (S.assistantHistory.length === 0) {
+    list.innerHTML = '<div style="font-size:12px;color:var(--label-faint);padding:8px 0">No requests yet</div>';
+    return;
+  }
+  list.innerHTML = S.assistantHistory.slice(-5).reverse().map((entry, i) => {
+    const statusIcon = entry.status === 'completed'
+      ? '<span class="led-dot" style="background:var(--green)"></span>'
+      : entry.status === 'failed'
+        ? '<span class="led-dot" style="background:var(--red)"></span>'
+        : '<span class="led-dot" style="background:var(--amber)"></span>';
+    const truncated = entry.request.length > 60 ? entry.request.slice(0, 60) + '…' : entry.request;
+    const resultPreview = entry.result
+      ? (entry.result.summary ? entry.result.summary.slice(0, 100) : '')
+      : (entry.error || '');
+    const realIdx = S.assistantHistory.length - 1 - i;
+    return '<div style="display:flex;gap:10px;align-items:flex-start;padding:8px 0;border-bottom:1px solid var(--edge);font-size:12px;cursor:pointer" onclick="expandAssistantHistory(' + realIdx + ')">' +
+      '<span>' + statusIcon + '</span>' +
+      '<div style="flex:1;min-width:0">' +
+        '<div style="color:var(--label);font-family:var(--f-mono);font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + escapeHtml(truncated) + '</div>' +
+        '<div style="color:var(--label-dim);font-size:11px;margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + escapeHtml(resultPreview) + '</div>' +
+      '</div>' +
+    '</div>';
+  }).join('');
+}
+
+async function submitAssistantRequest() {
+  const input = $('assistant-input');
+  const sendBtn = $('assistant-send');
+  if (!input || !sendBtn) return;
+  const request = input.value.trim();
+  if (!request) return;
+
+  input.disabled = true;
+  sendBtn.disabled = true;
+  const statusEl = $('assistant-status');
+  if (statusEl) statusEl.textContent = 'Submitting…';
+
+  $('assistant-result').style.display = 'none';
+  $('assistant-error').style.display = 'none';
+  $('assistant-progress').style.display = 'block';
+  $('assistant-progress-label').textContent = 'Enqueuing job…';
+
+  try {
+    const formData = new URLSearchParams();
+    formData.append('request', request);
+    const resp = await api('/api/assistant', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: formData.toString(),
+    });
+    const jobId = resp && resp.job && resp.job.id;
+    if (!jobId) throw new Error('No job id returned');
+    if (statusEl) statusEl.textContent = 'Job ' + jobId;
+    pollAssistantJob(jobId, request);
+  } catch (e) {
+    showAssistantError(request, e.message);
+  }
+}
+
+function pollAssistantJob(jobId, request) {
+  const labelEl = $('assistant-progress-label');
+  const bar = $('assistant-bargraph');
+  if (labelEl) labelEl.textContent = 'Processing…';
+
+  const poll = async () => {
+    try {
+      const data = await api('/api/assistant/result/' + jobId);
+
+      if (data.status === 'pending' || data.status === 'running') {
+        if (data.progress && data.progress.total > 0) {
+          const pct = Math.round((data.progress.done / data.progress.total) * 100);
+          if (labelEl) labelEl.textContent = 'Processing… ' + pct + '%';
+          if (bar) {
+            if (typeof bargraph === 'function') {
+              bar.innerHTML = bargraph([{ on: true, color: 'var(--amber)' }], 6);
+            } else {
+              bar.innerHTML = '<div style="height:6px;background:var(--panel-lo);border-radius:3px"><div style="width:' + pct + '%;height:100%;background:var(--amber);border-radius:3px"></div></div>';
+            }
+          }
+        } else {
+          if (labelEl) labelEl.textContent = 'Processing…';
+        }
+        setTimeout(poll, 1500);
+      } else if (data.status === 'completed') {
+        $('assistant-progress').style.display = 'none';
+        const statusEl = $('assistant-status');
+        if (statusEl) statusEl.textContent = 'Completed';
+        showAssistantResult(request, data.result);
+      } else if (data.status === 'failed') {
+        $('assistant-progress').style.display = 'none';
+        const statusEl = $('assistant-status');
+        if (statusEl) statusEl.textContent = 'Failed';
+        showAssistantError(request, (data && data.error) || 'Job failed');
+      }
+    } catch (e) {
+      setTimeout(poll, 3000);
+    }
+  };
+
+  poll();
+}
+
+function showAssistantResult(request, result) {
+  const el = $('assistant-result');
+  if (!el) return;
+  el.style.display = 'block';
+
+  const inner = (result && result.result) || {};
+  const summary = inner.summary || '';
+  const filePath = inner.file_path || null;
+  const preview = inner.preview || summary;
+
+  let html = '<div class="t-cap" style="font-size:11px;margin-bottom:8px;color:var(--green)">Complete</div>';
+  if (summary) {
+    html += '<div class="unit" style="padding:16px;margin-bottom:10px;font-size:13px;line-height:1.6;color:var(--body);white-space:pre-wrap">' + escapeHtml(summary) + '</div>';
+  }
+  html += '<div style="display:flex;gap:8px;margin-top:10px">';
+  html += '<button id="assistant-copy" class="btn" style="font-size:11px;padding:6px 12px;border-color:var(--inset-edge)">Copy</button>';
+  html += '<button id="assistant-download" class="btn" style="font-size:11px;padding:6px 12px;border-color:var(--inset-edge)">Download .txt</button>';
+  if (filePath) {
+    html += '<button id="assistant-copy-path" class="btn" style="font-size:11px;padding:6px 12px;border-color:var(--inset-edge)" title="' + escapeHtml(filePath) + '">Copy path</button>';
+  }
+  html += '</div>';
+  el.innerHTML = html;
+
+  const textToCopy = preview || '';
+  $('assistant-copy')?.addEventListener('click', () => copyToClipboard(textToCopy));
+  $('assistant-download')?.addEventListener('click', () => downloadTextFile('assistant-result.txt', textToCopy));
+  $('assistant-copy-path')?.addEventListener('click', () => copyToClipboard(filePath));
+
+  saveAssistantHistory(request, 'completed', result);
+}
+
+function showAssistantError(request, error) {
+  const el = $('assistant-error');
+  if (!el) return;
+  el.style.display = 'block';
+  el.innerHTML =
+    '<div class="t-cap" style="font-size:11px;margin-bottom:8px;color:var(--red)">Error</div>' +
+    '<div style="font-size:12px;color:var(--body);margin-bottom:10px">' + escapeHtml(error || 'Unknown error') + '</div>' +
+    '<button id="assistant-retry" class="btn" style="font-size:11px;padding:6px 12px;border-color:var(--inset-edge)">Retry</button>';
+  $('assistant-retry')?.addEventListener('click', () => submitAssistantRequest());
+
+  const input = $('assistant-input');
+  const sendBtn = $('assistant-send');
+  if (input) input.disabled = false;
+  if (sendBtn) sendBtn.disabled = false;
+
+  saveAssistantHistory(request, 'failed', null, error);
+}
+
+function saveAssistantHistory(request, status, result, error) {
+  const entry = { request, status, result: result || null, error: error || null, time: Date.now() };
+  S.assistantHistory.push(entry);
+  if (S.assistantHistory.length > 5) S.assistantHistory = S.assistantHistory.slice(-5);
+
+  try {
+    sessionStorage.setItem('wd_assistant_history', JSON.stringify(S.assistantHistory));
+  } catch { /* swallow */ }
+
+  if (S.page === 'assistant') renderAssistantHistory();
+}
+
+function expandAssistantHistory(idx) {
+  const entry = S.assistantHistory[idx];
+  if (!entry) return;
+  const summary = entry.result && entry.result.summary ? entry.result.summary : '';
+  const errorText = entry.error || '';
+  if (summary) {
+    openModal(
+      '<h2 class="modal-title">Assistant result</h2>' +
+      '<div style="font-size:12px;color:var(--label-dim);margin-bottom:12px;font-family:var(--f-mono)">' + escapeHtml(entry.request) + '</div>' +
+      '<div style="font-size:13px;line-height:1.6;color:var(--body);white-space:pre-wrap;max-height:60vh;overflow:auto">' + escapeHtml(summary) + '</div>' +
+      '<div class="modal-actions"><button class="btn btn--ghost btn--sm" id="expand-close">Close</button></div>'
+    );
+    $('expand-close')?.addEventListener('click', closeModal);
+  } else if (errorText) {
+    toast(errorText, 'error');
+  } else {
+    toast('No result available', 'info');
+  }
 }
 
 /* ══════════════════ modal primitive ══════════════════ */
@@ -2594,6 +2846,13 @@ function detailBodyClick(e) {
   const copyBtn = e.target.closest('[data-export-copy]');
   const dlBtn = e.target.closest('[data-export-dl]');
   if (copyBtn || dlBtn) { handleExportClick((copyBtn || dlBtn).dataset.exportCopy || (copyBtn || dlBtn).dataset.exportDl, !!copyBtn); return; }
+  const assistantBtn = e.target.closest('[data-export-assistant]');
+  if (assistantBtn) {
+    const t = detailData;
+    S._assistantPrefill = "Summarize the transcript '" + (t.title || t.filename || 'transcript') + "' and save as markdown";
+    navigate('assistant');
+    return;
+  }
   const saveBtn = e.target.closest('[data-export-save]');
   if (saveBtn) {
     e.preventDefault();
@@ -3187,6 +3446,10 @@ function downloadTextFile(filename, text) {
 }
 
 function exportToolbarHtml(kind) {
+  const t = detailData;
+  const openAssistantBtn = t
+    ? '<button class="btn" data-export-assistant style="font-size:11px;padding:6px 12px;border-color:var(--inset-edge)" title="Open in Assistant">Assistant</button>'
+    : '';
   const saveBtn = S.exportDir
     ? '<button class="btn" data-export-save="md" style="font-size:11px;padding:6px 12px;border-color:var(--inset-edge)" title="Save as Markdown to ' + escapeHtml(S.exportDir) + '">Save as .md</button>'
     : '';
@@ -3194,6 +3457,7 @@ function exportToolbarHtml(kind) {
     '<button class="btn" data-export-copy="' + kind + '" style="font-size:11px;padding:6px 12px;border-color:var(--inset-edge)">Copy</button>' +
     '<button class="btn" data-export-dl="' + kind + '" style="font-size:11px;padding:6px 12px;border-color:var(--inset-edge)">Download .txt</button>' +
     saveBtn +
+    openAssistantBtn +
     '</div>';
 }
 
