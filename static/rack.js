@@ -4505,9 +4505,16 @@ async function loadSettingsPage() {
       </div>
       <div>
         <div class="t-cap" style="font-size:10.5px;letter-spacing:0.14em;margin:0 0 8px 36px">Maintenance</div>
-        <div class="unit unit--svc" style="border-radius:3px;padding:12px 30px;height:100%;display:flex;align-items:center;justify-content:flex-end;gap:8px">
-          ${S.isAdmin ? `<button id="svc-reset-code" style="font-family:var(--f-cond);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:0.03em;background:var(--input);border:1px solid var(--amber);color:var(--amber);padding:7px 16px;border-radius:2px;cursor:pointer">Generate reset code</button>` : ''}
-          <button id="svc-logout" style="font-family:var(--f-cond);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:0.03em;background:var(--input);border:1px solid var(--red);color:var(--red);padding:7px 16px;border-radius:2px;cursor:pointer">Log out</button>
+        <div class="unit unit--svc" style="border-radius:3px;padding:12px 30px;height:100%;display:flex;flex-direction:column;gap:10px">
+          <div style="display:flex;align-items:center;gap:8px">
+            <label class="t-label" for="export-dir-input" style="white-space:nowrap">Export directory</label>
+            <input id="export-dir-input" type="text" value="${escapeHtml(settings.export_directory || '')}" placeholder="e.g. C:\\Users\\you\\Documents\\Vault" style="font-family:var(--f-mono);font-size:11px;background:var(--input);border:1px solid var(--input-edge);color:var(--label);padding:6px 8px;border-radius:2px;flex:1;min-width:0">
+            <button id="export-dir-save" style="font-family:var(--f-cond);font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:0.03em;background:var(--input);border:1px solid var(--input-edge);color:var(--label);padding:6px 12px;border-radius:2px;cursor:pointer;white-space:nowrap">Save</button>
+          </div>
+          <div style="display:flex;align-items:center;justify-content:flex-end;gap:8px">
+            ${S.isAdmin ? `<button id="svc-reset-code" style="font-family:var(--f-cond);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:0.03em;background:var(--input);border:1px solid var(--amber);color:var(--amber);padding:7px 16px;border-radius:2px;cursor:pointer">Generate reset code</button>` : ''}
+            <button id="svc-logout" style="font-family:var(--f-cond);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:0.03em;background:var(--input);border:1px solid var(--red);color:var(--red);padding:7px 16px;border-radius:2px;cursor:pointer">Log out</button>
+          </div>
         </div>
       </div>
     </div>
@@ -4647,6 +4654,15 @@ async function loadSettingsPage() {
   // Admin-only reset-code generator — only exists when S.isAdmin is true
   const resetBtn = $('svc-reset-code');
   if (resetBtn) resetBtn.addEventListener('click', showGenerateResetCode);
+
+  $('export-dir-save').addEventListener('click', (e) => withBusy(e.currentTarget, async () => {
+    const val = $('export-dir-input').value.trim();
+    try {
+      await api('/api/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ export_directory: val }) });
+      S.exportDir = val;
+      toast(val ? 'Export directory saved' : 'Export directory cleared');
+    } catch (e) { toast(e.message, 'error'); }
+  }));
 
   // faceplate prefs
   $('ctl-theme').addEventListener('click', () => {
