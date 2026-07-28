@@ -41,14 +41,14 @@ def test_sw_js_file_exists_on_disk():
 
 
 def test_sw_js_body_contains_precache_urls():
-    """The worker must precache /, /static/rack.js, and /static/rack.css.
+    """The worker must precache /, /static/rack.min.js, and /static/rack.min.css.
     If any of these go missing, the install handler will reject the new
     worker and the offline shell will not exist."""
     import app as app_module
     fresh = TestClient(app_module.app)
     body = fresh.get("/sw.js").text
-    assert "'/static/rack.js'" in body or '"/static/rack.js"' in body
-    assert "'/static/rack.css'" in body or '"/static/rack.css"' in body
+    assert "'/static/rack.min.js'" in body or '"/static/rack.min.js"' in body
+    assert "'/static/rack.min.css'" in body or '"/static/rack.min.css"' in body
     # The navigation shell precache entry — must be a path string, not a
     # missing symbol.
     assert "'/'" in body or '"/"' in body
@@ -60,7 +60,7 @@ def test_sw_js_cache_header_independent_of_static_dir():
     import app as app_module
     fresh = TestClient(app_module.app)
     sw = fresh.get("/sw.js")
-    css = fresh.get("/static/rack.css")
+    css = fresh.get("/static/rack.min.css")
     assert sw.headers.get("cache-control") == "no-cache"
     assert css.headers.get("cache-control") == "public, max-age=3600"
     assert sw.headers.get("cache-control") != css.headers.get("cache-control")

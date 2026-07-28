@@ -2,14 +2,14 @@
    Served from /sw.js (root scope), NOT /static/sw.js.
    Bump CACHE_VERSION on deploy to invalidate. */
 
-const CACHE_VERSION = 'v1';
+const CACHE_VERSION = 'v2';
 const CACHE_NAME = 'whisperdeck-static-' + CACHE_VERSION;
 
 // Static assets precached on install. Root '/' is the SPA shell (index.html).
 const PRECACHE = [
   '/',
-  '/static/rack.js',
-  '/static/rack.css',
+  '/static/rack.min.js',
+  '/static/rack.min.css',
   '/static/fonts/barlow-400.woff2',
   '/static/fonts/barlow-500.woff2',
   '/static/fonts/barlow-600.woff2',

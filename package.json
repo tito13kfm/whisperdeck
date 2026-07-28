@@ -1,0 +1,14 @@
+{
+  "name": "whisperdeck",
+  "version": "0.8.0",
+  "private": true,
+  "description": "WhisperDeck frontend build step",
+  "scripts": {
+    "build": "npm run build:js && npm run build:css",
+    "build:js": "esbuild static/rack.js --bundle --minify --outfile=static/rack.min.js",
+    "build:css": "esbuild static/rack.css --minify --outfile=static/rack.min.css"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0"
+  }
+}

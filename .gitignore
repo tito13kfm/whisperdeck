@@ -16,6 +16,9 @@ scripts/.build-cache/
 .playwright-mcp/
 tests/fixtures/
 
+# Node.js dependencies (esbuild for the frontend build step)
+node_modules/
+
 # Local secrets / machine-specific (keep out of git)
 scripts/cookies.txt
 scripts/providers_backup.json
