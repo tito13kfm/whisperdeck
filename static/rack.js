@@ -2594,6 +2594,17 @@ function detailBodyClick(e) {
   const copyBtn = e.target.closest('[data-export-copy]');
   const dlBtn = e.target.closest('[data-export-dl]');
   if (copyBtn || dlBtn) { handleExportClick((copyBtn || dlBtn).dataset.exportCopy || (copyBtn || dlBtn).dataset.exportDl, !!copyBtn); return; }
+  const saveBtn = e.target.closest('[data-export-save]');
+  if (saveBtn) {
+    e.preventDefault();
+    const b = saveBtn;
+    return withBusy(b, async () => {
+      try {
+        const result = await api('/api/transcripts/' + detailData.id + '/export-markdown', { method: 'POST' });
+        toast('Saved to ' + result.path, 'ok');
+      } catch (e) { toast(e.message, 'error'); }
+    });
+  }
   const play = e.target.closest('[data-seg-play]');
   if (play) { segPlay(play); return; }
   const seed = e.target.closest('[data-seg-seed]');
