@@ -4907,6 +4907,9 @@ async function loadSettingsPage() {
           toast(val ? j.name + ': URL saved' : j.name + ': cleared');
           return;
         }
+        // key/url kinds only reach here — hf and url-save both return above,
+        // so this guard can't block hf's status-check or url-save's clear.
+        if (!val) { toast('Enter a key first', 'info'); return; }
         const r = await api('/api/providers/' + j.id + '/models');
         const n = (r.models || []).length;
         setJackLed(j.id, true);
