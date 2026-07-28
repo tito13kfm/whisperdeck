@@ -39,6 +39,7 @@ const S = {
   correctionPending: false,   // true while a non-blocking post-completion auto-correct poll is watching this run
   correctionStatus: null,     // pending | running | completed | failed — mirrors the run's correction_job.status
   mode: 'meeting',            // meeting | dictation | voice_note — dictation/voice_note skip diarization, unlock their own post-pipeline sets
+  exportDir: '',              // populated from /api/bootstrap.settings.export_directory; non-empty enables the "Save as .md" button
   // live capture
   capturing: false,
   stereoLive: false,
@@ -646,6 +647,7 @@ async function checkAuth() {
     csrfToken = body.csrf_token || null;
     S.user = body.user ? (body.user.username || null) : null;
     S.isAdmin = !!(body.user && body.user.is_admin);
+    S.exportDir = (body.settings && body.settings.export_directory) || '';
     if (S.user) $('rail-operator').textContent = 'Operator: ' + S.user + (S.isAdmin ? ' (admin)' : '');
     if (body.user) { showApp(); } else { showLogin(); }
   } catch {
@@ -3174,9 +3176,14 @@ function downloadTextFile(filename, text) {
 }
 
 function exportToolbarHtml(kind) {
+  const saveBtn = S.exportDir
+    ? '<button class="btn" data-export-save="md" style="font-size:11px;padding:6px 12px;border-color:var(--inset-edge)" title="Save as Markdown to ' + escapeHtml(S.exportDir) + '">Save as .md</button>'
+    : '';
   return '<div style="display:flex;justify-content:flex-end;gap:8px;padding:0 32px 10px">' +
     '<button class="btn" data-export-copy="' + kind + '" style="font-size:11px;padding:6px 12px;border-color:var(--inset-edge)">Copy</button>' +
-    '<button class="btn" data-export-dl="' + kind + '" style="font-size:11px;padding:6px 12px;border-color:var(--inset-edge)">Download .txt</button></div>';
+    '<button class="btn" data-export-dl="' + kind + '" style="font-size:11px;padding:6px 12px;border-color:var(--inset-edge)">Download .txt</button>' +
+    saveBtn +
+    '</div>';
 }
 
 async function summaryPlainText(transcriptId) {
