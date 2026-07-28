@@ -97,8 +97,8 @@ class LlmJob(Base):
 
     id = Column(Integer, primary_key=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
-    transcript_id = Column(Integer, ForeignKey("transcripts.id", ondelete="CASCADE"), nullable=False)
-    kind = Column(String(32), nullable=False)  # correction | summary
+    transcript_id = Column(Integer, ForeignKey("transcripts.id", ondelete="CASCADE"), nullable=True)
+    kind = Column(String(32), nullable=False)  # correction | summary | assistant | ...
     status = Column(String(32), default="pending")  # pending, running, completed, failed, cancelled
     attempts = Column(Integer, default=0)  # incremented at claim time in llm_worker_tick — powers auto-retry backoff
     progress_done = Column(Integer, default=0)
@@ -317,6 +317,54 @@ def ensure_columns(engine, table_name: str, columns: dict[str, str]) -> None:
             conn.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {col_name} {sql_type}"))
 
 
+def ensure_nullable_llm_job_transcript_id(engine) -> None:
+    """Make transcript_id nullable on existing llm_jobs tables (issue #175).
+
+    SQLite can't alter column constraints, so we rename the old table,
+    recreate it with the updated (nullable) schema, copy rows, and drop the
+    old copy. On fresh databases create_all() already builds the column as
+    nullable — this function is a no-op for those.
+    """
+    inspector = inspect(engine)
+    if "llm_jobs" not in inspector.get_table_names():
+        return
+
+    # PRAGMA table_info columns: cid, name, type, notnull, dflt_value, pk
+    with engine.connect() as conn:
+        rows = conn.execute(text("PRAGMA table_info(llm_jobs)")).fetchall()
+        for row in rows:
+            if row[1] == "transcript_id" and row[3] == 0:
+                return  # already nullable — nothing to do
+
+    # Recreate with nullable transcript_id
+    with engine.begin() as conn:
+        conn.execute(text("ALTER TABLE llm_jobs RENAME TO llm_jobs_old"))
+        conn.execute(text(
+            "CREATE TABLE llm_jobs ("
+            "id INTEGER NOT NULL, "
+            "user_id INTEGER NOT NULL, "
+            "transcript_id INTEGER, "
+            "kind VARCHAR(32) NOT NULL, "
+            "status VARCHAR(32), "
+            "attempts INTEGER, "
+            "progress_done INTEGER, "
+            "progress_total INTEGER, "
+            "provider VARCHAR(64), "
+            "model VARCHAR(128), "
+            "error TEXT, "
+            "dismissed BOOLEAN, "
+            "result_json JSON, "
+            "created_at DATETIME, "
+            "updated_at DATETIME, "
+            "PRIMARY KEY (id), "
+            "FOREIGN KEY(user_id) REFERENCES users (id), "
+            "FOREIGN KEY(transcript_id) REFERENCES transcripts (id) ON DELETE CASCADE"
+            ")"
+        ))
+        conn.execute(text("INSERT INTO llm_jobs SELECT * FROM llm_jobs_old"))
+        conn.execute(text("DROP TABLE llm_jobs_old"))
+
+
 def backfill_llm_job_result_snapshots(SessionLocal, kinds: tuple = ("correction", "summary", "rediarize")) -> None:
     """One-time backfill: completed LlmJob rows that predate result_json have
     no output snapshot. Fill in the latest completed job per (transcript_id,
@@ -395,6 +443,7 @@ def init_db(db_path: str = "data/whisperdesk.db") -> tuple:
     ensure_columns(engine, "users", {"settings": "JSON"})
     ensure_columns(engine, "transcripts", {"audio_path": "TEXT", "diarize_requested": "BOOLEAN", "num_speakers": "INTEGER", "processed_size_bytes": "INTEGER", "corrected_text": "TEXT", "correction_error": "TEXT", "correction_model": "TEXT", "queue_dismissed": "BOOLEAN DEFAULT 0", "source_transcript_id": "INTEGER", "video_path": "TEXT", "kind": "TEXT DEFAULT 'meeting'", "diarization_method": "TEXT", "stereo_audio_path": "TEXT"})
     ensure_columns(engine, "llm_jobs", {"dismissed": "BOOLEAN DEFAULT 0", "result_json": "JSON", "attempts": "INTEGER DEFAULT 0"})
+    ensure_nullable_llm_job_transcript_id(engine)
     ensure_columns(engine, "summaries", {"provider": "TEXT"})
     ensure_columns(engine, "users", {"is_admin": "BOOLEAN DEFAULT 0", "reset_token": "TEXT", "reset_token_expires_at": "TEXT"})
     ensure_columns(engine, "voice_clips", {"embedding_model": "TEXT"})
@@ -435,5 +484,5 @@ def init_db(db_path: str = "data/whisperdesk.db") -> tuple:
 
 __all__ = [
     "Base", "User", "Transcript", "Summary", "VoiceNote", "VoiceProfile", "VoiceClip", "ProviderConfig", "TranscriptionJob", "LlmJob", "RelabelHistory", "HotwordEntry", "TranscriptTag",
-    "init_db", "migrate_schema", "backfill_user_id", "ensure_columns", "backfill_llm_job_result_snapshots",
+    "init_db", "migrate_schema", "backfill_user_id", "ensure_columns", "ensure_nullable_llm_job_transcript_id", "backfill_llm_job_result_snapshots",
 ]

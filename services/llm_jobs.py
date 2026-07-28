@@ -20,7 +20,7 @@ TERMINAL_LLM_STATUSES = ("completed", "failed", "cancelled")
 VALID_KINDS = (
     "correction", "summary", "rediarize", "voice_match",
     "format_markdown", "format_email", "format_coding_prompt", "classify_intent",
-    "voice_note", "tagging",
+    "voice_note", "tagging", "assistant",
 )
 # Auto-retry (issue #14) is scoped to network-dependent kinds only —
 # correction/summary/format_*/classify_intent call a provider API and can
@@ -32,14 +32,14 @@ VALID_KINDS = (
 # "Open Design Questions" in
 # docs/superpowers/plans/2026-07-07-queue-audit-llmjob-auto-retry.md
 # if reconsidering.
-AUTO_RETRY_KINDS = ("correction", "summary", "format_markdown", "format_email", "format_coding_prompt", "classify_intent", "voice_note", "tagging")
+AUTO_RETRY_KINDS = ("correction", "summary", "format_markdown", "format_email", "format_coding_prompt", "classify_intent", "voice_note", "tagging", "assistant")
 # Two independent concurrency pools, capped separately (issue #14): I/O-bound
 # kinds are provider API calls (bounded by provider rate limits, not local
 # resources), CPU-bound kinds are local compute (diarization clustering /
 # embedding extraction) and stay small so they don't fight each other for
 # the same CPU. IO_KINDS/CPU_KINDS must partition VALID_KINDS exactly — see
 # test_io_cpu_pools_partition_valid_kinds.
-IO_KINDS = ("correction", "summary", "format_markdown", "format_email", "format_coding_prompt", "classify_intent", "voice_note", "tagging")
+IO_KINDS = ("correction", "summary", "format_markdown", "format_email", "format_coding_prompt", "classify_intent", "voice_note", "tagging", "assistant")
 CPU_KINDS = ("rediarize", "voice_match")
 _MAX_CONCURRENT_IO_JOBS = 2
 _MAX_CONCURRENT_CPU_JOBS = 1
@@ -70,7 +70,7 @@ def serialize_llm_job(job: LlmJob) -> dict:
     }
 
 
-def get_active_job(db, transcript_id: int, kind: str) -> LlmJob | None:
+def get_active_job(db, transcript_id: int | None, kind: str) -> LlmJob | None:
     return (
         db.query(LlmJob)
         .filter(
@@ -82,7 +82,7 @@ def get_active_job(db, transcript_id: int, kind: str) -> LlmJob | None:
     )
 
 
-def latest_job(db, transcript_id: int, kind: str) -> LlmJob | None:
+def latest_job(db, transcript_id: int | None, kind: str) -> LlmJob | None:
     return (
         db.query(LlmJob)
         .filter(LlmJob.transcript_id == transcript_id, LlmJob.kind == kind)
@@ -91,7 +91,7 @@ def latest_job(db, transcript_id: int, kind: str) -> LlmJob | None:
     )
 
 
-def enqueue_llm_job(db, user_id: int, transcript_id: int, kind: str,
+def enqueue_llm_job(db, user_id: int, transcript_id: int | None, kind: str,
                     provider: str, model: str, error: str | None = None) -> LlmJob:
     """One active job per transcript+kind — returns the existing one instead
     of stacking duplicates. `error` pre-fails the job (e.g. 'no key saved')
@@ -281,10 +281,12 @@ async def run_llm_job(SessionLocal, job_id: int, transcription_service, diarizat
         job = db.query(LlmJob).filter(LlmJob.id == job_id).first()
         if not job:
             return
-        transcript = db.query(Transcript).filter(Transcript.id == job.transcript_id).first()
-        if not transcript:
-            _finish(db, job, "failed", "Transcript no longer exists")
-            return
+        transcript = None
+        if job.transcript_id is not None:
+            transcript = db.query(Transcript).filter(Transcript.id == job.transcript_id).first()
+            if not transcript:
+                _finish(db, job, "failed", "Transcript no longer exists")
+                return
 
         api_key, provider_config = None, None
         if job.kind not in CPU_KINDS:  # local compute — no LLM key involved
@@ -559,6 +561,8 @@ async def run_llm_job(SessionLocal, job_id: int, transcription_service, diarizat
             db.commit()
             error = f"{skipped} segment(s) skipped (extraction/embedding failed)" if skipped else None
             _finish(db, job, "completed", error)
+        elif job.kind == "assistant":
+            await run_assistant_job(db, job, api_key, job.provider, job.model, provider_config)
         else:
             _finish(db, job, "failed", f"Unknown job kind '{job.kind}'")
     except Exception as e:
@@ -571,6 +575,62 @@ async def run_llm_job(SessionLocal, job_id: int, transcription_service, diarizat
         print(f"[llm-jobs] job {job_id} failed unexpectedly: {e}")
     finally:
         db.close()
+
+
+async def run_assistant_job(db, job: LlmJob, api_key: str, provider_name: str, model: str, provider_config: dict | None = None) -> None:
+    """Execute an assistant job: interpret the user's request into an action
+    plan, then execute the plan (search, summarize, save). Called from
+    run_llm_job's dispatch after the API key is already resolved."""
+    import time
+
+    from services.assistant import interpret_request, execute_plan
+    from services.settings import get_user_settings
+
+    job.progress_total = 3  # interpret, search/summarize/save steps
+    db.commit()
+
+    user_request = (job.result_json or {}).get("user_request", "")
+    if not user_request:
+        _finish(db, job, "failed", "No user request in job payload")
+        return
+
+    # Step 1: interpret
+    job.progress_done = 0
+    db.commit()
+    try:
+        plan = await interpret_request(
+            user_request, api_key=api_key, provider_name=provider_name,
+            model=model, provider_config=provider_config,
+        )
+    except Exception as e:
+        _finish(db, job, "failed", f"Interpretation failed: {e}")
+        return
+    if "error" in plan:
+        _finish(db, job, "failed", plan["error"])
+        return
+    if not plan.get("steps"):
+        _finish(db, job, "failed", "LLM returned an empty action plan")
+        return
+    job.progress_done = 1
+    db.commit()
+
+    # Step 2: execute
+    try:
+        user_settings = get_user_settings(db, job.user_id)
+        export_dir = user_settings.get("export_directory", "")
+        result = await execute_plan(
+            db, job.user_id, plan, api_key=api_key, provider_name=provider_name,
+            model=model, provider_config=provider_config,
+            export_directory=export_dir, job=job,
+        )
+    except Exception as e:
+        _finish(db, job, "failed", str(e))
+        return
+
+    job.result_json = {"user_request": user_request, **result}
+    job.progress_done = job.progress_total
+    db.commit()
+    _finish(db, job, "completed" if result.get("ok") else "failed", result.get("error"))
 
 
 async def llm_worker_tick(SessionLocal, transcription_service, diarization_service=None) -> None:
