@@ -240,6 +240,8 @@ def cancel_llm_job(db, user_id: int, job_id: int) -> LlmJob:
         raise ValueError(f"Cannot cancel a job with status '{job.status}'")
     # pending dies instantly; a running correction notices between batches.
     job.status = "cancelled"
+    job.progress_done = 0
+    job.progress_total = 0
     job.updated_at = utcnow_naive()
     db.commit()
     return job
@@ -258,6 +260,9 @@ def _finish(db, job: LlmJob, status: str, error: str | None = None) -> None:
     """Set a terminal state — unless a cancel raced in, which always wins."""
     db.refresh(job)
     if job.status == "cancelled":
+        job.progress_done = 0
+        job.progress_total = 0
+        db.commit()
         return
     job.status = status
     job.error = error

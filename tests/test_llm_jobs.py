@@ -316,6 +316,26 @@ def test_cancel_requires_active_job(db_session):
         pass
 
 
+def test_cancel_zeros_progress_in_db(db_session):
+    """cancel_llm_job must zero progress_done and progress_total so
+    serialize_llm_job doesn't report stale partial progress on cancelled jobs."""
+    user, t = _make_user_and_transcript(db_session)
+    job = enqueue_llm_job(db_session, user.id, t.id, "correction", "groq", "m")
+    job.progress_done = 5
+    job.progress_total = 10
+    db_session.commit()
+
+    cancel_llm_job(db_session, user.id, job.id)
+    db_session.refresh(job)
+
+    assert job.status == "cancelled"
+    assert job.progress_done == 0
+    assert job.progress_total == 0
+
+    serialized = serialize_llm_job(job)
+    assert serialized["progress"] == {"done": 0, "total": 0}
+
+
 # ── routes ────────────────────────────────────────────────────────────────
 
 def _upload(client):
