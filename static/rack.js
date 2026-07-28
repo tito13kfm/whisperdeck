@@ -813,6 +813,7 @@ function resetDeckState() {
   bankListCache = [];
   seedClips = {};
   expandedVoice = null;
+  _jobCache = { data: null, ts: 0, pending: null };
 }
 
 function showLogin() {
