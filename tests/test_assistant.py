@@ -1,11 +1,14 @@
-"""Unit tests for the assistant service (interpret_request + execute_plan)."""
+"""Unit + integration tests for the assistant service and API endpoints."""
+import io
 import json
 import os
 import tempfile
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from starlette.testclient import TestClient
 
+from database import LlmJob, ProviderConfig, Transcript, User
 from services.assistant import (
     interpret_request,
     execute_plan,
@@ -287,3 +290,133 @@ class TestExecutePlan:
             )
         assert result["ok"] is True
         assert result["result"]["summary"] == ""
+
+
+# ── API Endpoint Integration Tests ────────────────────────────────────────
+
+
+class TestAssistantEndpoint:
+    """POST /api/assistant"""
+
+    def test_success_enqueues_job(self, client):
+        client.put("/api/providers/groq", json={"api_key": "fake-key"})
+        client.put("/api/settings", json={"correction_provider": "groq"})
+
+        r = client.post("/api/assistant", data={"request": "Find all mentions of budget"})
+        assert r.status_code == 200
+        job = r.json()["job"]
+        assert job["kind"] == "assistant"
+        assert job["transcript_id"] is None
+        assert job["status"] == "pending"
+
+    def test_empty_request_returns_400(self, client):
+        r = client.post("/api/assistant", data={"request": ""})
+        assert r.status_code == 400
+
+    def test_oversize_request_returns_400(self, client):
+        r = client.post("/api/assistant", data={"request": "x" * 2001})
+        assert r.status_code == 400
+
+    def test_unauthenticated_returns_403(self, db_session):
+        """POST without session: CSRF middleware blocks before auth check."""
+        import app as app_module
+
+        def _override_get_db():
+            yield db_session
+
+        app_module.app.dependency_overrides[app_module.get_db] = _override_get_db
+        try:
+            tc = TestClient(app_module.app)
+            r = tc.post("/api/assistant", data={"request": "test"})
+            assert r.status_code == 403
+        finally:
+            app_module.app.dependency_overrides.clear()
+
+    def test_csrf_missing_returns_403(self, client):
+        old = client.headers.pop("X-CSRF-Token", None)
+        try:
+            r = client.post("/api/assistant", data={"request": "test"})
+            assert r.status_code == 403
+        finally:
+            client.headers["X-CSRF-Token"] = old
+
+    def test_no_api_key_returns_400(self, client):
+        client.put("/api/settings", json={"correction_provider": "groq"})
+        r = client.post("/api/assistant", data={"request": "test"})
+        assert r.status_code == 400
+        assert "API key" in r.json()["detail"]
+
+
+class TestAssistantResult:
+    """GET /api/assistant/result/{job_id}"""
+
+    def test_completed_job_returns_result(self, client, db_session):
+        user = db_session.query(User).filter(User.username == "testuser").first()
+        job = LlmJob(
+            user_id=user.id, transcript_id=None, kind="assistant",
+            provider="groq", model="m", status="completed",
+            result_json={"ok": True, "result": {"summary": "done", "file_path": None, "preview": "done"}},
+        )
+        db_session.add(job)
+        db_session.commit()
+
+        r = client.get(f"/api/assistant/result/{job.id}")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["status"] == "completed"
+        assert data["result"]["ok"] is True
+        assert data["result"]["result"]["summary"] == "done"
+
+    def test_running_job_returns_progress(self, client, db_session):
+        user = db_session.query(User).filter(User.username == "testuser").first()
+        job = LlmJob(
+            user_id=user.id, transcript_id=None, kind="assistant",
+            provider="groq", model="m", status="running",
+            progress_done=1, progress_total=3,
+        )
+        db_session.add(job)
+        db_session.commit()
+
+        r = client.get(f"/api/assistant/result/{job.id}")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["status"] == "running"
+        assert data["progress"]["done"] == 1
+        assert data["progress"]["total"] == 3
+
+    def test_not_found_returns_404(self, client):
+        r = client.get("/api/assistant/result/99999")
+        assert r.status_code == 404
+
+    def test_wrong_user_returns_404(self, db_session):
+        """Another user's job is not found (doesn't leak existence)."""
+        import app as app_module
+
+        other_user = User(username="other", password_hash="x", password_salt="y")
+        db_session.add(other_user)
+        db_session.commit()
+
+        job = LlmJob(
+            user_id=other_user.id, transcript_id=None, kind="assistant",
+            provider="groq", model="m", status="completed",
+        )
+        db_session.add(job)
+        db_session.commit()
+
+        def _override_get_db():
+            yield db_session
+
+        app_module.app.dependency_overrides[app_module.get_db] = _override_get_db
+        try:
+            tc = TestClient(app_module.app)
+            tc.get("/api/csrf-token")
+            csrf = tc.get("/api/csrf-token").json()["token"]
+            tc.headers["X-CSRF-Token"] = csrf
+            tc.post("/api/register", json={"username": "testuser2", "password": "testpass123"})
+            csrf = tc.get("/api/csrf-token").json()["token"]
+            tc.headers["X-CSRF-Token"] = csrf
+
+            r = tc.get(f"/api/assistant/result/{job.id}")
+            assert r.status_code == 404
+        finally:
+            app_module.app.dependency_overrides.clear()

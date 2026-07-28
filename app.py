@@ -268,7 +268,7 @@ def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
 _SERIALIZED_JOB_KINDS = (
     "correction", "summary", "voice_match",
     "format_markdown", "format_email", "format_coding_prompt", "classify_intent",
-    "voice_note", "tagging",
+    "voice_note", "tagging", "assistant",
 )
 
 
@@ -2487,6 +2487,56 @@ async def clear_finished_jobs(db: Session = Depends(get_db), current_user: User 
     """Bulk-hide every terminal Queue entry (both kinds) for this user."""
     cleared = clear_finished_llm_jobs(db, current_user.id) + clear_finished_transcript_queue_entries(db, current_user.id)
     return {"ok": True, "cleared": cleared}
+
+
+# ── Assistant ────────────────────────────────────────────────────────────
+
+@app.post("/api/assistant")
+async def assistant_request(
+    request: str = Form(""),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Enqueue an assistant job: interpret a natural language request and
+    execute an action plan (search, summarize, save)."""
+    request = (request or "").strip()
+    if not request:
+        raise HTTPException(status_code=400, detail="Request cannot be empty")
+    if len(request) > 2000:
+        raise HTTPException(status_code=400, detail="Request must be under 2000 characters")
+
+    user_settings = get_user_settings(db, current_user.id)
+    provider = user_settings.get("correction_provider", "local_llm")
+    model = user_settings.get("correction_model", "gpt-oss-20b-mxfp4-GGUF")
+
+    from services.settings import resolve_provider_key, KEYLESS_PROVIDERS
+    api_key, _ = resolve_provider_key(db, current_user.id, provider)
+    if provider not in KEYLESS_PROVIDERS and not api_key:
+        raise HTTPException(status_code=400, detail=f"No {provider} API key saved")
+
+    job = enqueue_llm_job(db, current_user.id, None, "assistant", provider, model)
+    job.result_json = {"user_request": request}
+    db.commit()
+    return {"job": serialize_llm_job(job)}
+
+
+@app.get("/api/assistant/result/{job_id}")
+async def assistant_result(
+    job_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Poll for an assistant job's progress or completed result."""
+    job = db.query(LlmJob).filter(
+        LlmJob.id == job_id, LlmJob.user_id == current_user.id
+    ).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    response = serialize_llm_job(job)
+    if job.status in ("completed", "failed", "cancelled"):
+        response["result"] = job.result_json
+    return response
 
 
 @app.get("/api/transcripts/{transcript_id}/summary")
