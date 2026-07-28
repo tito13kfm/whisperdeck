@@ -5,6 +5,7 @@ A modern meeting transcription & voice intelligence application.
 Transcribe · Diarize · Summarize · Identify
 """
 import os
+import re
 import json
 import datetime
 import shutil
@@ -654,6 +655,10 @@ async def bootstrap(request: Request, db: Session = Depends(get_db)):
         status_payload = _build_status_payload(db, user)
         recents_payload = _build_recent_transcripts(db, user, limit=5)
         jobs_payload = _build_jobs_payload(db, user, limit=20)
+        from services.settings import get_user_settings
+        settings_payload = get_user_settings(db, user.id)
+    else:
+        settings_payload = None
 
     return {
         "csrf_token": csrf,
@@ -661,6 +666,7 @@ async def bootstrap(request: Request, db: Session = Depends(get_db)):
         "status": status_payload,
         "recent_transcripts": recents_payload,
         "jobs": jobs_payload,
+        "settings": settings_payload,
     }
 
 
@@ -2013,6 +2019,66 @@ async def format_transcript(
 
     job = enqueue_llm_job(db, current_user.id, transcript_id, kind, provider, model)
     return {"job": serialize_llm_job(job)}
+
+
+@app.post("/api/transcripts/{transcript_id}/export-markdown")
+async def export_markdown(
+    transcript_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Write a clean Markdown export of a completed transcript to the user's
+    configured export_directory. No LLM call — assembles the document from
+    stored segments + the summary row. Returns {ok, path} on success.
+    """
+    t = db.query(Transcript).filter(
+        Transcript.id == transcript_id, Transcript.user_id == current_user.id
+    ).first()
+    if not t:
+        raise HTTPException(status_code=404, detail="Transcript not found")
+    if t.status != "completed":
+        raise HTTPException(status_code=400, detail="Transcript is not ready for export")
+
+    from services.settings import get_user_settings
+    settings = get_user_settings(db, current_user.id)
+    export_dir = (settings.get("export_directory") or "").strip()
+    if not export_dir:
+        raise HTTPException(status_code=400, detail="Export directory not configured — set it in Settings")
+    if not os.path.isdir(export_dir):
+        raise HTTPException(status_code=500, detail=f"Export directory does not exist: {export_dir}")
+
+    probe = os.path.join(export_dir, f".wd-export-probe-{os.getpid()}-{int(datetime.datetime.utcnow().timestamp())}")
+    try:
+        with open(probe, "w") as fp:
+            fp.write("ok")
+        os.remove(probe)
+    except OSError as e:
+        raise HTTPException(status_code=500, detail=f"Export directory is not writable: {export_dir} ({e})")
+
+    from services.reformatting import build_export_markdown
+    summary_data = None
+    if t.summary is not None:
+        summary_data = {
+            "short_summary": t.summary.short_summary or "",
+            "key_points": list(t.summary.key_points or []),
+            "action_items": list(t.summary.action_items or []),
+            "decisions": list(t.summary.decisions or []),
+        }
+    md = build_export_markdown(t, summary_data)
+
+    safe_title = re.sub(r"[\\/:*?\"<>|]", "-", (t.title or "").strip())
+    safe_title = re.sub(r"\s+", " ", safe_title).strip() or "transcript"
+    date_str = (t.created_at or datetime.datetime.utcnow()).strftime("%Y-%m-%d")
+    filename = f"{safe_title}-{date_str}.md"
+    full_path = os.path.join(export_dir, filename)
+
+    try:
+        with open(full_path, "w", encoding="utf-8") as fp:
+            fp.write(md)
+    except OSError as e:
+        raise HTTPException(status_code=500, detail=f"Failed to write file: {e}")
+
+    return {"ok": True, "path": full_path}
 
 
 @app.post("/api/transcripts/{transcript_id}/correct")
