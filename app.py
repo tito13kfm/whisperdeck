@@ -2047,7 +2047,7 @@ async def export_markdown(
     if not os.path.isdir(export_dir):
         raise HTTPException(status_code=500, detail=f"Export directory does not exist: {export_dir}")
 
-    probe = os.path.join(export_dir, f".wd-export-probe-{os.getpid()}-{int(datetime.datetime.utcnow().timestamp())}")
+    probe = os.path.join(export_dir, f".wd-export-probe-{os.getpid()}-{int(datetime.datetime.now(datetime.timezone.utc).timestamp())}")
     try:
         with open(probe, "w") as fp:
             fp.write("ok")
@@ -2068,7 +2068,7 @@ async def export_markdown(
 
     safe_title = re.sub(r"[\\/:*?\"<>|]", "-", (t.title or "").strip())
     safe_title = re.sub(r"\s+", " ", safe_title).strip() or "transcript"
-    date_str = (t.created_at or datetime.datetime.utcnow()).strftime("%Y-%m-%d")
+    date_str = (t.created_at or datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)).strftime("%Y-%m-%d")
     filename = f"{safe_title}-{date_str}.md"
     full_path = os.path.join(export_dir, filename)
 

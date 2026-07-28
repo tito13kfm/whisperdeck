@@ -5,6 +5,9 @@ test_llm_jobs.py for the existing summarize/correction features."""
 import asyncio
 import io
 import json
+import os
+import shutil
+import tempfile
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -14,6 +17,7 @@ from database import Transcript, User
 from services.llm_jobs import enqueue_llm_job, run_llm_job
 from services.reformatting import (
     format_as_markdown, format_as_email, format_as_coding_prompt, classify_intent,
+    build_export_markdown,
 )
 
 
@@ -319,3 +323,222 @@ def test_dictation_transcript_exposes_classify_intent_job_while_pending(client):
     detail = _upload(client, kind="dictation").json()
     assert detail["classify_intent_job"] is not None
     assert detail["classify_intent_job"]["status"] == "pending"
+
+
+# ── build_export_markdown (issue #172) ────────────────────────────────────
+
+
+def _make_segment(speaker, text):
+    return {"start": 0.0, "end": 1.0, "speaker": speaker, "text": text}
+
+
+def _make_export_transcript(db_session, title="Test Meeting", segments=None, full_text="", kind="meeting"):
+    user = User(username="exporter", password_hash="x", password_salt="y")
+    db_session.add(user)
+    db_session.commit()
+    t = Transcript(
+        user_id=user.id, title=title, filename="f.mp3", status="completed",
+        full_text=full_text, segments=segments or [], kind=kind,
+    )
+    db_session.add(t)
+    db_session.commit()
+    return t
+
+
+def _make_summary_dict():
+    return {
+        "short_summary": "A productive meeting about the Q3 roadmap.",
+        "key_points": ["Launch date moved to September", "Budget approved for 3 hires"],
+        "action_items": ["Alice: draft the launch timeline", "Bob: post the job listings"],
+        "decisions": ["Go with vendor B for infrastructure", "Delay the mobile app to Q4"],
+    }
+
+
+class TestBuildExportMarkdown:
+    def test_full_transcript_with_summary(self, db_session):
+        t = _make_export_transcript(
+            db_session,
+            title="Q3 Roadmap",
+            segments=[_make_segment("Alice", "We need to ship by September."),
+                      _make_segment("Bob", "Budget approved for three new hires.")],
+        )
+        md = build_export_markdown(t, _make_summary_dict())
+        assert md.startswith("# Q3 Roadmap")
+        assert "## Transcript" in md
+        assert "**Alice:** We need to ship by September." in md
+        assert "**Bob:** Budget approved for three new hires." in md
+        assert "## Summary" in md
+        assert "Q3 roadmap" in md
+        assert "## Key Points" in md
+        assert "- Launch date moved to September" in md
+        assert "- Budget approved for 3 hires" in md
+        assert "## Action Items" in md
+        assert "- [ ] Alice: draft the launch timeline" in md
+        assert "- [ ] Bob: post the job listings" in md
+        assert "## Decisions" in md
+        assert "- Go with vendor B for infrastructure" in md
+
+    def test_no_summary(self, db_session):
+        t = _make_export_transcript(
+            db_session,
+            title="Standup",
+            segments=[_make_segment("Alice", "Quick sync today.")],
+        )
+        md = build_export_markdown(t, None)
+        assert "# Standup" in md
+        assert "## Transcript" in md
+        assert "**Alice:** Quick sync today." in md
+        assert "## Summary" not in md
+        assert "## Key Points" not in md
+        assert "## Action Items" not in md
+        assert "## Decisions" not in md
+
+    def test_empty_summary_fields(self, db_session):
+        t = _make_export_transcript(
+            db_session,
+            title="Empty Summary",
+            segments=[_make_segment("Alice", "hi")],
+        )
+        empty_summary = {
+            "short_summary": "",
+            "key_points": [],
+            "action_items": [],
+            "decisions": [],
+        }
+        md = build_export_markdown(t, empty_summary)
+        assert "## Summary" not in md
+        assert "## Key Points" not in md
+        assert "## Action Items" not in md
+        assert "## Decisions" not in md
+
+    def test_fallback_to_full_text(self, db_session):
+        t = _make_export_transcript(
+            db_session,
+            title="No Segments",
+            segments=[],
+            full_text="This is the full text fallback content.",
+        )
+        md = build_export_markdown(t, None)
+        assert "## Transcript" in md
+        assert "This is the full text fallback content." in md
+
+    def test_title_sanitization(self, db_session):
+        t = _make_export_transcript(db_session, title="  ## Already a heading")
+        md = build_export_markdown(t, None)
+        assert md.startswith("# Already a heading")
+        assert "## Already a heading" not in md
+
+    def test_special_chars_pass_through(self, db_session):
+        t = _make_export_transcript(
+            db_session,
+            title="Edge <Case>",
+            segments=[_make_segment("Alice", "<script>alert(1)</script> & emoji 🦊")],
+        )
+        md = build_export_markdown(t, None)
+        assert "<script>alert(1)</script> & emoji 🦊" in md
+
+
+# ── export-markdown route (issue #172) ───────────────────────────────────
+
+
+class TestExportMarkdownRoute:
+    def test_export_success(self, client):
+        tmpdir = tempfile.mkdtemp()
+        try:
+            r = client.put("/api/settings", json={"export_directory": tmpdir})
+            assert r.status_code == 200
+            transcript_id = _upload(client, kind="meeting").json()["id"]
+            r = client.post(f"/api/transcripts/{transcript_id}/export-markdown")
+            assert r.status_code == 200
+            body = r.json()
+            assert body["ok"] is True
+            assert body["path"].startswith(tmpdir)
+            assert os.path.isfile(body["path"])
+            with open(body["path"], "r", encoding="utf-8") as fp:
+                content = fp.read()
+            assert content.startswith("# ")
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_export_no_directory_configured(self, client):
+        client.put("/api/settings", json={"export_directory": ""})
+        transcript_id = _upload(client, kind="meeting").json()["id"]
+        r = client.post(f"/api/transcripts/{transcript_id}/export-markdown")
+        assert r.status_code == 400
+        assert "not configured" in r.json()["detail"].lower()
+
+    def test_export_nonexistent_directory(self, client):
+        client.put("/api/settings", json={"export_directory": "/definitely/does/not/exist/12345"})
+        transcript_id = _upload(client, kind="meeting").json()["id"]
+        r = client.post(f"/api/transcripts/{transcript_id}/export-markdown")
+        assert r.status_code == 500
+        assert "does not exist" in r.json()["detail"].lower()
+
+    def test_export_transcript_not_found(self, client):
+        tmpdir = tempfile.mkdtemp()
+        try:
+            client.put("/api/settings", json={"export_directory": tmpdir})
+            r = client.post("/api/transcripts/99999/export-markdown")
+            assert r.status_code == 404
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_export_transcript_not_completed(self, client, db_session):
+        tmpdir = tempfile.mkdtemp()
+        try:
+            client.put("/api/settings", json={"export_directory": tmpdir})
+            testuser = db_session.query(User).filter(User.username == "testuser").first()
+            t = Transcript(
+                user_id=testuser.id, title="Pending", filename="f.mp3",
+                status="processing", full_text="", segments=[], kind="meeting",
+            )
+            db_session.add(t)
+            db_session.commit()
+            r = client.post(f"/api/transcripts/{t.id}/export-markdown")
+            assert r.status_code == 400
+            assert "not ready" in r.json()["detail"].lower()
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_export_csrf_required(self, client, db_session):
+        tmpdir = tempfile.mkdtemp()
+        try:
+            client.put("/api/settings", json={"export_directory": tmpdir})
+            transcript_id = _upload(client, kind="meeting").json()["id"]
+            old_token = client.headers["X-CSRF-Token"]
+            client.headers["X-CSRF-Token"] = "definitely-not-a-real-token"
+            try:
+                r = client.post(f"/api/transcripts/{transcript_id}/export-markdown")
+                assert r.status_code == 403
+            finally:
+                client.headers["X-CSRF-Token"] = old_token
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+# ── settings round-trip for export_directory (issue #172) ─────────────────
+
+
+class TestExportDirectorySettings:
+    def test_roundtrip(self, client):
+        r = client.put("/api/settings", json={"export_directory": "/home/user/vault"})
+        assert r.status_code == 200
+        assert r.json()["export_directory"] == "/home/user/vault"
+        r = client.get("/api/settings")
+        assert r.json()["export_directory"] == "/home/user/vault"
+        r = client.put("/api/settings", json={"export_directory": ""})
+        assert r.status_code == 200
+        r = client.get("/api/settings")
+        assert r.json()["export_directory"] == ""
+
+    def test_default_is_empty(self, client):
+        r = client.get("/api/settings")
+        assert r.json()["export_directory"] == ""
+
+    def test_bootstrap_includes_settings(self, client):
+        client.put("/api/settings", json={"export_directory": "/tmp/x"})
+        r = client.get("/api/bootstrap")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["settings"] is not None
+        assert body["settings"]["export_directory"] == "/tmp/x"
