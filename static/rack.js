@@ -39,6 +39,7 @@ const S = {
   correctionPending: false,   // true while a non-blocking post-completion auto-correct poll is watching this run
   correctionStatus: null,     // pending | running | completed | failed — mirrors the run's correction_job.status
   mode: 'meeting',            // meeting | dictation | voice_note — dictation/voice_note skip diarization, unlock their own post-pipeline sets
+  exportDir: '',              // populated from /api/bootstrap.settings.export_directory; non-empty enables the "Save as .md" button
   // live capture
   capturing: false,
   stereoLive: false,
@@ -646,6 +647,7 @@ async function checkAuth() {
     csrfToken = body.csrf_token || null;
     S.user = body.user ? (body.user.username || null) : null;
     S.isAdmin = !!(body.user && body.user.is_admin);
+    S.exportDir = (body.settings && body.settings.export_directory) || '';
     if (S.user) $('rail-operator').textContent = 'Operator: ' + S.user + (S.isAdmin ? ' (admin)' : '');
     if (body.user) { showApp(); } else { showLogin(); }
   } catch {
@@ -2592,6 +2594,17 @@ function detailBodyClick(e) {
   const copyBtn = e.target.closest('[data-export-copy]');
   const dlBtn = e.target.closest('[data-export-dl]');
   if (copyBtn || dlBtn) { handleExportClick((copyBtn || dlBtn).dataset.exportCopy || (copyBtn || dlBtn).dataset.exportDl, !!copyBtn); return; }
+  const saveBtn = e.target.closest('[data-export-save]');
+  if (saveBtn) {
+    e.preventDefault();
+    const b = saveBtn;
+    return withBusy(b, async () => {
+      try {
+        const result = await api('/api/transcripts/' + detailData.id + '/export-markdown', { method: 'POST' });
+        toast('Saved to ' + result.path, 'ok');
+      } catch (e) { toast(e.message, 'error'); }
+    });
+  }
   const play = e.target.closest('[data-seg-play]');
   if (play) { segPlay(play); return; }
   const seed = e.target.closest('[data-seg-seed]');
@@ -3174,9 +3187,14 @@ function downloadTextFile(filename, text) {
 }
 
 function exportToolbarHtml(kind) {
+  const saveBtn = S.exportDir
+    ? '<button class="btn" data-export-save="md" style="font-size:11px;padding:6px 12px;border-color:var(--inset-edge)" title="Save as Markdown to ' + escapeHtml(S.exportDir) + '">Save as .md</button>'
+    : '';
   return '<div style="display:flex;justify-content:flex-end;gap:8px;padding:0 32px 10px">' +
     '<button class="btn" data-export-copy="' + kind + '" style="font-size:11px;padding:6px 12px;border-color:var(--inset-edge)">Copy</button>' +
-    '<button class="btn" data-export-dl="' + kind + '" style="font-size:11px;padding:6px 12px;border-color:var(--inset-edge)">Download .txt</button></div>';
+    '<button class="btn" data-export-dl="' + kind + '" style="font-size:11px;padding:6px 12px;border-color:var(--inset-edge)">Download .txt</button>' +
+    saveBtn +
+    '</div>';
 }
 
 async function summaryPlainText(transcriptId) {
@@ -4505,9 +4523,16 @@ async function loadSettingsPage() {
       </div>
       <div>
         <div class="t-cap" style="font-size:10.5px;letter-spacing:0.14em;margin:0 0 8px 36px">Maintenance</div>
-        <div class="unit unit--svc" style="border-radius:3px;padding:12px 30px;height:100%;display:flex;align-items:center;justify-content:flex-end;gap:8px">
-          ${S.isAdmin ? `<button id="svc-reset-code" style="font-family:var(--f-cond);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:0.03em;background:var(--input);border:1px solid var(--amber);color:var(--amber);padding:7px 16px;border-radius:2px;cursor:pointer">Generate reset code</button>` : ''}
-          <button id="svc-logout" style="font-family:var(--f-cond);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:0.03em;background:var(--input);border:1px solid var(--red);color:var(--red);padding:7px 16px;border-radius:2px;cursor:pointer">Log out</button>
+        <div class="unit unit--svc" style="border-radius:3px;padding:12px 30px;height:100%;display:flex;flex-direction:column;gap:10px">
+          <div style="display:flex;align-items:center;gap:8px">
+            <label class="t-label" for="export-dir-input" style="white-space:nowrap">Export directory</label>
+            <input id="export-dir-input" type="text" value="${escapeHtml(settings.export_directory || '')}" placeholder="e.g. C:\\Users\\you\\Documents\\Vault" style="font-family:var(--f-mono);font-size:11px;background:var(--input);border:1px solid var(--input-edge);color:var(--label);padding:6px 8px;border-radius:2px;flex:1;min-width:0">
+            <button id="export-dir-save" style="font-family:var(--f-cond);font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:0.03em;background:var(--input);border:1px solid var(--input-edge);color:var(--label);padding:6px 12px;border-radius:2px;cursor:pointer;white-space:nowrap">Save</button>
+          </div>
+          <div style="display:flex;align-items:center;justify-content:flex-end;gap:8px">
+            ${S.isAdmin ? `<button id="svc-reset-code" style="font-family:var(--f-cond);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:0.03em;background:var(--input);border:1px solid var(--amber);color:var(--amber);padding:7px 16px;border-radius:2px;cursor:pointer">Generate reset code</button>` : ''}
+            <button id="svc-logout" style="font-family:var(--f-cond);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:0.03em;background:var(--input);border:1px solid var(--red);color:var(--red);padding:7px 16px;border-radius:2px;cursor:pointer">Log out</button>
+          </div>
         </div>
       </div>
     </div>
@@ -4647,6 +4672,15 @@ async function loadSettingsPage() {
   // Admin-only reset-code generator — only exists when S.isAdmin is true
   const resetBtn = $('svc-reset-code');
   if (resetBtn) resetBtn.addEventListener('click', showGenerateResetCode);
+
+  $('export-dir-save').addEventListener('click', (e) => withBusy(e.currentTarget, async () => {
+    const val = $('export-dir-input').value.trim();
+    try {
+      await api('/api/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ export_directory: val }) });
+      S.exportDir = val;
+      toast(val ? 'Export directory saved' : 'Export directory cleared');
+    } catch (e) { toast(e.message, 'error'); }
+  }));
 
   // faceplate prefs
   $('ctl-theme').addEventListener('click', () => {
