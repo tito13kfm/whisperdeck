@@ -5,6 +5,7 @@ fits best. Mirrors services/transcription.py's summarize(): one LLM call
 per target, plain text out (classify_intent returns a short label instead).
 """
 import json
+import re
 
 from backends import ProviderError
 from services.llm_client import chat_completion, resolve_model, transcript_text_for_prompt
@@ -110,3 +111,50 @@ TRANSCRIPT:
     except Exception:
         return "none"
     return label if label in INTENT_LABELS else "none"
+
+
+def build_export_markdown(transcript, summary: dict | None = None) -> str:
+    """Compose a Markdown export from a Transcript + optional summary dict.
+    No LLM call — pure string assembly. Used by
+    POST /api/transcripts/{id}/export-markdown to write a .md file to the
+    user's configured export directory. Skips any section whose data is
+    empty/None; falls back to full_text when segments are empty.
+    """
+    title = (transcript.title or "").strip()
+    title = re.sub(r"^#+\s*", "", title)
+
+    parts = [f"# {title}" if title else ""]
+
+    segments = transcript.segments or []
+    if segments:
+        lines = []
+        for seg in segments:
+            speaker = (seg.get("speaker") or "Speaker").strip() or "Speaker"
+            text = (seg.get("text") or "").strip()
+            if not text:
+                continue
+            lines.append(f"**{speaker}:** {text}")
+        transcript_block = "\n\n".join(lines) if lines else (transcript.full_text or "").strip()
+    else:
+        transcript_block = (transcript.full_text or "").strip()
+    if transcript_block:
+        parts.append("## Transcript\n\n" + transcript_block)
+
+    if summary:
+        short = (summary.get("short_summary") or "").strip()
+        if short:
+            parts.append("## Summary\n\n" + short)
+
+        key_points = [str(p).strip() for p in (summary.get("key_points") or []) if str(p).strip()]
+        if key_points:
+            parts.append("## Key Points\n\n" + "\n".join(f"- {p}" for p in key_points))
+
+        action_items = [str(a).strip() for a in (summary.get("action_items") or []) if str(a).strip()]
+        if action_items:
+            parts.append("## Action Items\n\n" + "\n".join(f"- [ ] {a}" for a in action_items))
+
+        decisions = [str(d).strip() for d in (summary.get("decisions") or []) if str(d).strip()]
+        if decisions:
+            parts.append("## Decisions\n\n" + "\n".join(f"- {d}" for d in decisions))
+
+    return "\n\n".join(p for p in parts if p).strip() + "\n"
