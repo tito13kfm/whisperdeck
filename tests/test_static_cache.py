@@ -4,8 +4,8 @@ from fastapi.testclient import TestClient
 
 
 def test_static_asset_cache_control(client):
-    """GET /static/rack.css returns Cache-Control: public, max-age=3600."""
-    resp = client.get("/static/rack.css")
+    """GET /static/rack.min.css returns Cache-Control: public, max-age=3600."""
+    resp = client.get("/static/rack.min.css")
     assert resp.status_code == 200
     assert resp.headers.get("Cache-Control") == "public, max-age=3600"
 
@@ -33,7 +33,7 @@ def test_static_cache_middleware_ordering():
     """
     import app as app_module
     fresh = TestClient(app_module.app)
-    resp = fresh.get("/static/rack.js")
+    resp = fresh.get("/static/rack.min.js")
     assert resp.status_code == 200
     assert resp.headers.get("Cache-Control") == "public, max-age=3600"
 
