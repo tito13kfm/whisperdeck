@@ -130,6 +130,10 @@ def search_transcripts_snippets(db, user_id: int, query: str, limit: int = 20) -
                 "t.title, "
                 "t.filename, "
                 "t.created_at, "
+                "t.full_text, "
+                "t.corrected_text, "
+                "COALESCE((SELECT group_concat(json_extract(value,'$.text'),' ') "
+                "FROM json_each(t.segments)), '') AS segment_text, "
                 "snippet(transcripts_fts, -1, '<b>', '</b>', '…', 32) AS snippet "
                 "FROM transcripts_fts f "
                 "JOIN transcripts t ON t.id = f.rowid "
@@ -146,14 +150,30 @@ def search_transcripts_snippets(db, user_id: int, query: str, limit: int = 20) -
 
     results = []
     for r in rows:
-        transcript_id, rank, title, filename, created_at, snippet = r
+        (transcript_id, rank, title, filename, created_at,
+         full_text, corrected_text, segment_text, snippet) = r
         snippet_text = snippet or ""
 
-        # Determine match_source: check which column the query terms appear in
-        match_source = "full_text"
+        # Determine match_source: check which column the query terms appear in.
+        # Checked in this order since a term can legitimately appear in more
+        # than one column (e.g. a corrected transcript keeps its original
+        # full_text too) — first match wins.
         terms_lower = [t.lower() for t in query.lower().split() if t]
-        if title and any(t in (title or "").lower() for t in terms_lower):
+
+        def _has_term(text_val):
+            text_lower = (text_val or "").lower()
+            return any(t in text_lower for t in terms_lower)
+
+        if title and _has_term(title):
             match_source = "title"
+        elif _has_term(full_text):
+            match_source = "full_text"
+        elif _has_term(corrected_text):
+            match_source = "corrected_text"
+        elif _has_term(segment_text):
+            match_source = "segment_text"
+        else:
+            match_source = "full_text"
 
         results.append({
             "transcript_id": transcript_id,

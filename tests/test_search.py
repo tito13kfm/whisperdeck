@@ -310,7 +310,25 @@ def test_snippets_match_source_field(db_session):
                      corrected_text="Sandeep fixed the Claude integration")
     results = search_transcripts_snippets(db_session, user.id, "Claude")
     assert len(results) == 1
-    assert results[0]["match_source"] in ("full_text", "corrected_text", "segment_text", "title")
+    assert results[0]["match_source"] == "corrected_text"
+
+
+def test_snippets_match_source_full_text(db_session):
+    user = _make_user(db_session)
+    _make_transcript(db_session, user.id, full_text="hello unique_fulltext_term world")
+    results = search_transcripts_snippets(db_session, user.id, "unique_fulltext_term")
+    assert len(results) == 1
+    assert results[0]["match_source"] == "full_text"
+
+
+def test_snippets_match_source_segment_text(db_session):
+    user = _make_user(db_session)
+    _make_transcript(db_session, user.id, full_text="base text",
+                     segments=[{"speaker": "A", "text": "unique_segment_term here",
+                                "start": 0, "end": 1}])
+    results = search_transcripts_snippets(db_session, user.id, "unique_segment_term")
+    assert len(results) == 1
+    assert results[0]["match_source"] == "segment_text"
 
 
 def test_snippets_has_rank(db_session):
