@@ -10,6 +10,10 @@ WhisperDeck is a self-hosted transcription studio that runs in your browser. Upl
 
 It's multi-user (register/login, per-user transcripts, settings, and API keys), and every long-running operation goes through a background job queue with live progress, cancel/resume, and retry.
 
+![Transcript detail with the floating video panel detached and playing over the corrected transcript, LLM correction attribution visible below](screenshots/14-video-panel.png)
+
+<sub>Demo video: [Big Buck Bunny](https://peach.blender.org) © 2008, Blender Foundation, [CC BY 3.0](https://creativecommons.org/licenses/by/3.0/). Dialogue audio is synthetic (TTS), not from the film.</sub>
+
 ![WhisperDeck Monitor — at-a-glance stats, transcript library, voice roster, and storage bargraph in the "Signal Rack" chassis](screenshots/01-monitor.png)
 
 ---
