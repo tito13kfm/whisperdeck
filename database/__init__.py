@@ -561,8 +561,14 @@ def init_db(db_path: str = "data/whisperdesk.db") -> tuple:
         # Note: non-MATCH queries on this table are answered from the
         # content table; use transcripts_fts_docsize for index membership
         # checks.
+        # DROP + unconditional CREATE (not IF NOT EXISTS): this trigger's body
+        # changed to fix #206 (stale FTS entries after UPDATE). Any database
+        # created before that fix already has a trigger named
+        # trg_transcripts_fts_update — IF NOT EXISTS would see it and skip
+        # creating the corrected body, silently leaving old databases broken.
+        conn.execute(text("DROP TRIGGER IF EXISTS trg_transcripts_fts_update"))
         conn.execute(text(
-            "CREATE TRIGGER IF NOT EXISTS trg_transcripts_fts_update "
+            "CREATE TRIGGER trg_transcripts_fts_update "
             "AFTER UPDATE ON transcripts BEGIN "
             "INSERT INTO transcripts_fts(transcripts_fts, rowid, title, full_text, corrected_text, segment_text) "
             "VALUES('delete', OLD.id, OLD.title, OLD.full_text, OLD.corrected_text, "

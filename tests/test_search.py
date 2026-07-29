@@ -653,3 +653,56 @@ def test_fts_update_old_segment_terms_removed(db_session):
             {"q": '"different"'},
         ).fetchall()
         assert len(rows_new) == 1
+
+
+def test_fts_update_trigger_migrates_existing_database(tmp_path):
+    """A database created before the #206 fix already has a trigger named
+    trg_transcripts_fts_update with the old (insert-only) body. Re-running
+    init_db() on that existing file -- exactly what happens on every app
+    restart -- must replace it with the corrected body. CREATE TRIGGER IF
+    NOT EXISTS would see the old trigger already present and silently skip
+    creating the fix, leaving every upgraded install broken."""
+    from sqlalchemy import create_engine
+    from database import init_db
+
+    db_path = tmp_path / "existing.db"
+    engine, _, _ = init_db(str(db_path))
+    engine.dispose()
+
+    # Simulate a pre-fix database: replace the (already-corrected) trigger
+    # with the old, buggy insert-only body.
+    old_engine = create_engine(f"sqlite:///{db_path}")
+    with old_engine.connect() as conn:
+        conn.execute(text("DROP TRIGGER trg_transcripts_fts_update"))
+        conn.execute(text(
+            "CREATE TRIGGER trg_transcripts_fts_update "
+            "AFTER UPDATE ON transcripts BEGIN "
+            "INSERT INTO transcripts_fts(rowid, title, full_text, corrected_text, segment_text) "
+            "VALUES ("
+            "NEW.id, NEW.title, NEW.full_text, NEW.corrected_text, "
+            "COALESCE((SELECT group_concat(json_extract(value,'$.text'),' ') FROM json_each(NEW.segments)), '')"
+            "); END"
+        ))
+        conn.commit()
+    old_engine.dispose()
+
+    # Re-run init_db on the SAME file, as the app does on every startup.
+    engine2, SessionLocal2, _ = init_db(str(db_path))
+    db = SessionLocal2()
+    try:
+        user = _make_user(db)
+        t = _make_transcript(db, user.id, full_text="hello world")
+        t.full_text = "goodbye everyone"
+        db.commit()
+        with engine2.connect() as conn:
+            rows = conn.execute(
+                text("SELECT rowid FROM transcripts_fts WHERE transcripts_fts MATCH :q"),
+                {"q": '"hello"'},
+            ).fetchall()
+            assert len(rows) == 0, (
+                "old term 'hello' still matches after update on a database "
+                "that pre-existed the fix -- the trigger migration did not run"
+            )
+    finally:
+        db.close()
+        engine2.dispose()
