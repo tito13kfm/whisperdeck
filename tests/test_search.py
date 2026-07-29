@@ -469,3 +469,96 @@ def test_api_transcripts_without_q_returns_all(db_session, client):
     assert resp.status_code == 200
     data = resp.json()
     assert len(data) >= 2
+
+
+# ── populate_fts() backfill tests ───────────────────────────────────────────
+
+
+def test_populate_fts_restores_deleted_index(db_session):
+    """After wiping the FTS index, populate_fts should restore searchability.
+    Exercises both INSERT and UPDATE (trigger) branch."""
+    from database import populate_fts
+    engine = db_session.get_bind()
+    user = _make_user(db_session)
+
+    # t1: set segment_text now → INSERT branch
+    t1 = _make_transcript(db_session, user.id, title="with_segs",
+                          full_text="alpha beta gamma",
+                          segments=[{"speaker": "A", "text": "hello world",
+                                     "start": 0, "end": 1}])
+    with engine.begin() as conn:
+        conn.execute(
+            text("UPDATE transcripts SET segment_text = 'hello world' WHERE id = :tid"),
+            {"tid": t1.id},
+        )
+
+    # t2: leave segment_text NULL → UPDATE (trigger) branch
+    t2 = _make_transcript(db_session, user.id, title="no_segs",
+                          full_text="delta epsilon zeta")
+
+    # Wipe index — all state prepared before this point
+    with engine.begin() as conn:
+        conn.execute(text("INSERT INTO transcripts_fts(transcripts_fts) VALUES('delete-all')"))
+
+    # Confirm index empty: MATCH yields nothing, docsize is 0
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text("SELECT rowid FROM transcripts_fts WHERE transcripts_fts MATCH :q"),
+            {"q": "alpha OR delta"},
+        ).fetchall()
+        assert len(rows) == 0
+        docsize = conn.execute(
+            text("SELECT COUNT(*) FROM transcripts_fts_docsize")
+        ).scalar()
+        assert docsize == 0
+
+    populate_fts(engine)
+
+    # Both indexed: MATCH finds both, docsize is 2
+    with engine.connect() as conn:
+        for tid, term in [(t1.id, "alpha"), (t2.id, "delta")]:
+            rows = conn.execute(
+                text("SELECT rowid FROM transcripts_fts WHERE transcripts_fts MATCH :q"),
+                {"q": term},
+            ).fetchall()
+            assert len(rows) == 1, f"transcript {tid} not found for term '{term}'"
+            assert rows[0][0] == tid
+        docsize = conn.execute(
+            text("SELECT COUNT(*) FROM transcripts_fts_docsize")
+        ).scalar()
+        assert docsize == 2
+
+
+def test_populate_fts_idempotent(db_session):
+    """Calling populate_fts twice should not duplicate FTS entries."""
+    from database import populate_fts
+    engine = db_session.get_bind()
+    user = _make_user(db_session)
+
+    _make_transcript(db_session, user.id, full_text="unique term here")
+
+    populate_fts(engine)
+    with engine.connect() as conn:
+        first_docsize = conn.execute(
+            text("SELECT COUNT(*) FROM transcripts_fts_docsize")
+        ).scalar()
+
+    populate_fts(engine)
+    with engine.connect() as conn:
+        second_docsize = conn.execute(
+            text("SELECT COUNT(*) FROM transcripts_fts_docsize")
+        ).scalar()
+        # Integrity-check catches duplicate entries (same rowid twice = malformed)
+        conn.execute(
+            text("INSERT INTO transcripts_fts(transcripts_fts) VALUES('integrity-check')")
+        )
+
+    assert second_docsize == first_docsize
+    assert first_docsize >= 1
+
+
+def test_populate_fts_empty_db_is_noop(db_session):
+    """populate_fts on a database with no transcript rows should complete without error."""
+    from database import populate_fts
+    engine = db_session.get_bind()
+    populate_fts(engine)
