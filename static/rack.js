@@ -49,6 +49,8 @@ const S = {
   phosphor: '#5CFFAC',
   motion: true,
   assistantHistory: [],
+  bankSearchResults: null,           // FTS5 search results (issue #108)
+  bankSearchController: null,        // AbortController for in-flight search
 };
 
 const LANGUAGES = ['English', 'Auto-detect', 'Spanish', 'French', 'German', 'Japanese', 'Chinese'];
@@ -2458,17 +2460,19 @@ async function loadTranscripts() {
       <div class="page-status page-status--ok">${ledDot(GREEN, true, 9)}${list.length} channels · ${active} active</div>
     </div>
     <div class="unit" style="border-radius:3px;display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px;padding:12px 34px">
-      <input id="bank-search" class="inp" type="text" placeholder="Search title or filename…" value="${escapeHtml(S.bankQuery || '')}" style="font-size:12px;padding:8px 10px 8px 16px;flex:1;max-width:320px">
+      <input id="bank-search" class="inp" type="text" placeholder="Search transcripts…" value="${escapeHtml(S.bankQuery || '')}" style="font-size:12px;padding:8px 10px 8px 16px;flex:1;max-width:320px">
       <select id="bank-sort" class="inp" style="font-size:12px;padding:8px 10px">
         <option value="date-desc" ${(!S.bankSort || S.bankSort === 'date-desc') ? 'selected' : ''}>Newest first</option>
         <option value="date-asc" ${S.bankSort === 'date-asc' ? 'selected' : ''}>Oldest first</option>
         <option value="title-asc" ${S.bankSort === 'title-asc' ? 'selected' : ''}>Title A–Z</option>
       </select>
     </div>
+    <div id="bank-search-results"></div>
     <div id="bank-rows"></div>`;
 
   try {
     renderBankRows(openIds);
+    if (S.bankQuery && S.bankQuery.trim().length >= 3) doServerSearch();
   } catch (e) {
     console.error('renderBankRows error:', e);
     root.insertAdjacentHTML('beforeend', '<div class="empty-unit">Error rendering tape library: ' + escapeHtml(e.message) + '</div>');
@@ -2476,7 +2480,13 @@ async function loadTranscripts() {
 
   $('bank-search').addEventListener('input', () => {
     S.bankQuery = $('bank-search').value;
-    renderBankRows();
+    if (S.bankQuery.trim().length >= 3) {
+      doServerSearch();
+    } else {
+      S.bankSearchResults = null;
+      $('bank-search-results').innerHTML = '';
+      renderBankRows();
+    }
   });
   $('bank-sort').addEventListener('change', () => {
     S.bankSort = $('bank-sort').value;
@@ -2492,6 +2502,12 @@ async function loadTranscripts() {
     e.preventDefault();
     const id = Number(b.dataset.id), act = b.dataset.act;
     if (act === 'open') { navigate('detail', id); return; }
+    if (act === 'open-search') {
+      var q = S.bankQuery ? S.bankQuery.trim() : '';
+      S._searchJumpQuery = q;
+      navigate('detail', id);
+      return;
+    }
     withBusy(b, async () => {
       try {
         if (act === 'cancel') { await api('/api/transcripts/' + id + '/cancel', { method: 'POST' }); toast('Cancelled — resumable later', 'info'); }
@@ -2520,8 +2536,65 @@ async function loadTranscripts() {
 
   clearTimeout(bankPollTimer);
   if (active > 0 && S.page === 'transcripts') {
-    bankPollTimer = setTimeout(() => { if (S.page === 'transcripts') loadTranscripts(); }, 4000);
+    bankPollTimer = setTimeout(function pollTick() {
+      if (S.page !== 'transcripts') return;
+      if (S.bankQuery && S.bankQuery.trim().length >= 3) {
+        api('/api/transcripts?limit=100').then(function(list) {
+          bankListCache = list;
+          doServerSearch();
+        }).catch(function() {});
+        bankPollTimer = setTimeout(pollTick, 4000);
+      } else {
+        loadTranscripts();
+      }
+    }, 4000);
   }
+}
+
+async function doServerSearch() {
+  if (S.bankSearchController) S.bankSearchController.abort();
+  S.bankSearchController = new AbortController();
+  var q = S.bankQuery.trim();
+  if (q.length < 3) { S.bankSearchResults = null; renderSearchResults(); return; }
+  try {
+    var resp = await api('/api/search?q=' + encodeURIComponent(q) + '&limit=20', { signal: S.bankSearchController.signal });
+    S.bankSearchResults = resp.results || [];
+  } catch (e) {
+    if (e.name === 'AbortError') return;
+    S.bankSearchResults = null;
+  }
+  renderSearchResults();
+}
+
+function renderSearchResults() {
+  var container = $('bank-search-results');
+  if (!container) return;
+  var q = (S.bankQuery || '').trim();
+  if (q.length < 3 || !S.bankSearchResults) { container.innerHTML = ''; return; }
+  if (!S.bankSearchResults.length) {
+    container.innerHTML = '<div class="empty-unit">No transcripts match your search</div>';
+    return;
+  }
+  var rows = S.bankSearchResults.map(function(r) {
+    var title = escapeHtml(r.title || r.filename || 'Untitled');
+    var date = r.created_at ? timeAgo(r.created_at) : '';
+    var snippet = r.snippet || '';
+    var sourceLabel = r.match_source === 'corrected_text' ? 'corrected' :
+                      r.match_source === 'segment_text' ? 'segments' :
+                      r.match_source === 'title' ? 'title' : 'transcript';
+    return '<div class="unit" style="padding:10px 16px;cursor:pointer;margin-bottom:4px">' +
+      '<div style="display:flex;justify-content:space-between;align-items:center">' +
+        '<div style="font-weight:600;font-size:13px">' + title + '</div>' +
+        '<div style="display:flex;gap:6px;align-items:center">' +
+          '<span style="font-family:var(--f-mono);font-size:10px;color:var(--label-dim)">' + escapeHtml(date) + '</span>' +
+          '<span style="font-size:9px;padding:1px 6px;border:1px solid var(--inset-edge);border-radius:8px;color:var(--label-dim)">' + escapeHtml(sourceLabel) + '</span>' +
+          '<button class="btn" style="font-size:10px;padding:3px 8px" data-act="open-search" data-id="' + r.transcript_id + '">Open</button>' +
+        '</div>' +
+      '</div>' +
+      '<div style="font-size:12px;color:var(--label);margin-top:4px;line-height:1.5">' + snippet + '</div>' +
+    '</div>';
+  }).join('');
+  container.innerHTML = rows;
 }
 
 function renderBankRows(preservedOpenIds) {
@@ -2771,7 +2844,12 @@ async function loadTranscriptDetail(id, opts = {}) {
   if (gen !== detailLoadGen) return; // stale response, a newer load is in flight
   detailData = fetched;
   if (prevId !== null && prevId !== detailData.id) resetSegAudio();
-  if (!opts.preserveQuery) S.query = '';
+  if (S._searchJumpQuery) {
+    S.query = S._searchJumpQuery;
+    S._searchJumpQuery = null;
+  } else if (!opts.preserveQuery) {
+    S.query = '';
+  }
   // S.detailTab is a global that survives navigation between transcripts —
   // if it's pointed at a kind-specific tab (format for dictation, notes
   // for voice_note) and the newly-opened transcript is the wrong kind,
