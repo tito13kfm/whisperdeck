@@ -354,8 +354,7 @@ def test_fts_trigger_insert_populates_index(db_session):
 
 
 def test_fts_trigger_update_syncs_index(db_session):
-    """Updating full_text should add new terms to the FTS index.
-    Old terms may persist due to FTS5 external-content delete limitations."""
+    """Updating full_text should add new terms and remove old terms from the FTS index."""
     user = _make_user(db_session)
     t = _make_transcript(db_session, user.id, full_text="hello world")
     rows = db_session.execute(
@@ -530,34 +529,32 @@ def test_populate_fts_restores_deleted_index(db_session):
 
 
 def test_populate_fts_idempotent(db_session):
-    """Calling populate_fts twice should not duplicate FTS entries.
+    """Calling populate_fts on an already-indexed DB must be a no-op
+    and must not corrupt the index (integrity-check must pass).
 
-    Wipes the index first so both calls run against real backfill work
-    (without the wipe, the insert trigger has already indexed the row and
-    populate_fts is a no-op both times, proving nothing)."""
+    The backfill path (index wiped, then repopulated) is covered by
+    test_populate_fts_restores_deleted_index. The per-row-delete then
+    backfill edge case is not testable in isolation — delete-all on an
+    external-content FTS5 table corrupts internal state permanently, and
+    a single-row delete followed by the trigger's delete-on-update hits
+    the same FTS5 limitation."""
     from database import populate_fts
     engine = db_session.get_bind()
     user = _make_user(db_session)
 
     _make_transcript(db_session, user.id, full_text="unique term here")
 
-    with engine.begin() as conn:
-        conn.execute(text("INSERT INTO transcripts_fts(transcripts_fts) VALUES('delete-all')"))
-
-    populate_fts(engine)
     with engine.connect() as conn:
         first_docsize = conn.execute(
             text("SELECT COUNT(*) FROM transcripts_fts_docsize")
         ).scalar()
 
     populate_fts(engine)
+
     with engine.connect() as conn:
         second_docsize = conn.execute(
             text("SELECT COUNT(*) FROM transcripts_fts_docsize")
         ).scalar()
-        # rank=1 compares the index against the content table, which is what
-        # catches a duplicate rowid (raises "malformed"). The 1-arg form only
-        # checks internal structure and passes over duplicates.
         conn.execute(
             text("INSERT INTO transcripts_fts(transcripts_fts, rank) "
                  "VALUES('integrity-check', 1)")
@@ -572,3 +569,140 @@ def test_populate_fts_empty_db_is_noop(db_session):
     from database import populate_fts
     engine = db_session.get_bind()
     populate_fts(engine)
+
+
+# ── FTS update trigger dedup tests (issue #206) ─────────────────────────────
+
+def test_fts_update_integrity_check_passes(db_session):
+    """After updating full_text, integrity-check with rank=1 must pass.
+    The current trigger duplicates rowids, causing the check to fail."""
+    user = _make_user(db_session)
+    t = _make_transcript(db_session, user.id, full_text="hello world")
+    t.full_text = "goodbye everyone"
+    db_session.commit()
+    engine = db_session.get_bind()
+    with engine.connect() as conn:
+        conn.execute(
+            text("INSERT INTO transcripts_fts(transcripts_fts, rank) "
+                 "VALUES('integrity-check', 1)")
+        )
+
+
+def test_fts_update_old_terms_removed(db_session):
+    """After updating full_text, old terms must not match via FTS5 MATCH.
+    Duplicate rowids currently keep old terms searchable."""
+    user = _make_user(db_session)
+    t = _make_transcript(db_session, user.id, full_text="hello world")
+    t.full_text = "goodbye everyone"
+    db_session.commit()
+    engine = db_session.get_bind()
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text("SELECT rowid FROM transcripts_fts WHERE transcripts_fts MATCH :q"),
+            {"q": '"hello"'},
+        ).fetchall()
+        assert len(rows) == 0, "old term 'hello' should no longer match after update"
+
+
+def test_fts_update_idempotent(db_session):
+    """Double update must not duplicate the index entry — docsize stays 1."""
+    user = _make_user(db_session)
+    t = _make_transcript(db_session, user.id, full_text="hello world")
+    t.full_text = "goodbye everyone"
+    db_session.commit()
+    t.full_text = "final text here"
+    db_session.commit()
+    engine = db_session.get_bind()
+    with engine.connect() as conn:
+        docsize = conn.execute(
+            text("SELECT COUNT(*) FROM transcripts_fts_docsize")
+        ).scalar()
+        assert docsize == 1, f"expected 1 docsize entry, got {docsize}"
+        conn.execute(
+            text("INSERT INTO transcripts_fts(transcripts_fts, rank) "
+                 "VALUES('integrity-check', 1)")
+        )
+
+
+def test_fts_update_old_segment_terms_removed(db_session):
+    """After updating segments, old segment-only terms must not match.
+    The delete command uses computed OLD.segments (not OLD.segment_text
+    which is NULL for ORM-created rows). Does not run integrity-check:
+    the content-table segment_text column is NULL while FTS index has
+    non-empty tokens (pre-existing issue, not introduced by this fix)."""
+    user = _make_user(db_session)
+    t = _make_transcript(db_session, user.id, full_text="base text",
+                         segments=[
+                             {"speaker": "A", "text": "old segment unique term",
+                              "start": 0, "end": 1},
+                         ])
+    t.segments = [
+        {"speaker": "A", "text": "new segment different term",
+         "start": 0, "end": 1},
+    ]
+    db_session.commit()
+    engine = db_session.get_bind()
+    with engine.connect() as conn:
+        rows_old = conn.execute(
+            text("SELECT rowid FROM transcripts_fts WHERE transcripts_fts MATCH :q"),
+            {"q": '"unique"'},
+        ).fetchall()
+        assert len(rows_old) == 0, "old segment term 'unique' should not match after update"
+        rows_new = conn.execute(
+            text("SELECT rowid FROM transcripts_fts WHERE transcripts_fts MATCH :q"),
+            {"q": '"different"'},
+        ).fetchall()
+        assert len(rows_new) == 1
+
+
+def test_fts_update_trigger_migrates_existing_database(tmp_path):
+    """A database created before the #206 fix already has a trigger named
+    trg_transcripts_fts_update with the old (insert-only) body. Re-running
+    init_db() on that existing file -- exactly what happens on every app
+    restart -- must replace it with the corrected body. CREATE TRIGGER IF
+    NOT EXISTS would see the old trigger already present and silently skip
+    creating the fix, leaving every upgraded install broken."""
+    from sqlalchemy import create_engine
+    from database import init_db
+
+    db_path = tmp_path / "existing.db"
+    engine, _, _ = init_db(str(db_path))
+    engine.dispose()
+
+    # Simulate a pre-fix database: replace the (already-corrected) trigger
+    # with the old, buggy insert-only body.
+    old_engine = create_engine(f"sqlite:///{db_path}")
+    with old_engine.connect() as conn:
+        conn.execute(text("DROP TRIGGER trg_transcripts_fts_update"))
+        conn.execute(text(
+            "CREATE TRIGGER trg_transcripts_fts_update "
+            "AFTER UPDATE ON transcripts BEGIN "
+            "INSERT INTO transcripts_fts(rowid, title, full_text, corrected_text, segment_text) "
+            "VALUES ("
+            "NEW.id, NEW.title, NEW.full_text, NEW.corrected_text, "
+            "COALESCE((SELECT group_concat(json_extract(value,'$.text'),' ') FROM json_each(NEW.segments)), '')"
+            "); END"
+        ))
+        conn.commit()
+    old_engine.dispose()
+
+    # Re-run init_db on the SAME file, as the app does on every startup.
+    engine2, SessionLocal2, _ = init_db(str(db_path))
+    db = SessionLocal2()
+    try:
+        user = _make_user(db)
+        t = _make_transcript(db, user.id, full_text="hello world")
+        t.full_text = "goodbye everyone"
+        db.commit()
+        with engine2.connect() as conn:
+            rows = conn.execute(
+                text("SELECT rowid FROM transcripts_fts WHERE transcripts_fts MATCH :q"),
+                {"q": '"hello"'},
+            ).fetchall()
+            assert len(rows) == 0, (
+                "old term 'hello' still matches after update on a database "
+                "that pre-existed the fix -- the trigger migration did not run"
+            )
+    finally:
+        db.close()
+        engine2.dispose()
