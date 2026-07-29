@@ -530,12 +530,19 @@ def test_populate_fts_restores_deleted_index(db_session):
 
 
 def test_populate_fts_idempotent(db_session):
-    """Calling populate_fts twice should not duplicate FTS entries."""
+    """Calling populate_fts twice should not duplicate FTS entries.
+
+    Wipes the index first so both calls run against real backfill work
+    (without the wipe, the insert trigger has already indexed the row and
+    populate_fts is a no-op both times, proving nothing)."""
     from database import populate_fts
     engine = db_session.get_bind()
     user = _make_user(db_session)
 
     _make_transcript(db_session, user.id, full_text="unique term here")
+
+    with engine.begin() as conn:
+        conn.execute(text("INSERT INTO transcripts_fts(transcripts_fts) VALUES('delete-all')"))
 
     populate_fts(engine)
     with engine.connect() as conn:
@@ -548,13 +555,16 @@ def test_populate_fts_idempotent(db_session):
         second_docsize = conn.execute(
             text("SELECT COUNT(*) FROM transcripts_fts_docsize")
         ).scalar()
-        # Integrity-check catches duplicate entries (same rowid twice = malformed)
+        # rank=1 compares the index against the content table, which is what
+        # catches a duplicate rowid (raises "malformed"). The 1-arg form only
+        # checks internal structure and passes over duplicates.
         conn.execute(
-            text("INSERT INTO transcripts_fts(transcripts_fts) VALUES('integrity-check')")
+            text("INSERT INTO transcripts_fts(transcripts_fts, rank) "
+                 "VALUES('integrity-check', 1)")
         )
 
     assert second_docsize == first_docsize
-    assert first_docsize >= 1
+    assert first_docsize == 1
 
 
 def test_populate_fts_empty_db_is_noop(db_session):

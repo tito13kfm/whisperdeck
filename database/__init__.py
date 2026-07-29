@@ -551,12 +551,14 @@ def init_db(db_path: str = "data/whisperdesk.db") -> tuple:
             "COALESCE((SELECT group_concat(json_extract(value,'$.text'),' ') FROM json_each(NEW.segments)), '')"
             "); END"
         ))
-            # Trigger: AFTER UPDATE — syncs new text. Old index entries are
-            # not removed (the FTS5 external-content delete path needs exact
-            # old values and was unreliable here); re-inserting a rowid
-            # duplicates the entry, which marks the index failing
-            # integrity-check, though MATCH results remain correct.
-            # Tracked separately.
+        # Trigger: AFTER UPDATE syncs new text. Old index entries are
+        # not removed (the FTS5 external-content delete path needs exact
+        # old values and was unreliable here); re-inserting a rowid
+        # duplicates the entry, which marks the index failing
+        # integrity-check, though MATCH results remain correct.
+        # Tracked separately (issue #206). Note: non-MATCH queries on this
+        # table are answered from the content table; use
+        # transcripts_fts_docsize for index membership checks.
         conn.execute(text(
             "CREATE TRIGGER IF NOT EXISTS trg_transcripts_fts_update "
             "AFTER UPDATE ON transcripts BEGIN "
