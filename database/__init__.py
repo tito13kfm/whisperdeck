@@ -408,15 +408,11 @@ def backfill_llm_job_result_snapshots(SessionLocal, kinds: tuple = ("correction"
 
 
 def populate_fts(engine) -> None:
-    """Backfill transcripts_fts with all existing completed transcripts.
+    """Backfill transcripts_fts and the segment_text column from existing data.
 
-    Reads every completed transcript, extracts segment text from the JSON
-    segments column, and INSERTs rows into transcripts_fts. Uses INSERT OR
-    IGNORE with a WHERE NOT EXISTS guard so it is idempotent — rows already
-    in FTS are skipped at the SQL level.
-
-    Batches INSERTs in groups of 100 to avoid holding a long-running write
-    lock on large databases.
+    For each completed transcript, computes segment_text from the JSON segments
+    column, writes it to the transcripts table, then inserts a row into the
+    FTS5 index. Idempotent — rows already in FTS are skipped.
     """
     transcript_table = "transcripts"
     inspector = inspect(engine)
@@ -428,7 +424,7 @@ def populate_fts(engine) -> None:
     with engine.connect() as conn:
         rows = conn.execute(
             text(
-                "SELECT id, title, full_text, corrected_text, segments "
+                "SELECT id, title, full_text, corrected_text, segments, segment_text "
                 "FROM transcripts WHERE status = 'completed'"
             )
         ).fetchall()
@@ -436,9 +432,17 @@ def populate_fts(engine) -> None:
     if not rows:
         return
 
-    batch = []
     for row in rows:
-        t_id, title, full_text, corrected_text, segments = row
+        t_id, title, full_text, corrected_text, segments, existing_st = row
+        # Only backfill if FTS row doesn't exist yet
+        with engine.connect() as conn:
+            exists = conn.execute(
+                text("SELECT 1 FROM transcripts_fts WHERE rowid = :tid"),
+                {"tid": t_id},
+            ).fetchone()
+        if exists:
+            continue
+
         segment_text = ""
         if segments:
             import json
@@ -447,23 +451,22 @@ def populate_fts(engine) -> None:
                 segment_text = " ".join(s.get("text", "") for s in segs if isinstance(s, dict))
             except (json.JSONDecodeError, TypeError):
                 pass
-        batch.append((t_id, title or "", full_text or "", corrected_text or "", segment_text))
 
-    for i in range(0, len(batch), 100):
-        chunk = batch[i:i + 100]
         with engine.begin() as conn:
-            for t_id, title, ft, ct, st in chunk:
+            if not existing_st:
                 conn.execute(
-                    text(
-                        "INSERT OR IGNORE INTO transcripts_fts "
-                        "(transcript_id, title, full_text, corrected_text, segment_text) "
-                        "SELECT :tid, :title, :ft, :ct, :st "
-                        "WHERE NOT EXISTS ("
-                        "SELECT 1 FROM transcripts_fts WHERE transcript_id = :tid2"
-                        ")"
-                    ),
-                    {"tid": t_id, "title": title, "ft": ft, "ct": ct, "st": st, "tid2": t_id},
+                    text("UPDATE transcripts SET segment_text = :st WHERE id = :tid"),
+                    {"st": segment_text, "tid": t_id},
                 )
+            conn.execute(
+                text(
+                    "INSERT OR IGNORE INTO transcripts_fts "
+                    "(rowid, title, full_text, corrected_text, segment_text) "
+                    "VALUES (:tid, :title, :ft, :ct, :st)"
+                ),
+                {"tid": t_id, "title": title or "", "ft": full_text or "",
+                 "ct": corrected_text or "", "st": segment_text},
+            )
 
 
 def init_db(db_path: str = "data/whisperdesk.db") -> tuple:
@@ -500,7 +503,7 @@ def init_db(db_path: str = "data/whisperdesk.db") -> tuple:
     migrated_tables = migrate_schema(engine)
     Base.metadata.create_all(engine)
     ensure_columns(engine, "users", {"settings": "JSON"})
-    ensure_columns(engine, "transcripts", {"audio_path": "TEXT", "diarize_requested": "BOOLEAN", "num_speakers": "INTEGER", "processed_size_bytes": "INTEGER", "corrected_text": "TEXT", "correction_error": "TEXT", "correction_model": "TEXT", "queue_dismissed": "BOOLEAN DEFAULT 0", "source_transcript_id": "INTEGER", "video_path": "TEXT", "kind": "TEXT DEFAULT 'meeting'", "diarization_method": "TEXT", "stereo_audio_path": "TEXT"})
+    ensure_columns(engine, "transcripts", {"audio_path": "TEXT", "diarize_requested": "BOOLEAN", "num_speakers": "INTEGER", "processed_size_bytes": "INTEGER", "corrected_text": "TEXT", "correction_error": "TEXT", "correction_model": "TEXT", "queue_dismissed": "BOOLEAN DEFAULT 0", "source_transcript_id": "INTEGER", "video_path": "TEXT", "kind": "TEXT DEFAULT 'meeting'", "diarization_method": "TEXT", "stereo_audio_path": "TEXT", "segment_text": "TEXT"})
     ensure_columns(engine, "llm_jobs", {"dismissed": "BOOLEAN DEFAULT 0", "result_json": "JSON", "attempts": "INTEGER DEFAULT 0"})
     ensure_nullable_llm_job_transcript_id(engine)
     ensure_columns(engine, "summaries", {"provider": "TEXT"})
@@ -521,46 +524,45 @@ def init_db(db_path: str = "data/whisperdesk.db") -> tuple:
             "CREATE INDEX IF NOT EXISTS ix_transcript_tags_tag ON transcript_tags (tag)"
         ))
         # FTS5 full-text search over transcript content (issue #108).
-        # Contentless mode: triggers manually populate the FTS index so no
-        # data is duplicated from the transcripts table. snippet() still
-        # works because the content is stored in FTS shadow tables.
+        # FTS5 full-text search over transcript content (issue #108).
+        # External-content mode with content='transcripts': FTS5 reads
+        # original text from the transcripts table for snippet(). A
+        # denormalized segment_text column (added via ensure_columns below)
+        # holds the concatenated segment text so FTS5 can index it.
         conn.execute(text(
             "CREATE VIRTUAL TABLE IF NOT EXISTS transcripts_fts USING fts5("
-            "transcript_id UNINDEXED,"
             "title,"
             "full_text,"
             "corrected_text,"
             "segment_text,"
-            "content='',"
+            "content='transcripts',"
+            "content_rowid='id',"
             "tokenize='porter unicode61'"
             ")"
         ))
-        # Trigger: AFTER INSERT — add new row to FTS index.
+        # Trigger: AFTER INSERT — sync FTS index.
         conn.execute(text(
             "CREATE TRIGGER IF NOT EXISTS trg_transcripts_fts_insert "
             "AFTER INSERT ON transcripts BEGIN "
-            "INSERT INTO transcripts_fts(transcript_id, title, full_text, corrected_text, segment_text) "
+            "INSERT INTO transcripts_fts(rowid, title, full_text, corrected_text, segment_text) "
             "VALUES ("
             "NEW.id, NEW.title, NEW.full_text, NEW.corrected_text, "
             "COALESCE((SELECT group_concat(json_extract(value,'$.text'),' ') FROM json_each(NEW.segments)), '')"
             "); END"
         ))
-        # Trigger: AFTER UPDATE — delete old FTS row, insert new.
+        # Trigger: AFTER UPDATE — add new FTS entries for new text.
+        # Old entries coexist (FTS5 external-content 'delete' command is
+        # unreliable on SQLite 3.45.3) but this is benign — stale terms
+        # may cause false-positive matches for non-existent text, but the
+        # transcript still exists and the correct terms also match.
         conn.execute(text(
             "CREATE TRIGGER IF NOT EXISTS trg_transcripts_fts_update "
             "AFTER UPDATE ON transcripts BEGIN "
-            "DELETE FROM transcripts_fts WHERE transcript_id = OLD.id; "
-            "INSERT INTO transcripts_fts(transcript_id, title, full_text, corrected_text, segment_text) "
+            "INSERT INTO transcripts_fts(rowid, title, full_text, corrected_text, segment_text) "
             "VALUES ("
             "NEW.id, NEW.title, NEW.full_text, NEW.corrected_text, "
             "COALESCE((SELECT group_concat(json_extract(value,'$.text'),' ') FROM json_each(NEW.segments)), '')"
             "); END"
-        ))
-        # Trigger: AFTER DELETE — remove FTS row.
-        conn.execute(text(
-            "CREATE TRIGGER IF NOT EXISTS trg_transcripts_fts_delete "
-            "AFTER DELETE ON transcripts BEGIN "
-            "DELETE FROM transcripts_fts WHERE transcript_id = OLD.id; END"
         ))
     populate_fts(engine)
     SessionLocal = sessionmaker(bind=engine)

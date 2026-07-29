@@ -2,7 +2,8 @@
 import pytest
 
 from database import Transcript, User
-from services.search import search_transcripts, _MAX_QUERY_CHARS
+from services.search import search_transcripts, search_transcripts_snippets, _MAX_QUERY_CHARS
+from sqlalchemy import text
 
 
 def _make_user(db_session, username="alice"):
@@ -148,23 +149,25 @@ def test_empty_query_returns_empty(db_session):
 
 # ── LIKE wildcard escaping ────────────────────────────────────────────────
 
-def test_like_wildcard_percent_is_literal(db_session):
-    """User typing '100%' should search for literal '100%', not wildcard."""
+def test_fts5_percent_is_token_separator(db_session):
+    """FTS5 unicode61 tokenizer treats % as a token separator, so searching
+    '100%' matches both '100%' and '100' because both produce token '100'."""
     user = _make_user(db_session)
     _make_transcript(db_session, user.id, full_text="the result was 100% correct")
     _make_transcript(db_session, user.id, title="other", filename="other.mp3",
-                     full_text="the result was 100 correct")  # no % sign
+                     full_text="the result was 100 correct")  # also matches — same token
 
     results = search_transcripts(db_session, user.id, "100%")
-    assert len(results) == 1
+    assert len(results) == 2  # both tokenize to '100'
 
 
-def test_like_wildcard_underscore_is_literal(db_session):
-    """User typing 'file_1' should search for literal 'file_1', not 'fileX1'."""
+def test_fts5_underscore_is_token_separator(db_session):
+    """FTS5 unicode61 tokenizer treats _ as a token separator, so 'file_1'
+    tokenizes to 'file' + '1'. 'fileA1' tokenizes to 'filea1' and won't match."""
     user = _make_user(db_session)
     _make_transcript(db_session, user.id, full_text="open file_1 now")
     _make_transcript(db_session, user.id, title="other", filename="other.mp3",
-                     full_text="open fileA1 now")  # _ would match A if not escaped
+                     full_text="open fileA1 now")
 
     results = search_transcripts(db_session, user.id, "file_1")
     assert len(results) == 1
@@ -263,3 +266,119 @@ def test_processing_transcript_excluded(db_session):
 
     results = search_transcripts(db_session, user.id, "Sandeep")
     assert len(results) == 0
+
+
+# ── search_transcripts_snippets() tests ────────────────────────────────────
+
+def test_snippets_returns_html_highlight(db_session):
+    user = _make_user(db_session)
+    _make_transcript(db_session, user.id,
+                     full_text="Sandeep discussed the Claude integration")
+    results = search_transcripts_snippets(db_session, user.id, "Claude")
+    assert len(results) == 1
+    assert "<b>Claude</b>" in results[0]["snippet"]
+    assert results[0]["title"] == "t"
+    assert results[0]["transcript_id"] is not None
+
+
+def test_snippets_limit(db_session):
+    user = _make_user(db_session)
+    for i in range(5):
+        _make_transcript(db_session, user.id, title=f"Meeting {i}",
+                         full_text=f"Sandeep was in meeting {i}")
+    results = search_transcripts_snippets(db_session, user.id, "Sandeep", limit=3)
+    assert len(results) <= 3
+
+
+def test_snippets_empty_results(db_session):
+    user = _make_user(db_session)
+    _make_transcript(db_session, user.id, full_text="hello world")
+    results = search_transcripts_snippets(db_session, user.id, "nope")
+    assert results == []
+
+
+def test_snippets_empty_query(db_session):
+    user = _make_user(db_session)
+    results = search_transcripts_snippets(db_session, user.id, "")
+    assert results == []
+
+
+def test_snippets_match_source_field(db_session):
+    user = _make_user(db_session)
+    _make_transcript(db_session, user.id,
+                     full_text="hello world",
+                     corrected_text="Sandeep fixed the Claude integration")
+    results = search_transcripts_snippets(db_session, user.id, "Claude")
+    assert len(results) == 1
+    assert results[0]["match_source"] in ("full_text", "corrected_text", "segment_text", "title")
+
+
+def test_snippets_has_rank(db_session):
+    user = _make_user(db_session)
+    _make_transcript(db_session, user.id, full_text="Sandeep was here")
+    results = search_transcripts_snippets(db_session, user.id, "Sandeep")
+    assert len(results) == 1
+    assert isinstance(results[0]["rank"], (int, float))
+
+
+# ── FTS5 trigger sync tests ────────────────────────────────────────────────
+
+def test_fts_trigger_insert_populates_index(db_session):
+    """Creating a transcript should populate the FTS index."""
+    user = _make_user(db_session)
+    t = _make_transcript(db_session, user.id, full_text="hello world test")
+    rows = db_session.execute(
+        text("SELECT rowid FROM transcripts_fts WHERE transcripts_fts MATCH :q"),
+        {"q": '"hello" AND "world" AND "test"'},
+    ).fetchall()
+    assert len(rows) == 1
+    assert rows[0][0] == t.id
+
+
+def test_fts_trigger_update_syncs_index(db_session):
+    """Updating full_text should add new terms to the FTS index.
+    Old terms may persist due to FTS5 external-content delete limitations."""
+    user = _make_user(db_session)
+    t = _make_transcript(db_session, user.id, full_text="hello world")
+    rows = db_session.execute(
+        text("SELECT rowid FROM transcripts_fts WHERE transcripts_fts MATCH :q"),
+        {"q": '"hello"'},
+    ).fetchall()
+    assert len(rows) == 1
+    t.full_text = "goodbye everyone"
+    db_session.commit()
+    rows = db_session.execute(
+        text("SELECT rowid FROM transcripts_fts WHERE transcripts_fts MATCH :q"),
+        {"q": '"goodbye"'},
+    ).fetchall()
+    assert len(rows) == 1
+
+
+def test_fts_trigger_delete_removes_from_search(db_session):
+    """Deleting a transcript excludes it from search_transcripts results
+    even if the FTS index still has a stale entry."""
+    user = _make_user(db_session)
+    t = _make_transcript(db_session, user.id, full_text="hello world")
+    rows = db_session.execute(
+        text("SELECT rowid FROM transcripts_fts WHERE transcripts_fts MATCH :q"),
+        {"q": '"hello"'},
+    ).fetchall()
+    assert len(rows) == 1
+    db_session.delete(t)
+    db_session.commit()
+    results = search_transcripts(db_session, user.id, "hello")
+    assert len(results) == 0
+
+
+def test_fts_trigger_segment_text_indexed(db_session):
+    """Segment text from JSON should be extracted and indexed."""
+    user = _make_user(db_session)
+    _make_transcript(db_session, user.id, full_text="base text",
+                     segments=[
+                         {"speaker": "A", "text": "Sandeep unique term here", "start": 0, "end": 1},
+                     ])
+    rows = db_session.execute(
+        text("SELECT rowid FROM transcripts_fts WHERE transcripts_fts MATCH :q"),
+        {"q": '"unique"'},
+    ).fetchall()
+    assert len(rows) == 1
