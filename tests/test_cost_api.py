@@ -284,3 +284,28 @@ def test_batch_stt_costs_no_provider_returns_zero(db_session):
                           model="", duration=60.0, status="completed")
     costs = _batch_stt_costs([t])
     assert costs[t.id] == 0.0
+
+
+# ── openrouter LlmJob cost path (_resolve_openrouter_rate) ────────────────
+
+def test_transcript_cost_endpoint_openrouter_llm_job_no_crash(db_session, client):
+    """A completed OpenRouter correction job must not crash the /cost
+    endpoint. The rate lookup runs from inside the request's own event loop,
+    so it must be skipped there (not attempted via asyncio.run, which would
+    raise RuntimeError for a loop already running)."""
+    user = _make_user(db_session)
+    t = _make_transcript(db_session, user, provider="groq",
+                          model="whisper-large-v3-flash",
+                          duration=60.0, status="completed")
+    job = LlmJob(user_id=user.id, transcript_id=t.id, kind="correction",
+                 status="completed", provider="openrouter",
+                 model="deepseek/deepseek-v4-flash")
+    db_session.add(job)
+    db_session.commit()
+
+    resp = client.get(f"/api/transcripts/{t.id}/cost")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["correction"]["cost"] == 0.0
+    assert data["correction"]["rate_source"] == \
+        "OpenRouter (rate lookup skipped — called from an async context)"

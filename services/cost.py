@@ -81,8 +81,17 @@ def _llm_job_cost(db, transcript_id: int, kind: str) -> dict:
 
 def _resolve_openrouter_rate(model_id: str) -> str:
     """Look up the pricing display string for an OpenRouter model id.
-    Falls back to a descriptive string on network failure.
+    Falls back to a descriptive string on network failure, or when called
+    from inside a running event loop (this function is sync; a request
+    handler is already in a loop, so a live catalog fetch is skipped there
+    rather than attempted with asyncio.run(), which would raise).
     """
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        pass
+    else:
+        return "OpenRouter (rate lookup skipped — called from an async context)"
     try:
         live = asyncio.run(_openrouter_live_models())
     except Exception:

@@ -2856,7 +2856,7 @@ async def api_transcript_cost(transcript_id: int, db: Session = Depends(get_db),
 
 
 @app.post("/api/costs/estimate")
-async def api_cost_estimate(data: dict = Body(...)):
+async def api_cost_estimate(data: dict = Body(...), current_user: User = Depends(get_current_user)):
     """Pre-submit STT cost estimate. Accepts {provider, model, duration_seconds}."""
     provider = (data.get("provider") or "").strip()
     model = (data.get("model") or "").strip()
