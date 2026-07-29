@@ -382,3 +382,72 @@ def test_fts_trigger_segment_text_indexed(db_session):
         {"q": '"unique"'},
     ).fetchall()
     assert len(rows) == 1
+
+
+# ── API endpoint tests (use client fixture) ────────────────────────────────
+
+def test_api_search_returns_results(db_session, client):
+    _make_transcript(db_session, 1, full_text="Sandeep discussed the Claude integration")
+    resp = client.get("/api/search?q=Claude&limit=5")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "results" in data
+    assert "total" in data
+    assert data["total"] >= 1
+    assert len(data["results"]) >= 1
+    assert "snippet" in data["results"][0]
+    assert "transcript_id" in data["results"][0]
+
+
+def test_api_search_empty_query_returns_400(client):
+    resp = client.get("/api/search?q=")
+    assert resp.status_code == 400
+
+
+def test_api_search_missing_query_returns_422(client):
+    resp = client.get("/api/search")
+    assert resp.status_code == 422
+
+
+def test_api_search_query_too_long_returns_400(db_session, client):
+    long_q = "x" * 501
+    resp = client.get(f"/api/search?q={long_q}")
+    assert resp.status_code == 400
+
+
+def test_api_search_requires_auth():
+    from fastapi.testclient import TestClient
+    import app as app_module
+    tc = TestClient(app_module.app)
+    resp = tc.get("/api/search?q=hello")
+    assert resp.status_code == 401
+
+
+def test_api_search_limit_respected(db_session, client):
+    for i in range(5):
+        _make_transcript(db_session, 1, title=f"Meeting {i}",
+                         full_text=f"Sandeep was in meeting {i}")
+    resp = client.get("/api/search?q=Sandeep&limit=2")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(data["results"]) <= 2
+
+
+def test_api_transcripts_q_filters_by_content(db_session, client):
+    _make_transcript(db_session, 1, title="Meeting A", full_text="Sandeep unique word here")
+    _make_transcript(db_session, 1, title="Meeting B", full_text="nothing relevant")
+    resp = client.get("/api/transcripts?q=unique")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(data) >= 1
+    titles = [t["title"] for t in data]
+    assert "Meeting A" in titles
+
+
+def test_api_transcripts_without_q_returns_all(db_session, client):
+    _make_transcript(db_session, 1, title="Meeting A", full_text="hello")
+    _make_transcript(db_session, 1, title="Meeting B", full_text="world")
+    resp = client.get("/api/transcripts")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(data) >= 2
