@@ -60,6 +60,8 @@ from services.security import (
     rate_limiter, encrypt_api_key, decrypt_api_key,
 )
 from services.search import search_transcripts, search_transcripts_snippets
+from services.pricing import get_stt_rate
+from services.cost import transcript_cost, provider_cost, estimate_cost
 
 # ── App Setup ──────────────────────────────────────────────────────────────
 
@@ -342,6 +344,7 @@ def _serialize_transcript(db: Session, t: Transcript, *, jobs_map: dict[tuple[in
         "correction_job": serialize_llm_job(jobs_map[(t.id, "correction")]) if (t.id, "correction") in jobs_map else None,
         "summary_job": serialize_llm_job(jobs_map[(t.id, "summary")]) if (t.id, "summary") in jobs_map else None,
         "voice_match_job": serialize_llm_job(jobs_map[(t.id, "voice_match")]) if (t.id, "voice_match") in jobs_map else None,
+        "cost": transcript_cost(db, t),
         "tags": _tags_for_transcript(db, t.id),
         **_dictation_job_fields(jobs_map, t),
     }
@@ -550,11 +553,15 @@ def _tags_for_transcript(db: Session, transcript_id: int) -> list[str]:
     return [r[0] for r in rows]
 
 
-def _serialize_transcript_summary(db: Session, t: Transcript, tags: list[str] | None = None) -> dict:
+def _serialize_transcript_summary(db: Session, t: Transcript, tags: list[str] | None = None,
+                                  cost_map: dict[int, float] | None = None) -> dict:
     """Lightweight transcript payload for list/dashboard views. Omits
     full_text, segments, corrected_text, and per-kind LLM job details —
     every field retained here is consumed by at least one frontend row
-    renderer (statusView / transcriptPct / transcriptMeta / bankDetailFields)."""
+    renderer (statusView / transcriptPct / transcriptMeta / bankDetailFields).
+
+    cost_map, when provided, supplies a pre-computed STT cost per transcript_id
+    so that list views carry a cost value with zero additional DB queries."""
     jobs = t.jobs or []
     job_progress = None
     if jobs:
@@ -563,7 +570,7 @@ def _serialize_transcript_summary(db: Session, t: Transcript, tags: list[str] | 
             "completed": sum(1 for j in jobs if j.status == "completed"),
             "failed": sum(1 for j in jobs if j.status == "failed"),
         }
-    return {
+    data = {
         "id": t.id,
         "kind": t.kind or "meeting",
         "title": t.title,
@@ -580,8 +587,23 @@ def _serialize_transcript_summary(db: Session, t: Transcript, tags: list[str] | 
         "updated_at": t.updated_at.isoformat() if t.updated_at else None,
         "queue_status": compute_queue_status(db, t),
         "job_progress": job_progress,
+        "cost": cost_map.get(t.id) if cost_map else None,
         "tags": tags if tags is not None else [],
     }
+    return data
+
+
+def _batch_stt_costs(transcripts: list[Transcript]) -> dict[int, float]:
+    """Compute STT cost for a batch of transcripts from already-loaded fields.
+    Zero additional DB queries — rates come from the in-memory dict in pricing.py."""
+    costs: dict[int, float] = {}
+    for t in transcripts:
+        if not t.duration_seconds or not t.provider:
+            costs[t.id] = 0.0
+            continue
+        rate_info = get_stt_rate(t.provider, t.model or "")
+        costs[t.id] = rate_info["rate_per_minute"] * (t.duration_seconds / 60.0)
+    return costs
 
 
 def _build_recent_transcripts(db: Session, current_user: User, limit: int, offset: int = 0, query: str | None = None) -> list:
@@ -599,7 +621,8 @@ def _build_recent_transcripts(db: Session, current_user: User, limit: int, offse
         transcripts.sort(key=lambda t: id_order.get(t.id, len(matching_ids)))
         paged = transcripts[offset:offset + limit]
         tags_map = _tags_for_transcripts(db, [t.id for t in paged])
-        return [_serialize_transcript_summary(db, t, tags=tags_map.get(t.id, [])) for t in paged]
+        cost_map = _batch_stt_costs(paged)
+        return [_serialize_transcript_summary(db, t, tags=tags_map.get(t.id, []), cost_map=cost_map) for t in paged]
 
     transcripts = (
         db.query(Transcript)
@@ -610,7 +633,8 @@ def _build_recent_transcripts(db: Session, current_user: User, limit: int, offse
         .all()
     )
     tags_map = _tags_for_transcripts(db, [t.id for t in transcripts])
-    return [_serialize_transcript_summary(db, t, tags=tags_map.get(t.id, [])) for t in transcripts]
+    cost_map = _batch_stt_costs(transcripts)
+    return [_serialize_transcript_summary(db, t, tags=tags_map.get(t.id, []), cost_map=cost_map) for t in transcripts]
 
 
 def _build_jobs_payload(db: Session, current_user: User, limit: int) -> dict:
@@ -2780,6 +2804,72 @@ async def service_worker():
 async def full_status(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     """Return comprehensive app status for the frontend dashboard."""
     return _build_status_payload(db, current_user)
+
+
+# ── Cost Analytics ─────────────────────────────────────────────────────
+
+
+@app.get("/api/costs")
+async def api_costs_overview(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    """Per-provider cost totals for the current month plus lifetime totals.
+    Monthly window: trailing 30 days from now."""
+    now = datetime.datetime.now(datetime.UTC).replace(tzinfo=None)
+    month_start = now - datetime.timedelta(days=30)
+    providers = db.query(Transcript.provider).filter(
+        Transcript.user_id == current_user.id,
+        Transcript.provider.isnot(None),
+    ).distinct().all()
+    provider_costs = {}
+    lifetime_total = 0.0
+    monthly_total = 0.0
+    for (p,) in providers:
+        if not p:
+            continue
+        pc = provider_cost(db, current_user.id, p, month_start)
+        provider_costs[p] = pc
+        monthly_total += pc.get("total_cost", 0.0)
+    # Lifetime: query without the since filter
+    epoch = datetime.datetime(2020, 1, 1)
+    for (p,) in providers:
+        if not p:
+            continue
+        lt = provider_cost(db, current_user.id, p, epoch)
+        lifetime_total += lt.get("total_cost", 0.0)
+    return {
+        "providers": provider_costs,
+        "monthly_total": round(monthly_total, 4),
+        "lifetime_total": round(lifetime_total, 4),
+    }
+
+
+@app.get("/api/transcripts/{transcript_id}/cost")
+async def api_transcript_cost(transcript_id: int, db: Session = Depends(get_db),
+                              current_user: User = Depends(get_current_user)):
+    """Cost breakdown for a single transcript."""
+    t = db.query(Transcript).filter(
+        Transcript.id == transcript_id,
+        Transcript.user_id == current_user.id,
+    ).first()
+    if not t:
+        raise HTTPException(status_code=404, detail="Transcript not found")
+    return transcript_cost(db, t)
+
+
+@app.post("/api/costs/estimate")
+async def api_cost_estimate(data: dict = Body(...), current_user: User = Depends(get_current_user)):
+    """Pre-submit STT cost estimate. Accepts {provider, model, duration_seconds}."""
+    provider = (data.get("provider") or "").strip()
+    model = (data.get("model") or "").strip()
+    duration = data.get("duration_seconds")
+    if not provider:
+        raise HTTPException(status_code=400, detail="provider is required")
+    if not model:
+        raise HTTPException(status_code=400, detail="model is required")
+    if duration is None or not isinstance(duration, (int, float)):
+        raise HTTPException(status_code=400, detail="duration_seconds is required and must be a number")
+    if duration < 0:
+        raise HTTPException(status_code=400, detail="duration_seconds must be non-negative")
+    return estimate_cost(provider, model, float(duration))
 
 
 # ── Serve Static Files ───────────────────────────────────────────────────

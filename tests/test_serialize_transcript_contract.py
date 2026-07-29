@@ -36,6 +36,7 @@ EXPECTED_KEYS = {
     "classify_intent_job", "classify_intent_hint",
     "voice_note_job", "tagging_job",
     "tags",
+    "cost",
 }
 
 
