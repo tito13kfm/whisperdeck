@@ -178,6 +178,8 @@ Don't run full browser-driven e2e audits for every small change; reserve them fo
 
 Rule of thumb: a backend fix scoped to one module doesn't need a browser; a UI-visible or cross-cutting change does, but scope the runtime check to the flow that changed, not the whole app.
 
+Mutation check for every new test: the test must fail if the function under test's body were replaced with `return`. A test that only exercises the no-op path, or asserts through a proxy (e.g., `COUNT(*)` on an external-content FTS5 table reads the content table, not the index), proves nothing.
+
 ## The Complement Rule
 
 Your diff shows where you looked; before finishing, enumerate the complement. Whenever a change introduces a guard, a new enum/mode value, a threaded parameter, or a conditional UI affordance:

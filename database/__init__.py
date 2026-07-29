@@ -410,9 +410,13 @@ def backfill_llm_job_result_snapshots(SessionLocal, kinds: tuple = ("correction"
 def populate_fts(engine) -> None:
     """Backfill transcripts_fts and the segment_text column from existing data.
 
-    For each completed transcript, computes segment_text from the JSON segments
-    column, writes it to the transcripts table, then inserts a row into the
-    FTS5 index. Idempotent — rows already in FTS are skipped.
+    Finds completed transcripts whose FTS index entries are missing (via
+    the _docsize shadow table — external-content mode's reliable membership
+    indicator). Computes segment_text from JSON segments, writes it to the
+    content table, and inserts the FTS index row. Only one FTS entry per
+    transcript: when segment_text was NULL the UPDATE trigger indexes the
+    row; when segment_text already exists, an explicit INSERT is used.
+    Idempotent — rows already indexed are excluded by the anti-join.
     """
     transcript_table = "transcripts"
     inspector = inspect(engine)
@@ -424,49 +428,46 @@ def populate_fts(engine) -> None:
     with engine.connect() as conn:
         rows = conn.execute(
             text(
-                "SELECT id, title, full_text, corrected_text, segments, segment_text "
-                "FROM transcripts WHERE status = 'completed'"
+                "SELECT t.id, t.title, t.full_text, t.corrected_text, "
+                "       t.segments, t.segment_text "
+                "FROM transcripts t "
+                "WHERE t.status = 'completed' "
+                "  AND NOT EXISTS (SELECT 1 FROM transcripts_fts_docsize d WHERE d.id = t.id)"
             )
         ).fetchall()
 
     if not rows:
         return
 
-    for row in rows:
-        t_id, title, full_text, corrected_text, segments, existing_st = row
-        # Only backfill if FTS row doesn't exist yet
-        with engine.connect() as conn:
-            exists = conn.execute(
-                text("SELECT 1 FROM transcripts_fts WHERE rowid = :tid"),
-                {"tid": t_id},
-            ).fetchone()
-        if exists:
-            continue
+    import json
 
-        segment_text = ""
-        if segments:
-            import json
-            try:
-                segs = json.loads(segments) if isinstance(segments, str) else segments
-                segment_text = " ".join(s.get("text", "") for s in segs if isinstance(s, dict))
-            except (json.JSONDecodeError, TypeError):
-                pass
+    with engine.begin() as conn:
+        for t_id, title, full_text, corrected_text, segments, existing_st in rows:
+            segment_text = ""
+            if segments:
+                try:
+                    segs = json.loads(segments) if isinstance(segments, str) else segments
+                    segment_text = " ".join(s.get("text", "") for s in segs if isinstance(s, dict))
+                except (json.JSONDecodeError, TypeError):
+                    pass
 
-        with engine.begin() as conn:
             if not existing_st:
+                # UPDATE fires trg_transcripts_fts_update which indexes the row
                 conn.execute(
                     text("UPDATE transcripts SET segment_text = :st WHERE id = :tid"),
                     {"st": segment_text, "tid": t_id},
                 )
-            conn.execute(
-                text(
-                    "INSERT OR IGNORE INTO transcripts_fts "
-                    "(rowid, title, full_text, corrected_text, segment_text) "
-                    "VALUES (:tid, :title, :ft, :ct, :st)"
-                ),
-                {"tid": t_id, "title": title or "", "ft": full_text or "",
-                 "ct": corrected_text or "", "st": segment_text},
-            )
+            else:
+                # segment_text already set, insert FTS row directly
+                conn.execute(
+                    text(
+                        "INSERT INTO transcripts_fts "
+                        "(rowid, title, full_text, corrected_text, segment_text) "
+                        "VALUES (:tid, :title, :ft, :ct, :st)"
+                    ),
+                    {"tid": t_id, "title": title or "", "ft": full_text or "",
+                     "ct": corrected_text or "", "st": segment_text},
+                )
 
 
 def init_db(db_path: str = "data/whisperdesk.db") -> tuple:
@@ -550,11 +551,14 @@ def init_db(db_path: str = "data/whisperdesk.db") -> tuple:
             "COALESCE((SELECT group_concat(json_extract(value,'$.text'),' ') FROM json_each(NEW.segments)), '')"
             "); END"
         ))
-        # Trigger: AFTER UPDATE — add new FTS entries for new text.
-        # Old entries coexist (FTS5 external-content 'delete' command is
-        # unreliable on SQLite 3.45.3) but this is benign — stale terms
-        # may cause false-positive matches for non-existent text, but the
-        # transcript still exists and the correct terms also match.
+        # Trigger: AFTER UPDATE syncs new text. Old index entries are
+        # not removed (the FTS5 external-content delete path needs exact
+        # old values and was unreliable here); re-inserting a rowid
+        # duplicates the entry, which marks the index failing
+        # integrity-check, though MATCH results remain correct.
+        # Tracked separately (issue #206). Note: non-MATCH queries on this
+        # table are answered from the content table; use
+        # transcripts_fts_docsize for index membership checks.
         conn.execute(text(
             "CREATE TRIGGER IF NOT EXISTS trg_transcripts_fts_update "
             "AFTER UPDATE ON transcripts BEGIN "
