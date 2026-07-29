@@ -59,6 +59,7 @@ from services.security import (
     generate_csrf_token, rotate_csrf_token, validate_csrf_token,
     rate_limiter, encrypt_api_key, decrypt_api_key,
 )
+from services.search import search_transcripts, search_transcripts_snippets
 
 # ── App Setup ──────────────────────────────────────────────────────────────
 
@@ -583,7 +584,23 @@ def _serialize_transcript_summary(db: Session, t: Transcript, tags: list[str] | 
     }
 
 
-def _build_recent_transcripts(db: Session, current_user: User, limit: int, offset: int = 0) -> list:
+def _build_recent_transcripts(db: Session, current_user: User, limit: int, offset: int = 0, query: str | None = None) -> list:
+    if query:
+        search_results = search_transcripts(db, current_user.id, query)
+        matching_ids = [r["transcript_id"] for r in search_results]
+        if not matching_ids:
+            return []
+        transcripts = (
+            db.query(Transcript)
+            .filter(Transcript.id.in_(matching_ids))
+            .all()
+        )
+        id_order = {tid: i for i, tid in enumerate(matching_ids)}
+        transcripts.sort(key=lambda t: id_order.get(t.id, len(matching_ids)))
+        paged = transcripts[offset:offset + limit]
+        tags_map = _tags_for_transcripts(db, [t.id for t in paged])
+        return [_serialize_transcript_summary(db, t, tags=tags_map.get(t.id, [])) for t in paged]
+
     transcripts = (
         db.query(Transcript)
         .filter(Transcript.user_id == current_user.id)
@@ -1293,8 +1310,32 @@ async def transcribe_audio(
     )
 
 
+@app.get("/api/search")
+async def search_transcripts_endpoint(
+    q: str = Query(...),
+    limit: int = Query(20, ge=1, le=100),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """FTS5 full-text search across transcript content (issue #108).
+    Returns ranked snippet results for the Tape Library search bar."""
+    if not q or not q.strip():
+        raise HTTPException(status_code=400, detail="Query parameter 'q' is required")
+    if len(q) > 500:
+        raise HTTPException(status_code=400, detail="Query exceeds 500 characters")
+    results = search_transcripts_snippets(db, current_user.id, q.strip(), limit=limit)
+    return {"results": results, "total": len(results)}
+
+
 @app.get("/api/transcripts")
-async def list_transcripts(limit: int = 50, offset: int = 0, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+async def list_transcripts(
+    limit: int = 50, offset: int = 0, q: str | None = Query(None),
+    db: Session = Depends(get_db), current_user: User = Depends(get_current_user),
+):
+    if q and q.strip():
+        if len(q.strip()) > 500:
+            raise HTTPException(status_code=400, detail="Query exceeds 500 characters")
+        return _build_recent_transcripts(db, current_user, limit=limit, offset=offset, query=q.strip())
     return _build_recent_transcripts(db, current_user, limit=limit, offset=offset)
 
 

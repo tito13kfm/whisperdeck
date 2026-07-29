@@ -1,26 +1,29 @@
-"""Cross-transcript search across full_text, corrected_text, and segments JSON.
+"""Cross-transcript search using SQLite FTS5 full-text index (issue #108).
 
-Splits the query into whitespace-delimited terms, ANDs them with escaped LIKE,
-then does a secondary Python pass over segments JSON for per-segment matching.
+search_transcripts(): FTS5 MATCH identifies matching transcript IDs; a secondary
+Python pass over segments JSON extracts per-segment matches for the assistant.
+
+search_transcripts_snippets(): FTS5 MATCH with snippet() returns HTML-highlighted
+excerpts for the web UI. Uses external-content mode (content='transcripts') so
+snippet() reads original text from the content table.
 """
-import json
-import re
-
-from sqlalchemy import and_, or_
+from sqlalchemy import text
 
 from database import Transcript
 
 _MAX_QUERY_CHARS = 500
 
 
-def _escape_like(term: str) -> str:
-    """Escape LIKE wildcards so user-input `%` and `_` are literal."""
-    return term.replace("%", "\\%").replace("_", "\\_")
-
-
-def _split_terms(query: str) -> list[str]:
-    """Split on whitespace, drop empty strings."""
-    return [t for t in query.split() if t]
+def _sanitize_fts5_query(query: str) -> str:
+    """Wrap each whitespace-separated term in double-quotes for literal FTS5
+    matching. Embedded double-quotes are escaped by doubling (SQLite FTS5
+    convention)."""
+    terms = query.split()
+    sanitized = []
+    for t in terms:
+        escaped = t.replace('"', '""')
+        sanitized.append(f'"{escaped}"')
+    return " AND ".join(sanitized)
 
 
 def _matches_segment(seg: dict, terms: list[str]) -> bool:
@@ -47,33 +50,31 @@ def search_transcripts(db, user_id: int, query: str) -> list[dict]:
     if len(query) > _MAX_QUERY_CHARS:
         raise ValueError(f"Query exceeds {_MAX_QUERY_CHARS} characters")
 
-    terms = _split_terms(query)
+    terms = [t for t in query.split() if t]
     if not terms:
         return []
 
-    escaped_terms = [_escape_like(t) for t in terms]
+    fts5_query = _sanitize_fts5_query(query)
 
-    # Build AND-ed LIKE clauses: full_text LIKE '%term%' AND full_text LIKE '%other%'
-    # Search across full_text, corrected_text, and the raw segments JSON column.
-    # Use ESCAPE '\\' so user-input % and _ don't act as wildcards.
-    like_clauses = []
-    for term in escaped_terms:
-        like_clauses.append(
-            or_(
-                Transcript.full_text.like(f"%{term}%", escape="\\"),
-                Transcript.corrected_text.like(f"%{term}%", escape="\\"),
-                # segments is stored as JSON text — the raw column contains the
-                # JSON string, so LIKE on the column catches term matches in
-                # segment text without a separate Python parse for each row.
-                Transcript.segments.like(f"%{term}%", escape="\\"),
-            )
-        )
+    row = db.execute(
+        text(
+            "SELECT rowid FROM transcripts_fts "
+            "WHERE transcripts_fts MATCH :q"
+        ),
+        {"q": fts5_query},
+    ).fetchall()
+
+    matching_ids = [r[0] for r in row]
+    if not matching_ids:
+        return []
 
     transcripts = (
         db.query(Transcript)
-        .filter(Transcript.user_id == user_id)
-        .filter(and_(*like_clauses))
-        .filter(Transcript.status == "completed")  # only finished transcripts have reliable text
+        .filter(
+            Transcript.id.in_(matching_ids),
+            Transcript.user_id == user_id,
+            Transcript.status == "completed",
+        )
         .all()
     )
 
@@ -95,6 +96,93 @@ def search_transcripts(db, user_id: int, query: str) -> list[dict]:
             "title": t.title,
             "filename": t.filename,
             "matching_segments": matching_segments,
+        })
+
+    return results
+
+
+def search_transcripts_snippets(db, user_id: int, query: str, limit: int = 20) -> list[dict]:
+    """Search transcripts via FTS5 and return snippet-based results for the web UI.
+
+    Uses FTS5 snippet() with external-content mode, which reads original text
+    from the content table for readable, highlighted snippets.
+
+    Returns [{transcript_id, title, filename, snippet (HTML with <b> tags),
+              rank (float), match_source (str), created_at (str)}].
+    """
+    query = (query or "").strip()
+    if not query:
+        return []
+
+    if len(query) > _MAX_QUERY_CHARS:
+        return []
+
+    fts5_query = _sanitize_fts5_query(query)
+    if not fts5_query or not fts5_query.strip():
+        return []
+
+    try:
+        rows = db.execute(
+            text(
+                "SELECT "
+                "f.rowid AS transcript_id, "
+                "f.rank, "
+                "t.title, "
+                "t.filename, "
+                "t.created_at, "
+                "t.full_text, "
+                "t.corrected_text, "
+                "COALESCE((SELECT group_concat(json_extract(value,'$.text'),' ') "
+                "FROM json_each(t.segments)), '') AS segment_text, "
+                "snippet(transcripts_fts, -1, '<b>', '</b>', '…', 32) AS snippet "
+                "FROM transcripts_fts f "
+                "JOIN transcripts t ON t.id = f.rowid "
+                "WHERE transcripts_fts MATCH :q "
+                "AND t.user_id = :uid "
+                "AND t.status = 'completed' "
+                "ORDER BY rank "
+                "LIMIT :lim"
+            ),
+            {"q": fts5_query, "uid": user_id, "lim": limit},
+        ).fetchall()
+    except Exception:
+        return []
+
+    results = []
+    for r in rows:
+        (transcript_id, rank, title, filename, created_at,
+         full_text, corrected_text, segment_text, snippet) = r
+        snippet_text = snippet or ""
+
+        # Determine match_source: check which column the query terms appear in.
+        # Checked in this order since a term can legitimately appear in more
+        # than one column (e.g. a corrected transcript keeps its original
+        # full_text too) — first match wins.
+        terms_lower = [t.lower() for t in query.lower().split() if t]
+
+        def _has_term(text_val):
+            text_lower = (text_val or "").lower()
+            return any(t in text_lower for t in terms_lower)
+
+        if title and _has_term(title):
+            match_source = "title"
+        elif _has_term(full_text):
+            match_source = "full_text"
+        elif _has_term(corrected_text):
+            match_source = "corrected_text"
+        elif _has_term(segment_text):
+            match_source = "segment_text"
+        else:
+            match_source = "full_text"
+
+        results.append({
+            "transcript_id": transcript_id,
+            "rank": rank,
+            "title": title,
+            "filename": filename,
+            "created_at": str(created_at) if created_at else None,
+            "snippet": snippet_text,
+            "match_source": match_source,
         })
 
     return results
