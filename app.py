@@ -1333,6 +1333,8 @@ async def list_transcripts(
     db: Session = Depends(get_db), current_user: User = Depends(get_current_user),
 ):
     if q and q.strip():
+        if len(q.strip()) > 500:
+            raise HTTPException(status_code=400, detail="Query exceeds 500 characters")
         return _build_recent_transcripts(db, current_user, limit=limit, offset=offset, query=q.strip())
     return _build_recent_transcripts(db, current_user, limit=limit, offset=offset)
 

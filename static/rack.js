@@ -2578,7 +2578,8 @@ function renderSearchResults() {
   var rows = S.bankSearchResults.map(function(r) {
     var title = escapeHtml(r.title || r.filename || 'Untitled');
     var date = r.created_at ? timeAgo(r.created_at) : '';
-    var snippet = r.snippet || '';
+    var snippet = escapeHtml(r.snippet || '');
+    snippet = snippet.replace(/&lt;b&gt;/g, '<b>').replace(/&lt;\/b&gt;/g, '</b>');
     var sourceLabel = r.match_source === 'corrected_text' ? 'corrected' :
                       r.match_source === 'segment_text' ? 'segments' :
                       r.match_source === 'title' ? 'title' : 'transcript';

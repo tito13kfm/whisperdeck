@@ -114,36 +114,45 @@ def search_transcripts_snippets(db, user_id: int, query: str, limit: int = 20) -
     if not query:
         return []
 
-    fts5_query = _sanitize_fts5_query(query)
+    if len(query) > _MAX_QUERY_CHARS:
+        return []
 
-    rows = db.execute(
-        text(
-            "SELECT "
-            "f.rowid AS transcript_id, "
-            "f.rank, "
-            "t.title, "
-            "t.filename, "
-            "t.created_at, "
-            "snippet(transcripts_fts, 1, '<b>', '</b>', '…', 32) AS snippet "
-            "FROM transcripts_fts f "
-            "JOIN transcripts t ON t.id = f.rowid "
-            "WHERE transcripts_fts MATCH :q "
-            "AND t.user_id = :uid "
-            "AND t.status = 'completed' "
-            "ORDER BY rank "
-            "LIMIT :lim"
-        ),
-        {"q": fts5_query, "uid": user_id, "lim": limit},
-    ).fetchall()
+    fts5_query = _sanitize_fts5_query(query)
+    if not fts5_query or not fts5_query.strip():
+        return []
+
+    try:
+        rows = db.execute(
+            text(
+                "SELECT "
+                "f.rowid AS transcript_id, "
+                "f.rank, "
+                "t.title, "
+                "t.filename, "
+                "t.created_at, "
+                "snippet(transcripts_fts, -1, '<b>', '</b>', '…', 32) AS snippet "
+                "FROM transcripts_fts f "
+                "JOIN transcripts t ON t.id = f.rowid "
+                "WHERE transcripts_fts MATCH :q "
+                "AND t.user_id = :uid "
+                "AND t.status = 'completed' "
+                "ORDER BY rank "
+                "LIMIT :lim"
+            ),
+            {"q": fts5_query, "uid": user_id, "lim": limit},
+        ).fetchall()
+    except Exception:
+        return []
 
     results = []
     for r in rows:
         transcript_id, rank, title, filename, created_at, snippet = r
         snippet_text = snippet or ""
 
-        # Determine match_source from snippet content or rank context
+        # Determine match_source: check which column the query terms appear in
         match_source = "full_text"
-        if title and query.lower() in (title or "").lower():
+        terms_lower = [t.lower() for t in query.lower().split() if t]
+        if title and any(t in (title or "").lower() for t in terms_lower):
             match_source = "title"
 
         results.append({
