@@ -5156,3 +5156,14 @@ document.addEventListener('DOMContentLoaded', () => {
   }
   checkAuth();
 });
+
+/* ══════════════════ test-hook surface ══════════════════ */
+/* Expose the internal symbols Playwright / screenshot tooling depends on.
+   rack.js itself executes as a classic script so these are already window
+   globals in dev, but esbuild --bundle wraps the top-level scope in the
+   minified output (rack.min.js) which hides them.  This explicit block
+   works identically in both, survives future build-config changes, and
+   makes the supported test-hook surface self-documenting. */
+if (typeof window !== 'undefined') {
+  Object.assign(window, { navigate, S, syncTranscribe, renderDetail, curProv, logout, api });
+}
