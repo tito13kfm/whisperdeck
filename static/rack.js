@@ -1657,6 +1657,9 @@ async function renderTranscribe() {
       </div>
     </div>
 
+    <!-- cost estimate -->
+    <div class="unit" id="tx-cost-estimate" style="display:none;border-radius:3px;padding:10px 34px;font-family:var(--f-mono);font-size:11px;color:var(--body);gap:10px;align-items:center;border-top:3px solid var(--panel-lo)"></div>
+
     <!-- fine adjust -->
     <details class="unit">
       <summary style="list-style:none;cursor:pointer;padding:13px 26px;display:flex;align-items:center;gap:10px;font-family:var(--f-cond);font-weight:600;font-size:13px;text-transform:uppercase;letter-spacing:0.04em"><span style="color:var(--label-dim);font-size:11px">▸</span> Fine adjust — speakers, title, creativity, context</summary>
@@ -1954,6 +1957,55 @@ function syncTranscribe() {
   lamp.style.background = S.stereoLive ? GREEN : 'var(--edge)';
   lamp.style.boxShadow = S.stereoLive ? '0 0 6px ' + GREEN : 'none';
   $('nav-badge-transcribe').textContent = S.running || S.capturing ? 'REC' : '';
+  updateCostEstimate();
+}
+
+async function updateCostEstimate() {
+  // Show a live STT cost estimate on the Transcribe page when provider/model
+  // are selected. Uses POST /api/costs/estimate when duration is known
+  // (live capture or running job), otherwise shows per-minute rates.
+  var box = $('tx-cost-estimate');
+  if (!box || S.page !== 'transcribe') return;
+  var prov = curProv();
+  var model = curModel();
+  if (!prov.id || prov.id === 'builtin' || prov.id === 'moonshine') {
+    // Local providers are free — show a one-line note.
+    box.style.display = '';
+    box.innerHTML = '<span>Local transcription — no cost</span>';
+    return;
+  }
+  if (!prov.ready || model === '—') {
+    box.style.display = 'none';
+    return;
+  }
+  var dur = 0;
+  var durKnown = false;
+  if (S.capturing) {
+    dur = (Date.now() - (S.captureStartedAt || Date.now())) / 1000;
+    durKnown = true;
+  } else if (S.running && S.jobStartedAt) {
+    dur = (Date.now() - S.jobStartedAt) / 1000;
+    durKnown = true;
+  }
+  var est;
+  try {
+    var body = JSON.stringify({ provider: prov.id, model: model, duration_seconds: durKnown ? Math.max(dur, 1) : 0 });
+    est = await api('/api/costs/estimate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: body });
+  } catch (_) {
+    box.style.display = '';
+    box.innerHTML = '<span style="color:var(--amber)">Cost estimate unavailable</span>';
+    return;
+  }
+  box.style.display = '';
+  var label;
+  if (durKnown && dur > 0) {
+    label = 'Est. cost: ~$' + est.cost.toFixed(2) +
+      ' (' + escapeHtml(est.rate_source) + ' · ~' + formatDur(dur) + ')';
+  } else {
+    label = escapeHtml(prov.name) + ' rates: $' + est.rate_per_minute.toFixed(4) + '/min' +
+      ' (' + escapeHtml(est.rate_source) + ')';
+  }
+  box.innerHTML = '<span>' + label + '</span>';
 }
 
 function wireTranscribeDrop() {
@@ -3825,6 +3877,45 @@ async function summaryHtml(t) {
   }
 }
 
+function fmtCost(n) {
+  // n is a float dollar amount; return a human-readable label.
+  if (n == null || isNaN(n)) return '—';
+  if (n === 0) return 'free';
+  return '$' + n.toFixed(2);
+}
+
+function detailCostHtml(t) {
+  // Build a one-line cost breakdown for the transcript detail metadata block.
+  var c = t.cost;
+  if (!c) return '';
+  var parts = [];
+
+  // STT line — always present
+  var sttDur = c.stt.duration_seconds ? ' · ' + formatDur(c.stt.duration_seconds) : '';
+  parts.push('<span><b>STT&nbsp;</b><span>' + fmtCost(c.stt.cost) +
+    ' · ' + escapeHtml(c.stt.rate_source) + sttDur + '</span></span>');
+
+  // Correction line — show if a correction job ran
+  if (t.correction_model || (c.correction && c.correction.rate_source !== 'no completed job')) {
+    var crSrc = c.correction ? c.correction.rate_source : '—';
+    var crCost = c.correction ? c.correction.cost : 0;
+    parts.push('<span><b>Correction&nbsp;</b><span>' + (crCost > 0 ? '$' + crCost.toFixed(2) : '—') +
+      ' · ' + escapeHtml(crSrc) + '</span></span>');
+  }
+
+  // Summary line — show if a summary exists
+  if (t.has_summary || (c.summary && c.summary.rate_source !== 'no completed job')) {
+    var sSrc = c.summary ? c.summary.rate_source : '—';
+    var sCost = c.summary ? c.summary.cost : 0;
+    parts.push('<span><b>Summary&nbsp;</b><span>' + (sCost > 0 ? '$' + sCost.toFixed(2) : '—') +
+      ' · ' + escapeHtml(sSrc) + '</span></span>');
+  }
+
+  if (!parts.length) return '';
+  return '<div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--seg-edge);font-family:var(--f-mono);font-size:11px;color:var(--body);display:flex;gap:20px;flex-wrap:wrap">' +
+    parts.join('') + '</div>';
+}
+
 function renderDetail() {
   const t = detailData;
   if (!t) return;
@@ -3904,6 +3995,7 @@ function renderDetail() {
         <div style="font-size:12.5px"><div style="font-family:var(--f-mono);font-size:10px;text-transform:uppercase;letter-spacing:0.08em;color:var(--label-dim);margin-bottom:3px">Segments</div>${(t.segments || []).length}</div>
         <div style="font-size:12.5px"><div style="font-family:var(--f-mono);font-size:10px;text-transform:uppercase;letter-spacing:0.08em;color:var(--label-dim);margin-bottom:3px">Mode</div><button class="btn" style="font-size:11px;padding:2px 10px;border-color:var(--inset-edge);cursor:pointer" title="Switch between meeting, dictation, and voice-note modes" data-dact="toggle-kind">${escapeHtml(kindLabel)}</button></div>
       </div>
+      ${detailCostHtml(t)}
     </div>
     ${videoHtml}
     <div style="display:flex;gap:6px;align-items:flex-end;flex-wrap:wrap;margin-bottom:14px;padding:0 36px">
