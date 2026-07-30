@@ -5,6 +5,8 @@ import io
 import json
 from unittest.mock import AsyncMock, patch
 
+from fastapi import HTTPException
+
 from database import Transcript, utcnow_naive
 
 
@@ -173,6 +175,79 @@ class TestBulkTranscribe:
         assert data["errors"][0]["index"] == 1
         assert data["errors"][0]["filename"] == "bad.mp3"
         assert "corrupt audio" in data["errors"][0]["error"]
+
+    def test_bulk_transcribe_partial_failure_http_exception(self, client):
+        """_run_transcription_pipeline wraps runtime failures (bad codec,
+        transcode errors) in HTTPException, not just plain exceptions —
+        regression test for a bug where the endpoint re-raised any
+        HTTPException from inside the loop and aborted the whole batch,
+        losing already-committed transcripts. Mutation check: reverting the
+        `except HTTPException as e: errors.append(...)` handling back to
+        `except HTTPException: raise` makes this 500 instead of 200."""
+        settings = json.dumps({"provider": "moonshine", "kind": "meeting", "language": "en"})
+        files = [
+            ("files", ("good.mp3", io.BytesIO(b"fake audio 1"), "audio/mpeg")),
+            ("files", ("bad.mp3", io.BytesIO(b"fake audio 2"), "audio/mpeg")),
+        ]
+
+        with patch("app._run_transcription_pipeline", new_callable=AsyncMock) as mock_pipeline:
+            mock_pipeline.side_effect = [
+                _fake_pipeline_result(tid=1, batch_id="BATCH004"),
+                HTTPException(status_code=500, detail="ffmpeg transcode failed: corrupt audio"),
+            ]
+            resp = client.post(
+                "/api/bulk-transcribe",
+                data={"settings": settings},
+                files=files,
+            )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data["transcripts"]) == 1
+        assert len(data["errors"]) == 1
+        assert data["errors"][0]["index"] == 1
+        assert data["errors"][0]["filename"] == "bad.mp3"
+        assert "corrupt audio" in data["errors"][0]["error"]
+
+    def test_bulk_transcribe_file_settings_invalid_kind(self, client):
+        """Assert 400 when a per-file override has an invalid kind.
+        Mutation check: per-file kind not validated → test fails."""
+        settings = json.dumps({"provider": "moonshine", "kind": "meeting"})
+        file_settings = json.dumps([{"kind": "bogus"}])
+        files = [("files", ("a.mp3", io.BytesIO(b"fake audio"), "audio/mpeg"))]
+        resp = client.post(
+            "/api/bulk-transcribe",
+            data={"settings": settings, "file_settings": file_settings},
+            files=files,
+        )
+        assert resp.status_code == 400
+
+    def test_bulk_transcribe_file_settings_invalid_provider(self, client):
+        """Assert 400 when a per-file override names an unknown provider.
+        Mutation check: per-file provider not validated → test fails."""
+        settings = json.dumps({"provider": "moonshine", "kind": "meeting"})
+        file_settings = json.dumps([{"provider": "nonexistent"}])
+        files = [("files", ("a.mp3", io.BytesIO(b"fake audio"), "audio/mpeg"))]
+        resp = client.post(
+            "/api/bulk-transcribe",
+            data={"settings": settings, "file_settings": file_settings},
+            files=files,
+        )
+        assert resp.status_code == 400
+
+    def test_bulk_transcribe_file_settings_non_dict_entry(self, client):
+        """Assert 400 (not a raw 500/AttributeError) when a file_settings
+        entry isn't an object. Mutation check: entries not type-checked →
+        test fails with a 500 instead of a clean 400."""
+        settings = json.dumps({"provider": "moonshine", "kind": "meeting"})
+        file_settings = json.dumps([42])
+        files = [("files", ("a.mp3", io.BytesIO(b"fake audio"), "audio/mpeg"))]
+        resp = client.post(
+            "/api/bulk-transcribe",
+            data={"settings": settings, "file_settings": file_settings},
+            files=files,
+        )
+        assert resp.status_code == 400
 
     def test_bulk_transcribe_invalid_settings_json(self, client):
         """Assert 400 on malformed settings JSON. Regression check: JSON parse guard."""

@@ -1375,6 +1375,26 @@ async def bulk_transcribe(
     except json.JSONDecodeError:
         raise HTTPException(status_code=400, detail="file_settings must be valid JSON")
 
+    # Per-file overrides get the same validation as the global settings below —
+    # otherwise an invalid kind/provider in file_settings lands unchecked on
+    # the transcript row instead of failing the request up front.
+    for idx, override in enumerate(per_file_overrides):
+        if not isinstance(override, dict):
+            raise HTTPException(status_code=400, detail=f"file_settings[{idx}] must be an object")
+        if "kind" in override and override["kind"] not in ("meeting", "dictation", "voice_note"):
+            raise HTTPException(
+                status_code=400,
+                detail=f"file_settings[{idx}].kind must be 'meeting', 'dictation', or 'voice_note'",
+            )
+        if "provider" in override:
+            try:
+                get_provider(override["provider"], {})
+            except Exception:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"file_settings[{idx}].provider is unknown: {override['provider']}",
+                )
+
     # Validate kind
     kind = global_settings.get("kind", "meeting")
     if kind not in ("meeting", "dictation", "voice_note"):
@@ -1452,8 +1472,14 @@ async def bulk_transcribe(
             )
             transcripts.append(result)
             all_failed = False
-        except HTTPException:
-            raise  # re-raise HTTP exceptions immediately (validation errors)
+        except HTTPException as e:
+            # _run_transcription_pipeline wraps runtime failures (bad codec,
+            # transcode errors) in HTTPException too, not just validation
+            # errors — all validation happens above, before this loop starts,
+            # so any HTTPException reaching here is a per-file runtime
+            # failure and must be treated as a partial failure like any
+            # other exception, not used to abort the whole batch.
+            errors.append({"index": i, "filename": f.filename or f"file_{i}", "error": str(e.detail)})
         except Exception as e:
             errors.append({"index": i, "filename": f.filename or f"file_{i}", "error": str(e)})
 
