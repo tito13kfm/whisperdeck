@@ -23,7 +23,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.gzip import GZipMiddleware
-from sqlalchemy import or_, func
+from sqlalchemy import or_, func, case
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -1487,6 +1487,166 @@ async def bulk_transcribe(
         raise HTTPException(status_code=500, detail="All files failed to transcribe")
 
     response = {"batch_id": batch_id, "transcripts": transcripts}
+    if errors:
+        response["errors"] = errors
+    return response
+
+
+# ── Batch management API ────────────────────────────────────────────────────
+
+
+@app.get("/api/batches")
+async def list_batches(
+    limit: int = Query(20, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """List batches for the current user, newest first. Each batch entry
+    includes aggregate status counts, total duration, and a first_title."""
+    rows = (
+        db.query(
+            Transcript.batch_id,
+            func.count(Transcript.id).label("total"),
+            func.sum(case((Transcript.status == "completed", 1), else_=0)).label("completed"),
+            func.sum(case((Transcript.status == "failed", 1), else_=0)).label("failed"),
+            func.sum(case((Transcript.status == "partial", 1), else_=0)).label("partial"),
+            func.sum(case((Transcript.status == "pending", 1), else_=0)).label("pending"),
+            func.sum(case((Transcript.status == "processing", 1), else_=0)).label("processing"),
+            func.sum(case((Transcript.status == "cancelled", 1), else_=0)).label("cancelled"),
+            func.coalesce(func.sum(Transcript.duration_seconds), 0).label("total_duration_seconds"),
+            func.min(Transcript.created_at).label("created_at"),
+        )
+        .filter(
+            Transcript.user_id == current_user.id,
+            Transcript.batch_id.isnot(None),
+        )
+        .group_by(Transcript.batch_id)
+        .order_by(func.min(Transcript.created_at).desc(), Transcript.batch_id)
+        .offset(offset)
+        .limit(limit)
+        .all()
+    )
+
+    if not rows:
+        return {"batches": []}
+
+    batch_ids = [row.batch_id for row in rows]
+    # Look up first_title: lowest-id transcript per batch, scoped to
+    # current user (batch_ids themselves are user-scoped from the main
+    # query, but a batch_id collision with another user would leak their
+    # title unless both queries filter by user_id).
+    first_transcripts = (
+        db.query(Transcript.batch_id, func.min(Transcript.id).label("min_id"))
+        .filter(
+            Transcript.batch_id.in_(batch_ids),
+            Transcript.user_id == current_user.id,
+        )
+        .group_by(Transcript.batch_id)
+        .subquery()
+    )
+    title_rows = (
+        db.query(Transcript.batch_id, Transcript.title)
+        .join(first_transcripts, Transcript.id == first_transcripts.c.min_id)
+        .all()
+    )
+    titles = {row.batch_id: row.title for row in title_rows}
+
+    batches = []
+    for row in rows:
+        batches.append({
+            "batch_id": row.batch_id,
+            "created_at": row.created_at.isoformat() if row.created_at else None,
+            "total": row.total,
+            "completed": row.completed or 0,
+            "failed": row.failed or 0,
+            "partial": row.partial or 0,
+            "pending": row.pending or 0,
+            "processing": row.processing or 0,
+            "cancelled": row.cancelled or 0,
+            "total_duration_seconds": float(row.total_duration_seconds or 0),
+            "first_title": titles.get(row.batch_id),
+        })
+    return {"batches": batches}
+
+
+@app.get("/api/batches/{batch_id}")
+async def get_batch(
+    batch_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Return full detail for one batch including all transcripts."""
+    transcripts = (
+        db.query(Transcript)
+        .filter(
+            Transcript.batch_id == batch_id,
+            Transcript.user_id == current_user.id,
+        )
+        .order_by(Transcript.id)
+        .all()
+    )
+    if not transcripts:
+        raise HTTPException(status_code=404, detail="Batch not found")
+
+    status_counts = {
+        "completed": sum(1 for t in transcripts if t.status == "completed"),
+        "failed": sum(1 for t in transcripts if t.status == "failed"),
+        "partial": sum(1 for t in transcripts if t.status == "partial"),
+        "pending": sum(1 for t in transcripts if t.status == "pending"),
+        "processing": sum(1 for t in transcripts if t.status == "processing"),
+        "cancelled": sum(1 for t in transcripts if t.status == "cancelled"),
+    }
+    jobs_map = _batch_latest_jobs(db, [t.id for t in transcripts])
+
+    return {
+        "batch_id": batch_id,
+        "created_at": transcripts[0].created_at.isoformat() if transcripts[0].created_at else None,
+        "total": len(transcripts),
+        "status_counts": status_counts,
+        "total_duration_seconds": sum(t.duration_seconds or 0 for t in transcripts),
+        "transcripts": [_serialize_transcript(db, t, jobs_map=jobs_map) for t in transcripts],
+    }
+
+
+@app.post("/api/batches/{batch_id}/cancel")
+async def cancel_batch(
+    batch_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Cancel all active (pending/processing) transcripts in a batch."""
+    transcripts = (
+        db.query(Transcript)
+        .filter(
+            Transcript.batch_id == batch_id,
+            Transcript.user_id == current_user.id,
+        )
+        .all()
+    )
+    if not transcripts:
+        raise HTTPException(status_code=404, detail="Batch not found")
+
+    cancelled = 0
+    already_terminal = 0
+    errors = []
+
+    for t in transcripts:
+        if t.status in ("pending", "processing"):
+            try:
+                cancel_transcript_jobs(db, t.id)
+                cancelled += 1
+            except Exception as e:
+                errors.append({"transcript_id": t.id, "error": str(e)})
+                db.rollback()
+        else:
+            already_terminal += 1
+
+    response = {
+        "batch_id": batch_id,
+        "cancelled": cancelled,
+        "already_terminal": already_terminal,
+    }
     if errors:
         response["errors"] = errors
     return response
