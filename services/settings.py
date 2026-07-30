@@ -29,6 +29,15 @@ DEFAULT_SETTINGS = {
     "format_provider": "local_llm",
     "format_model": "gpt-oss-20b-mxfp4-GGUF",
     "export_directory": "",  # empty = feature disabled (Save as .md button hidden in detail toolbar)
+    "bulk_defaults": {
+        "provider": "moonshine",
+        "model": "",
+        "language": "auto",
+        "diarize": False,
+        "auto_correct": True,
+        "kind": "meeting",
+        "num_speakers": None,
+    },
 }
 
 # Providers that work without an API key (local inference / user-hosted URL).

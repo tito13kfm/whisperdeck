@@ -314,6 +314,7 @@ def _serialize_transcript(db: Session, t: Transcript, *, jobs_map: dict[tuple[in
     data = {
         "id": t.id,
         "source_transcript_id": t.source_transcript_id,
+        "batch_id": t.batch_id or None,
         "kind": t.kind or "meeting",
         "title": t.title,
         "filename": t.filename,
@@ -572,6 +573,7 @@ def _serialize_transcript_summary(db: Session, t: Transcript, tags: list[str] | 
         }
     data = {
         "id": t.id,
+        "batch_id": t.batch_id or None,
         "kind": t.kind or "meeting",
         "title": t.title,
         "filename": t.filename,
@@ -606,17 +608,16 @@ def _batch_stt_costs(transcripts: list[Transcript]) -> dict[int, float]:
     return costs
 
 
-def _build_recent_transcripts(db: Session, current_user: User, limit: int, offset: int = 0, query: str | None = None) -> list:
+def _build_recent_transcripts(db: Session, current_user: User, limit: int, offset: int = 0, query: str | None = None, batch_id: str | None = None) -> list:
     if query:
         search_results = search_transcripts(db, current_user.id, query)
         matching_ids = [r["transcript_id"] for r in search_results]
         if not matching_ids:
             return []
-        transcripts = (
-            db.query(Transcript)
-            .filter(Transcript.id.in_(matching_ids))
-            .all()
-        )
+        q = db.query(Transcript).filter(Transcript.id.in_(matching_ids))
+        if batch_id:
+            q = q.filter(Transcript.batch_id == batch_id)
+        transcripts = q.all()
         id_order = {tid: i for i, tid in enumerate(matching_ids)}
         transcripts.sort(key=lambda t: id_order.get(t.id, len(matching_ids)))
         paged = transcripts[offset:offset + limit]
@@ -624,10 +625,14 @@ def _build_recent_transcripts(db: Session, current_user: User, limit: int, offse
         cost_map = _batch_stt_costs(paged)
         return [_serialize_transcript_summary(db, t, tags=tags_map.get(t.id, []), cost_map=cost_map) for t in paged]
 
-    transcripts = (
+    q = (
         db.query(Transcript)
         .filter(Transcript.user_id == current_user.id)
-        .order_by(Transcript.created_at.desc())
+    )
+    if batch_id:
+        q = q.filter(Transcript.batch_id == batch_id)
+    transcripts = (
+        q.order_by(Transcript.created_at.desc())
         .offset(offset)
         .limit(limit)
         .all()
@@ -1023,6 +1028,7 @@ async def _run_transcription_pipeline(
     auto_correct: Optional[bool] = None,
     num_speakers: Optional[int],
     source_transcript_id: Optional[int] = None,
+    batch_id: Optional[str] = None,
     kind: str = "meeting",
     capture_source: Optional[str] = None,
 ) -> dict:
@@ -1198,6 +1204,7 @@ async def _run_transcription_pipeline(
             # recording" before the first chunk lands.
             transcript.duration_seconds = duration_seconds
             transcript.source_transcript_id = source_transcript_id
+            transcript.batch_id = batch_id
             db.commit()
         except Exception:
             _discard_stereo_copy()
@@ -1221,6 +1228,7 @@ async def _run_transcription_pipeline(
         )
         transcript.processed_size_bytes = file_size
         transcript.source_transcript_id = source_transcript_id
+        transcript.batch_id = batch_id
         transcript.kind = kind
         transcript.num_speakers = num_speakers
         transcript.stereo_audio_path = stereo_audio_path
@@ -1338,6 +1346,152 @@ async def transcribe_audio(
     )
 
 
+@app.post("/api/bulk-transcribe")
+async def bulk_transcribe(
+    files: list[UploadFile] = File(default=[]),
+    settings: str = Form(...),
+    file_settings: str = Form("[]"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Upload and transcribe multiple audio files in one batch."""
+    import secrets as _secrets
+
+    # Validate at least one file
+    if not files:
+        raise HTTPException(status_code=400, detail="At least one file is required")
+
+    # Parse settings JSON
+    try:
+        global_settings = json.loads(settings)
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=400, detail="settings must be valid JSON")
+
+    # Parse optional per-file overrides
+    try:
+        per_file_overrides: list[dict] = json.loads(file_settings)
+        if not isinstance(per_file_overrides, list):
+            raise HTTPException(status_code=400, detail="file_settings must be a JSON array")
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=400, detail="file_settings must be valid JSON")
+
+    # Per-file overrides get the same validation as the global settings below —
+    # otherwise an invalid kind/provider in file_settings lands unchecked on
+    # the transcript row instead of failing the request up front.
+    for idx, override in enumerate(per_file_overrides):
+        if not isinstance(override, dict):
+            raise HTTPException(status_code=400, detail=f"file_settings[{idx}] must be an object")
+        if "kind" in override and override["kind"] not in ("meeting", "dictation", "voice_note"):
+            raise HTTPException(
+                status_code=400,
+                detail=f"file_settings[{idx}].kind must be 'meeting', 'dictation', or 'voice_note'",
+            )
+        if "provider" in override:
+            try:
+                get_provider(override["provider"], {})
+            except Exception:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"file_settings[{idx}].provider is unknown: {override['provider']}",
+                )
+
+    # Validate kind
+    kind = global_settings.get("kind", "meeting")
+    if kind not in ("meeting", "dictation", "voice_note"):
+        raise HTTPException(status_code=400, detail="kind must be 'meeting', 'dictation', or 'voice_note'")
+
+    # Validate provider
+    provider = global_settings.get("provider", "moonshine")
+    try:
+        get_provider(provider, {})
+    except Exception:
+        raise HTTPException(status_code=400, detail=f"Unknown provider: {provider}")
+
+    # Reject local providers with combined file size > 500 MB
+    if provider in LOCAL_PROVIDERS:
+        total_bytes = 0
+        for f in files:
+            content = await f.read()
+            total_bytes += len(content)
+            await f.seek(0)  # rewind for later use
+        if total_bytes > 500 * 1024 * 1024:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Combined file size ({total_bytes / (1024*1024):.0f} MB) exceeds 500 MB limit for local provider '{provider}'",
+            )
+
+    # Generate batch_id
+    batch_id = f"{utcnow_naive().strftime('%Y%m%d_%H%M%S')}_{_secrets.token_hex(3)}"
+
+    # Pull defaults from user settings, fall back to global_settings
+    user_settings = get_user_settings(db, current_user.id)
+    bulk_defaults = user_settings.get("bulk_defaults", {})
+    model = global_settings.get("model") or bulk_defaults.get("model", "")
+    language = global_settings.get("language") or bulk_defaults.get("language", "auto")
+    diarize = global_settings.get("diarize", bulk_defaults.get("diarize", False))
+    auto_correct = global_settings.get("auto_correct", bulk_defaults.get("auto_correct", True))
+    num_speakers = global_settings.get("num_speakers", bulk_defaults.get("num_speakers"))
+
+    transcripts = []
+    errors = []
+    all_failed = True
+
+    for i, f in enumerate(files):
+        # Merge per-file overrides (if any) over global settings
+        override = per_file_overrides[i] if i < len(per_file_overrides) else {}
+        file_kind = override.get("kind", kind)
+        file_provider = override.get("provider", provider)
+        file_model = override.get("model", model)
+        file_language = override.get("language", language)
+        file_diarize = override.get("diarize", diarize)
+        file_auto_correct = override.get("auto_correct", auto_correct)
+        file_num_speakers = override.get("num_speakers", num_speakers)
+        file_title = override.get("title", None)
+
+        file_ext = os.path.splitext(f.filename or "audio.mp3")[1] or ".mp3"
+        safe_name = f"{utcnow_naive().strftime('%Y%m%d_%H%M%S')}_{hash(f.filename or 'audio')}{file_ext}"
+        save_path = UPLOAD_DIR / safe_name
+        content = await f.read()
+        with open(save_path, "wb") as fh:
+            fh.write(content)
+
+        try:
+            result = await _run_transcription_pipeline(
+                db, current_user, save_path,
+                filename=f.filename or "audio.mp3",
+                title=file_title,
+                provider=file_provider,
+                model=file_model,
+                language=file_language,
+                temperature=0.0,
+                diarize=file_diarize,
+                auto_correct=file_auto_correct,
+                num_speakers=file_num_speakers,
+                kind=file_kind,
+                batch_id=batch_id,
+            )
+            transcripts.append(result)
+            all_failed = False
+        except HTTPException as e:
+            # _run_transcription_pipeline wraps runtime failures (bad codec,
+            # transcode errors) in HTTPException too, not just validation
+            # errors — all validation happens above, before this loop starts,
+            # so any HTTPException reaching here is a per-file runtime
+            # failure and must be treated as a partial failure like any
+            # other exception, not used to abort the whole batch.
+            errors.append({"index": i, "filename": f.filename or f"file_{i}", "error": str(e.detail)})
+        except Exception as e:
+            errors.append({"index": i, "filename": f.filename or f"file_{i}", "error": str(e)})
+
+    if all_failed and not transcripts:
+        raise HTTPException(status_code=500, detail="All files failed to transcribe")
+
+    response = {"batch_id": batch_id, "transcripts": transcripts}
+    if errors:
+        response["errors"] = errors
+    return response
+
+
 @app.get("/api/search")
 async def search_transcripts_endpoint(
     q: str = Query(...),
@@ -1358,13 +1512,14 @@ async def search_transcripts_endpoint(
 @app.get("/api/transcripts")
 async def list_transcripts(
     limit: int = 50, offset: int = 0, q: str | None = Query(None),
+    batch_id: str | None = Query(None),
     db: Session = Depends(get_db), current_user: User = Depends(get_current_user),
 ):
     if q and q.strip():
         if len(q.strip()) > 500:
             raise HTTPException(status_code=400, detail="Query exceeds 500 characters")
-        return _build_recent_transcripts(db, current_user, limit=limit, offset=offset, query=q.strip())
-    return _build_recent_transcripts(db, current_user, limit=limit, offset=offset)
+        return _build_recent_transcripts(db, current_user, limit=limit, offset=offset, query=q.strip(), batch_id=batch_id)
+    return _build_recent_transcripts(db, current_user, limit=limit, offset=offset, batch_id=batch_id)
 
 
 @app.get("/api/transcripts/{transcript_id}")
