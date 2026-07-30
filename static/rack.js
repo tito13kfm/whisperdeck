@@ -1279,11 +1279,12 @@ function dashInitVu() {
   var wrap = $('dash-vu');
   if (wrap) wrap.appendChild(canvas);
   function frame(ts) {
+    if (S.page !== 'dashboard') { INST.dashRaf = null; INST.scopeInit = false; return; }
     INST.dt = ts / 1000;
     drawVU(canvas, 'dash');
-    INST.raf = requestAnimationFrame(frame);
+    INST.dashRaf = requestAnimationFrame(frame);
   }
-  INST.raf = requestAnimationFrame(frame);
+  INST.dashRaf = requestAnimationFrame(frame);
 }
 
 function scheduleDashPoll() {
@@ -1295,7 +1296,7 @@ function scheduleDashPoll() {
   }, 3000);
 }
 /* ══════════════════ transcribe: instruments (verbatim from prototype logic) ══════════════════ */
-const INST = { dt: 0, raf: null, vuMeters: {}, scopeInit: false, driveMic: null, driveSys: null, dashActive: false };
+const INST = { dt: 0, raf: null, dashRaf: null, vuMeters: {}, scopeInit: false, driveMic: null, driveSys: null, dashActive: false };
 
 function instrumentsActive() { return S.running || S.capturing; }
 
