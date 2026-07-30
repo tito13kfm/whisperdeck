@@ -761,3 +761,40 @@ async def queue_worker_loop(SessionLocal, diarization_service, interval_seconds:
         except Exception as e:
             print(f"[queue] worker tick failed: {e}")
         await asyncio.sleep(interval_seconds)
+
+
+def get_rate_limit_gauge(db, user_id: int, provider: str = "groq") -> dict:
+    """Return structured rate-limit usage gauge for `provider` (default 'groq')."""
+    from backends import LOCAL_PROVIDERS
+    from services.pricing import get_provider_stt_rate
+    if provider in LOCAL_PROVIDERS:
+        return {
+            "provider": provider,
+            "used_seconds": 0.0,
+            "limit_seconds": 0,
+            "used_cost": 0.0,
+            "limit_cost": 0.0,
+            "resets_in_seconds": 0,
+            "is_local": True,
+        }
+    limits = PROVIDER_LIMITS.get(provider, DEFAULT_LIMITS)
+    limit_seconds = limits.get("asd", 28800)
+    used_seconds = compute_audio_seconds_used(db, user_id, provider, 86400)
+    oldest_ts = _oldest_contributing_timestamp(db, user_id, provider, 86400)
+    resets_in_seconds = 0
+    if oldest_ts:
+        now = utcnow_naive()
+        expiry = oldest_ts + datetime.timedelta(seconds=86400)
+        resets_in_seconds = max(0, round((expiry - now).total_seconds()))
+    stt_rate = get_provider_stt_rate(provider)["rate_per_minute"]
+    used_cost = round((used_seconds / 60.0) * stt_rate, 4)
+    limit_cost = round((limit_seconds / 60.0) * stt_rate, 4)
+    return {
+        "provider": provider,
+        "used_seconds": round(used_seconds, 1),
+        "limit_seconds": limit_seconds,
+        "used_cost": used_cost,
+        "limit_cost": limit_cost,
+        "resets_in_seconds": resets_in_seconds,
+        "is_local": False,
+    }

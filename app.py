@@ -42,7 +42,7 @@ from services.audio_prep import transcode_for_upload, AudioPrepError, chunk_audi
 from services.queue import (
     create_chunk_jobs, retry_failed_chunks, queue_worker_loop, compute_queue_status,
     cancel_transcript_jobs, resume_cancelled_chunks, reset_stuck_transcription_jobs,
-    dismiss_transcript_queue_entry, clear_finished_transcript_queue_entries,
+    dismiss_transcript_queue_entry, clear_finished_transcript_queue_entries, get_rate_limit_gauge,
 )
 from services.hotwords import list_hotwords, add_hotword, delete_hotword
 from services.correction import extract_hotwords_from_doc
@@ -669,7 +669,11 @@ def _build_jobs_payload(db: Session, current_user: User, limit: int) -> dict:
 
     entries.sort(key=lambda e: e["created_at"] or "", reverse=True)
     active = sum(1 for e in entries if e["status"] in ("pending", "running", "queued", "waiting"))
-    return {"jobs": entries[:limit], "active": active}
+    return {
+        "jobs": entries[:limit],
+        "active": active,
+        "rate_limit_gauge": get_rate_limit_gauge(db, current_user.id, "groq"),
+    }
 
 
 @app.get("/api/bootstrap")
@@ -2811,7 +2815,7 @@ async def full_status(db: Session = Depends(get_db), current_user: User = Depend
 
 @app.get("/api/costs")
 async def api_costs_overview(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    """Per-provider cost totals for the current month plus lifetime totals.
+    """Per-provider cost totals for the current month plus lifetime totals and rate-limit gauge.
     Monthly window: trailing 30 days from now."""
     now = datetime.datetime.now(datetime.UTC).replace(tzinfo=None)
     month_start = now - datetime.timedelta(days=30)
@@ -2826,19 +2830,29 @@ async def api_costs_overview(db: Session = Depends(get_db), current_user: User =
         if not p:
             continue
         pc = provider_cost(db, current_user.id, p, month_start)
+        gauge = get_rate_limit_gauge(db, current_user.id, p)
+        pc["used_today_seconds"] = gauge["used_seconds"]
+        pc["limit_today_seconds"] = gauge["limit_seconds"]
+        pc["used_today_cost"] = gauge["used_cost"]
+        pc["limit_today_cost"] = gauge["limit_cost"]
+        pc["resets_in_seconds"] = gauge["resets_in_seconds"]
         provider_costs[p] = pc
         monthly_total += pc.get("total_cost", 0.0)
-    # Lifetime: query without the since filter
+
     epoch = datetime.datetime(2020, 1, 1)
     for (p,) in providers:
         if not p:
             continue
         lt = provider_cost(db, current_user.id, p, epoch)
         lifetime_total += lt.get("total_cost", 0.0)
+
+    primary_gauge = get_rate_limit_gauge(db, current_user.id, "groq")
+
     return {
         "providers": provider_costs,
         "monthly_total": round(monthly_total, 4),
         "lifetime_total": round(lifetime_total, 4),
+        "rate_limit_gauge": primary_gauge,
     }
 
 
