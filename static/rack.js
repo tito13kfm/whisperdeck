@@ -409,7 +409,7 @@ function stageSegmentBar(segments, height = 16) {
 }
 
 /* ══════════════════ navigation ══════════════════ */
-const PAGES = ['dashboard', 'transcribe', 'transcripts', 'voicenotes', 'queue', 'detail', 'voices', 'files', 'settings', 'assistant'];
+const PAGES = ['dashboard', 'transcribe', 'transcripts', 'voicenotes', 'queue', 'costs', 'detail', 'voices', 'files', 'settings', 'assistant'];
 
 // Rail chrome (Tape-library/Voice-roster nav badges, storage meter) is
 // otherwise only refreshed as a side effect of loadDashboard() — visiting
@@ -445,6 +445,7 @@ function navigate(page, data) {
     transcripts: loadTranscripts,
     voicenotes: loadVoiceNotes,
     queue: () => loadQueue({force: true}),
+    costs: loadCostsPage,
     detail: () => loadTranscriptDetail(S.detailId),
     voices: loadVoices,
     files: renderFilesPage,
@@ -2990,10 +2991,20 @@ async function loadQueue(opts = {}) {
 
   const active = data.active || 0;
   const finishedCount = jobs.filter(j => ['completed', 'failed', 'partial', 'cancelled'].includes(j.status)).length;
+  const gauge = data.rate_limit_gauge || {};
+  let gaugeHtml = '';
+  if (gauge.limit_seconds) {
+    const usedFormatted = Math.round(gauge.used_seconds || 0).toLocaleString();
+    const limitFormatted = Math.round(gauge.limit_seconds).toLocaleString();
+    const resetH = gauge.resets_in_seconds ? Math.ceil(gauge.resets_in_seconds / 3600) : 0;
+    const resetText = resetH > 0 ? ` · resets in ~${resetH}h` : '';
+    gaugeHtml = `<div class="budget-gauge" style="font-family:var(--f-mono);font-size:11px;color:var(--label-dim);background:var(--panel-lo);padding:4px 10px;border-radius:3px;border:1px solid var(--inset-edge)">${escapeHtml(usedFormatted)} / ${escapeHtml(limitFormatted)} audio-seconds used today${escapeHtml(resetText)}</div>`;
+  }
   root.innerHTML = `
     <div class="page-head">
       <h1 class="t-title">Queue</h1>
-      <div style="display:flex;align-items:center;gap:14px">
+      <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap">
+        ${gaugeHtml}
         <div class="page-status page-status--${active ? 'busy' : 'ok'}">${ledDot(active ? AMBER : GREEN, true, 9)}${jobs.length} jobs · ${active} active</div>
         ${finishedCount ? `<button class="btn" style="font-size:12px;padding:6px 12px;border-color:var(--inset-edge)" data-jact="clear-finished">Clear finished (${finishedCount})</button>` : ''}
       </div>
@@ -3033,6 +3044,90 @@ async function refreshQueueBadge(force = false) {
     const data = await getJobs({force});
     updateQueueBadge(data.active || 0);
   } catch { /* badge is best-effort */ }
+}
+
+/* ══════════════════ costs page ══════════════════ */
+async function loadCostsPage() {
+  const root = $('page-costs');
+  if (!root) return;
+  let data;
+  try {
+    data = await api('/api/costs');
+  } catch (e) {
+    toast(e.message, 'error');
+    return;
+  }
+  const providers = data.providers || {};
+  const monthlyTotal = data.monthly_total || 0;
+  const lifetimeTotal = data.lifetime_total || 0;
+  const gauge = data.rate_limit_gauge || {};
+
+  const providerKeys = Object.keys(providers);
+
+  let rowsHtml = '';
+  if (providerKeys.length === 0) {
+    rowsHtml = '<div class="empty-unit">No transcription spend recorded this month</div>';
+  } else {
+    rowsHtml = providerKeys.map(p => {
+      const pc = providers[p] || {};
+      const sec = pc.total_seconds || 0;
+      const cost = pc.total_cost || 0;
+      const rate = pc.rate_per_minute || 0;
+      const source = pc.rate_source || '—';
+      const mins = (sec / 60).toFixed(1);
+      return `
+      <div class="unit" style="padding:14px 22px 14px 34px;margin-bottom:8px">
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap">
+          <div>
+            <div style="font-family:var(--f-cond);font-size:15px;font-weight:700;letter-spacing:0.04em;text-transform:uppercase">${escapeHtml(p)}</div>
+            <div style="font-family:var(--f-mono);font-size:11px;color:var(--label-dim);margin-top:2px">${escapeHtml(mins)} min STT · rate: $${rate.toFixed(4)}/min (${escapeHtml(source)})</div>
+          </div>
+          <div style="font-family:var(--f-mono);font-size:16px;font-weight:700;color:var(--green)">
+            $${cost.toFixed(2)}
+          </div>
+        </div>
+      </div>`;
+    }).join('');
+  }
+
+  const gaugeUsedSec = gauge.used_seconds || 0;
+  const gaugeLimitSec = gauge.limit_seconds || 28800;
+  const gaugeUsedFormatted = Math.round(gaugeUsedSec).toLocaleString();
+  const gaugeLimitFormatted = Math.round(gaugeLimitSec).toLocaleString();
+  const gaugeUsedCost = (gauge.used_cost || 0).toFixed(2);
+  const gaugeLimitCost = (gauge.limit_cost || 0).toFixed(2);
+  const resetH = gauge.resets_in_seconds ? Math.ceil(gauge.resets_in_seconds / 3600) : 0;
+  const resetText = resetH > 0 ? ` · resets in ~${resetH}h` : '';
+
+  root.innerHTML = `
+    <div class="page-head">
+      <h1 class="t-title">Costs</h1>
+      <div class="page-status page-status--ok">${ledDot(GREEN, true, 9)}${monthlyTotal > 0 ? '$' + monthlyTotal.toFixed(2) + ' this month' : 'No spend this month'}</div>
+    </div>
+
+    <div class="unit" style="padding:18px 22px 18px 34px;margin-bottom:16px">
+      <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(200px, 1fr));gap:16px">
+        <div>
+          <div class="t-label" style="margin-bottom:4px">Monthly Spend</div>
+          <div style="font-family:var(--f-mono);font-size:22px;font-weight:700;color:var(--green)">$${monthlyTotal.toFixed(2)}</div>
+          <div style="font-family:var(--f-mono);font-size:10px;color:var(--label-dim);margin-top:2px">Trailing 30 days</div>
+        </div>
+        <div>
+          <div class="t-label" style="margin-bottom:4px">Lifetime Spend</div>
+          <div style="font-family:var(--f-mono);font-size:22px;font-weight:700;color:var(--text)">$${lifetimeTotal.toFixed(2)}</div>
+          <div style="font-family:var(--f-mono);font-size:10px;color:var(--label-dim);margin-top:2px">All-time total</div>
+        </div>
+        <div>
+          <div class="t-label" style="margin-bottom:4px">Rate-Limit Budget</div>
+          <div style="font-family:var(--f-mono);font-size:14px;font-weight:700;color:var(--text);margin-top:4px">${gaugeUsedFormatted} / ${gaugeLimitFormatted} audio-s</div>
+          <div style="font-family:var(--f-mono);font-size:10px;color:var(--label-dim);margin-top:2px">~$${gaugeUsedCost} / $${gaugeLimitCost} today${escapeHtml(resetText)}</div>
+        </div>
+      </div>
+    </div>
+
+    <div style="font-family:var(--f-cond);font-size:13px;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;color:var(--label-dim);margin:0 36px 8px">Provider Breakdown</div>
+    ${rowsHtml}
+  `;
 }
 
 /* ══════════════════ transcript detail ══════════════════ */
@@ -5441,5 +5536,5 @@ document.addEventListener('DOMContentLoaded', () => {
    works identically in both, survives future build-config changes, and
    makes the supported test-hook surface self-documenting. */
 if (typeof window !== 'undefined') {
-  Object.assign(window, { navigate, S, syncTranscribe, renderDetail, curProv, logout, api });
+  Object.assign(window, { navigate, S, syncTranscribe, renderDetail, curProv, logout, api, loadCostsPage });
 }

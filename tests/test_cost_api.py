@@ -309,3 +309,42 @@ def test_transcript_cost_endpoint_openrouter_llm_job_no_crash(db_session, client
     assert data["correction"]["cost"] == 0.0
     assert data["correction"]["rate_source"] == \
         "OpenRouter (rate lookup skipped — called from an async context)"
+
+
+# ── rate_limit_gauge in /api/costs & /api/jobs ──────────────────────────
+
+def test_costs_endpoint_includes_rate_limit_gauge(db_session, client):
+    """GET /api/costs includes a structured rate_limit_gauge object."""
+    user = _make_user(db_session)
+    _make_transcript(db_session, user, provider="groq",
+                      model="whisper-large-v3-flash",
+                      duration=120.0, status="completed")
+
+    resp = client.get("/api/costs")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "rate_limit_gauge" in data
+    gauge = data["rate_limit_gauge"]
+    assert gauge["provider"] == "groq"
+    assert gauge["used_seconds"] == 120.0
+    assert gauge["limit_seconds"] == 28800
+    assert gauge["used_cost"] == 0.008
+    assert gauge["limit_cost"] == 1.92
+
+
+def test_jobs_endpoint_includes_rate_limit_gauge(db_session, client):
+    """GET /api/jobs includes a structured rate_limit_gauge object."""
+    user = _make_user(db_session)
+    _make_transcript(db_session, user, provider="groq",
+                      model="whisper-large-v3-flash",
+                      duration=60.0, status="completed")
+
+    resp = client.get("/api/jobs")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "rate_limit_gauge" in data
+    gauge = data["rate_limit_gauge"]
+    assert gauge["provider"] == "groq"
+    assert gauge["used_seconds"] == 60.0
+    assert gauge["limit_seconds"] > 0
+    assert gauge["used_cost"] == 0.004

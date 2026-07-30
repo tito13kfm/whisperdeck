@@ -94,7 +94,9 @@ def test_bootstrap_authenticated_returns_full_payload(client):
         "voice_id_backend", "backend_name", "voice_notes",
     }
     assert body["recent_transcripts"] == []  # fresh DB
-    assert body["jobs"] == {"jobs": [], "active": 0}
+    assert body["jobs"]["jobs"] == []
+    assert body["jobs"]["active"] == 0
+    assert "rate_limit_gauge" in body["jobs"]
 
 
 def test_bootstrap_status_matches_api_status_exactly(client):
