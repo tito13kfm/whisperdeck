@@ -764,3 +764,104 @@ details.unit[open] > summary .row-chevron { transform: rotate(90deg); }
   box-shadow: 0 4px 14px rgba(0,0,0,0.35);
 }
 .row-chevron { display: inline-block; transition: transform 0.15s ease; }
+
+/* ── Signal Path VFD panel (single unified display, fixed-size physical unit) ── */
+.mfd-wrap {
+  --mfd-row-h: 54px; --mfd-row-gap: 10px; --mfd-panel-h: 428px;
+  display: flex; align-items: stretch; gap: 0; width: 840px; max-width: 100%;
+  margin: 4px auto 0;
+}
+.mfd-handle {
+  width: 28px; flex-shrink: 0; border-radius: 6px;
+  background: linear-gradient(90deg,#5A5D62 0%,#8B8E92 18%,#C6C8CB 32%,#8B8E92 48%,#5A5D62 62%,#8B8E92 80%,#C6C8CB 92%,#5A5D62 100%);
+  box-shadow: 0 2px 5px rgba(0,0,0,0.6), inset 0 0 3px rgba(0,0,0,0.4);
+  position: relative;
+}
+.mfd-handle::before, .mfd-handle::after {
+  content: ''; position: absolute; left: 50%; transform: translateX(-50%);
+  width: 15px; height: 15px; border-radius: 50%;
+  background: radial-gradient(circle at 35% 30%, #E4E5E7, #6D7074 70%, #3A3C3F);
+  box-shadow: 0 1px 2px rgba(0,0,0,0.7);
+}
+.mfd-handle::before { top: 14px; } .mfd-handle::after { bottom: 14px; }
+
+.mfd-bezel { background: #16181A; border: 2px solid #26282B; display: flex; align-items: stretch; flex: 1; min-width: 0; height: calc(var(--mfd-panel-h) + 36px); }
+.mfd-btncol-wrap { display: grid; grid-template-columns: 76px; padding: 18px 10px; align-items: stretch; flex-shrink: 0; }
+.mfd-btncol { display: grid; row-gap: var(--mfd-row-gap); grid-template-rows: repeat(6, var(--mfd-row-h)); align-items: center; justify-items: center; }
+
+.mfd-seam { width: 6px; flex-shrink: 0; background: linear-gradient(90deg,#0c0d0e,#26282b,#0c0d0e); }
+
+.mfd-screen {
+  flex: 1; min-width: 0; height: var(--mfd-panel-h); background: var(--vfd-bg); box-shadow: inset 0 0 16px rgba(0,0,0,0.9);
+  position: relative; overflow: hidden; padding: 20px 22px;
+  display: flex; flex-direction: column;
+  font-family: var(--f-mono);
+}
+.mfd-screen::before {
+  content: ''; position: absolute; inset: 0; pointer-events: none; opacity: 0.5;
+  background-image: repeating-linear-gradient(rgba(0,0,0,0.35) 0 1px, transparent 1px 3px),
+                     repeating-linear-gradient(90deg, rgba(0,0,0,0.35) 0 1px, transparent 1px 3px);
+}
+.mfd-rows { display: grid; row-gap: var(--mfd-row-gap); grid-template-rows: repeat(6, var(--mfd-row-h)); position: relative; z-index: 1; flex: 1; min-width: 0; }
+
+.mfd-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.1em; color: #2f6a61; }
+.mfd-ghost { font-size: 14px; color: var(--vfd); opacity: 0.32; }
+/* display:inline-block required — transform has no effect on a plain inline element */
+.mfd-value { font-size: 20px; font-weight: 600; color: var(--vfd); text-shadow: 0 0 5px rgba(77,232,216,0.7); display: inline-block; }
+.mfd-desc { font-size: 12.5px; color: var(--vfd); opacity: 0.75; line-height: 1.7; }
+.mfd-meta { font-size: 12.5px; color: var(--amber); margin-top: 6px; }
+
+/* marquee for values that overflow their row — distance/duration set as inline
+   custom properties per element (computed from real overflow px), so no
+   per-element @keyframes need to be generated/leaked into <head>. */
+@keyframes mfd-marquee { 0%, 10% { transform: translateX(0); } 90%, 100% { transform: translateX(var(--mfd-marquee-dist)); } }
+.mfd-value.mfd-scroll { animation: mfd-marquee var(--mfd-marquee-dur, 6s) linear infinite alternate; }
+
+.mfd-btn, .mfd-ok {
+  width: 58px; height: 58px; border-radius: 7px; cursor: pointer; flex-shrink: 0;
+  background: linear-gradient(155deg,#54575b,#34373a);
+  border: 1px solid #1e2022;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.5), inset 0 1px 1px rgba(255,255,255,0.12);
+  transition: filter 140ms ease, background 140ms ease, border-color 140ms ease;
+}
+.mfd-btn:active, .mfd-ok:active { transform: translateY(1px); }
+.mfd-btn.on, .mfd-ok.on {
+  background: linear-gradient(155deg,#E9EBEC,#C7C9CC);
+  border: 3px solid var(--green);
+}
+.mfd-btn.dim { filter: brightness(0.65); cursor: not-allowed; }
+.mfd-btn.flash { animation: mfd-ringflash 500ms ease; }
+@keyframes mfd-ringflash { 40% { border-color: var(--green); background: linear-gradient(155deg,#E9EBEC,#C7C9CC); } }
+
+.mfd-navcol { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px; padding: 14px 12px; flex-shrink: 0; }
+.mfd-navbtn { cursor: pointer; }
+.mfd-navbtn:active { transform: translateY(1px); }
+.mfd-chevron { width: 58px; height: 44px; background: linear-gradient(155deg,#54575b,#34373a); }
+.mfd-chevron-up { clip-path: polygon(50% 6%, 94% 66%, 68% 66%, 68% 94%, 32% 94%, 32% 66%, 6% 66%); }
+.mfd-chevron-down { clip-path: polygon(50% 94%, 94% 34%, 68% 34%, 68% 6%, 32% 6%, 32% 34%, 6% 34%); }
+
+.mfd-tick { width: 16px; height: 2px; background: var(--vfd); box-shadow: 0 0 4px rgba(77,232,216,0.7); flex-shrink: 0; opacity: 0.4; }
+.mfd-row { display: flex; align-items: center; height: var(--mfd-row-h); gap: 14px; min-width: 0; }
+.mfd-valwrap { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; position: relative; }
+.mfd-value.flash { animation: mfd-flashval 500ms ease; }
+@keyframes mfd-flashval { 40% { color: var(--green) !important; text-shadow: 0 0 9px rgba(95,203,122,1) !important; } }
+
+.mfd-wheel { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; }
+.mfd-band { padding-top: 16px; border-top: 1px dashed #16221f; position: relative; z-index: 1; margin-top: auto; }
+
+/* Advanced field-list rows: idle tick is dim teal, active row's tick/label turn green */
+.mfd-adv-row.active .mfd-tick { background: var(--green); opacity: 1; box-shadow: 0 0 6px rgba(95,203,122,0.8); }
+.mfd-adv-row.active .mfd-label { color: var(--green); }
+.mfd-adv-back { justify-content: center; }
+.mfd-adv-back .mfd-label { letter-spacing: 0.15em; font-size: 12px; }
+.mfd-adv-back.active .mfd-label { color: var(--green); }
+
+.mfd-input {
+  background: transparent; border: none; outline: none; padding: 0; margin: 0;
+  font-family: var(--f-mono); font-size: 20px; font-weight: 600;
+  color: var(--green); text-shadow: 0 0 5px rgba(95,203,122,0.7); caret-color: var(--green);
+  width: 100%;
+}
+textarea.mfd-input { resize: none; line-height: 1.5; }
+
+.mfd-hint { font-family: var(--f-mono); font-size: 11px; color: var(--label-faint); margin-top: 10px; text-align: center; }
