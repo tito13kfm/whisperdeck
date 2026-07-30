@@ -3,6 +3,7 @@ __pycache__/
 *.pyc
 data/
 run_out.log
+.superpowers/
 run_err.log
 test.mp4
 test_audio.mp3

@@ -39,6 +39,10 @@ const S = {
   correctionPending: false,   // true while a non-blocking post-completion auto-correct poll is watching this run
   correctionStatus: null,     // pending | running | completed | failed — mirrors the run's correction_job.status
   mode: 'meeting',            // meeting | dictation | voice_note — dictation/voice_note skip diarization, unlock their own post-pipeline sets
+  advSpeakerCount: null,      // null = auto-detect, else integer 1-12
+  advTitle: '',
+  advTemperature: 0,          // 0-10 wheel steps; sent to backend as /10 (0.0-1.0)
+  advContext: '',
   exportDir: '',              // populated from /api/bootstrap.settings.export_directory; non-empty enables the "Save as .md" button
   // live capture
   capturing: false,
@@ -1622,69 +1626,35 @@ async function renderTranscribe() {
 
     <!-- signal path -->
     <div class="unit">
-      <div style="display:flex;flex-direction:column;gap:13px;padding:12px 34px 16px">
+      <div style="display:flex;flex-direction:column;gap:10px;padding:16px 20px 18px">
         <div style="display:flex;align-items:center;justify-content:space-between">
           <div class="t-unit">Signal path</div>
           <div id="tx-path-note" style="font-family:var(--f-mono);font-size:10px;color:var(--label-faint);text-transform:uppercase;letter-spacing:0.06em">Applies to the next job</div>
         </div>
-        <div style="display:flex;justify-content:center;gap:44px;order:2">
-          <button class="ctl" id="ctl-provider" title="Transcription provider">
-            <span class="knob-plate"><span class="knob-grip" id="knob-provider"></span></span>
-            <span class="stack"><span class="name">Provider</span>${vfd('', 'vfd-provider')}</span>
-          </button>
-          <button class="ctl" id="ctl-model" title="Model — list comes from the selected provider">
-            <span class="knob-plate"><span class="knob-grip" id="knob-model"></span></span>
-            <span class="stack"><span class="name">Model</span>${vfd('', 'vfd-model')}</span>
-          </button>
-          <button class="ctl" id="ctl-lang" title="Spoken language">
-            <span class="knob-plate"><span class="knob-grip" id="knob-lang"></span></span>
-            <span class="stack"><span class="name">Language</span>${vfd('', 'vfd-lang')}</span>
-          </button>
+        <div class="mfd-wrap">
+          <div class="mfd-handle"></div>
+          <div class="mfd-bezel">
+            <div class="mfd-btncol-wrap"><div class="mfd-btncol" id="mfd-leftcol"></div></div>
+            <div class="mfd-seam"></div>
+            <div class="mfd-screen" id="mfd-screenwrap">
+              <div class="mfd-rows" id="mfd-screen"></div>
+              <div class="mfd-band" id="mfd-band"></div>
+            </div>
+            <div class="mfd-seam"></div>
+            <div class="mfd-navcol">
+              <div class="mfd-navbtn mfd-chevron mfd-chevron-up" id="mfd-btn-up"></div>
+              <div class="mfd-navbtn mfd-ok" id="mfd-btn-ok"></div>
+              <div class="mfd-navbtn mfd-chevron mfd-chevron-down" id="mfd-btn-down"></div>
+            </div>
+          </div>
+          <div class="mfd-handle"></div>
         </div>
-        <div style="display:flex;justify-content:center;gap:44px;order:1">
-          <button class="ctl" id="ctl-mode" title="Meeting: multi-speaker minutes. Dictation: general voice notes — no speakers, offers to reformat into a note/email/coding prompt afterward.">
-            <span class="tog" id="tog-mode"><span class="tog-plate"><span class="tog-track"><span class="tog-paddle"></span></span></span></span>
-            <span class="stack"><span class="name">Mode</span>${vfd('', 'vfd-mode')}</span>
-          </button>
-          <button class="ctl" id="ctl-diarize" title="Identify who spoke when (diarization)">
-            <span class="tog" id="tog-diarize"><span class="tog-plate"><span class="tog-track"><span class="tog-paddle"></span></span></span></span>
-            <span class="stack"><span class="name">Speakers</span>${vfd('', 'vfd-diarize')}</span>
-          </button>
-          <button class="ctl" id="ctl-autocorrect" title="Run the LLM correction pass automatically">
-            <span class="tog" id="tog-autocorrect"><span class="tog-plate"><span class="tog-track"><span class="tog-paddle"></span></span></span></span>
-            <span class="stack"><span class="name">Auto-correct</span>${vfd('', 'vfd-autocorrect')}</span>
-          </button>
-        </div>
+        <div class="mfd-hint" id="mfd-hint"></div>
       </div>
     </div>
 
-    <!-- fine adjust -->
-    <details class="unit">
-      <summary style="list-style:none;cursor:pointer;padding:13px 26px;display:flex;align-items:center;gap:10px;font-family:var(--f-cond);font-weight:600;font-size:13px;text-transform:uppercase;letter-spacing:0.04em"><span style="color:var(--label-dim);font-size:11px">▸</span> Fine adjust — speakers, title, creativity, context</summary>
-      <div style="padding:14px 26px 18px;border-top:1px solid var(--panel-lo)">
-        <div style="display:flex;gap:24px;flex-wrap:wrap;margin-bottom:14px">
-          <div class="field" style="min-width:170px">
-            <label class="t-label" for="tx-speakers">Speaker count</label>
-            <input class="inp" id="tx-speakers" type="text" placeholder="auto-detect" style="padding:7px 9px">
-            <div class="t-hint">Blank = auto-detect.</div>
-          </div>
-          <div class="field" style="min-width:210px;flex:1">
-            <label class="t-label" for="tx-title">Meeting title</label>
-            <input class="inp" id="tx-title" type="text" placeholder="optional" style="padding:7px 9px">
-            <div class="t-hint">Names the saved transcript.</div>
-          </div>
-          <div class="field" style="min-width:130px">
-            <label class="t-label" for="tx-temp">Creativity</label>
-            <input class="inp" id="tx-temp" type="text" value="0" style="padding:7px 9px">
-            <div class="t-hint">0 = strict. Technical: temperature.</div>
-          </div>
-        </div>
-        <div class="field">
-          <label class="t-label" for="tx-context">Meeting context</label>
-          <textarea class="inp" id="tx-context" rows="2" placeholder="Paste the agenda or jargon-heavy notes — names and terms get added to your term glossary." style="padding:7px 9px"></textarea>
-        </div>
-      </div>
-    </details>
+    <!-- cost estimate -->
+    <div class="unit" id="tx-cost-estimate" style="display:none;border-radius:3px;padding:10px 34px;font-family:var(--f-mono);font-size:11px;color:var(--body);gap:10px;align-items:center;border-top:3px solid var(--panel-lo)"></div>
 
     <!-- status strip (arm state + done navigation) -->
     <div class="unit" style="border-radius:3px">
@@ -1719,51 +1689,7 @@ function wireTranscribe() {
   $('key-open-done').addEventListener('click', openDone);
   $('tx-view-results').addEventListener('click', openDone);
   $('tx-cancel').addEventListener('click', (e) => withBusy(e.currentTarget, cancelJob));
-  $('ctl-provider').addEventListener('click', (e) => withBusy(e.currentTarget, async () => {
-    if (S.running) return;
-    S.providerIdx = (S.providerIdx + 1) % S.providers.length;
-    S.modelIdx = 0;
-    // Moonshine only ever decodes as English (backend hardcodes it) — lock
-    // the language knob so picking e.g. Spanish here doesn't silently
-    // produce English-decoded garbage with no error.
-    if (curProv().id === 'moonshine') S.langIdx = 0;
-    await fetchModelsFor(S.providerIdx);
-    syncTranscribe();
-  }));
-  $('ctl-model').addEventListener('click', () => {
-    if (S.running) return;
-    S.modelIdx = (S.modelIdx + 1) % curProv().models.length;
-    syncTranscribe();
-  });
-  $('ctl-lang').addEventListener('click', () => {
-    if (S.running) return;
-    if (curProv().id === 'moonshine') {
-      toast('Moonshine is English-only — switch provider to change language', 'info');
-      return;
-    }
-    S.langIdx = (S.langIdx + 1) % LANGUAGES.length;
-    syncTranscribe();
-  });
-  $('ctl-mode').addEventListener('click', () => {
-    if (S.running) return;
-    // Don't touch S.diarize here: startJob() already forces diarize=false
-    // for dictation/voice_note at submit time, and syncTranscribe() already
-    // renders the Speakers control locked to N/A in those modes —
-    // mutating the stored preference would silently clobber it on the
-    // next meeting job.
-    S.mode = S.mode === 'meeting' ? 'dictation' : S.mode === 'dictation' ? 'voice_note' : 'meeting';
-    syncTranscribe();
-  });
-  $('ctl-diarize').addEventListener('click', () => {
-    if (S.running || S.mode === 'dictation') return;
-    S.diarize = !S.diarize;
-    syncTranscribe();
-  });
-  $('ctl-autocorrect').addEventListener('click', () => {
-    if (S.running) return;
-    S.autoCorrect = !S.autoCorrect;
-    syncTranscribe();
-  });
+  wireMfd();
 }
 
 function setVfd(id, text) {
@@ -1771,6 +1697,285 @@ function setVfd(id, text) {
   if (!w) return;
   w.firstElementChild.textContent = text;
   armVfdMarquees(w.parentElement);
+}
+
+/* ══════════════════ Signal Path VFD panel ══════════════════ */
+let mfdEditing = null;      // category key in wheel-edit mode, or null = browse
+let mfdAdvanced = false;    // Advanced (Fine Adjust) screen open
+let mfdAdvIdx = 0;          // highlighted row within Advanced (0-4)
+let mfdAdvSelected = false; // editing the highlighted Advanced field
+let mfdFlashKey = null;     // category key currently flashing green (binary toggle confirm)
+let mfdBusy = false;        // guards provider switch while awaiting fetchModelsFor
+
+const MFD_SPEAKER_OPTS = ['Auto-detect'].concat([...Array(12)].map((_, i) => String(i + 1)));
+const MFD_CREATIVITY_OPTS = ['0 · Strict', '1', '2', '3', '4', '5 · Balanced', '6', '7', '8', '9', '10 · Creative'];
+
+function mfdSingleSpeaker() { return S.mode === 'dictation' || S.mode === 'voice_note'; }
+
+function mfdCatDefs() {
+  const prov = curProv();
+  const single = mfdSingleSpeaker();
+  return [
+    { key: 'provider', label: 'Provider', desc: 'Cloud or local transcription engine.',
+      opts: S.providers.map(p => p.name), idx: S.providerIdx, meta: prov.statusText },
+    { key: 'model', label: 'Model', desc: 'Specific model variant for the selected provider.',
+      opts: prov.models, idx: S.modelIdx % prov.models.length },
+    { key: 'language', label: 'Language', desc: 'Spoken language of the audio.',
+      opts: LANGUAGES, idx: S.langIdx,
+      locked: prov.id === 'moonshine', lockedMsg: 'Moonshine is English-only — switch provider to change language' },
+    { key: 'mode', label: 'Mode', desc: 'Meeting: multi-speaker minutes. Dictation: voice notes, no speakers, offers to reformat after.',
+      opts: ['Meeting', 'Dictation', 'Voice Note'], idx: S.mode === 'dictation' ? 1 : S.mode === 'voice_note' ? 2 : 0 },
+    { key: 'speakers', label: 'Speakers', desc: 'Identify who spoke when (diarization).',
+      opts: ['On', 'Off'], idx: (single || !S.diarize) ? 1 : 0, binary: true,
+      locked: single, displayOverride: single ? 'N/A' : null },
+    { key: 'autocorrect', label: 'Auto-Correct', desc: 'Run the LLM correction pass automatically after transcription.',
+      opts: ['On', 'Off'], idx: S.autoCorrect ? 0 : 1, binary: true },
+  ];
+}
+
+function mfdAdvFieldDefs() {
+  return [
+    { key: 'speakerCount', label: 'Speaker count', type: 'wheel', opts: MFD_SPEAKER_OPTS,
+      idx: S.advSpeakerCount == null ? 0 : S.advSpeakerCount,
+      setIdx: (i) => { S.advSpeakerCount = i === 0 ? null : i; } },
+    { key: 'title', label: 'Meeting title', type: 'text', val: S.advTitle, placeholder: '(none set)',
+      setVal: (v) => { S.advTitle = v; } },
+    { key: 'creativity', label: 'Creativity', type: 'wheel', opts: MFD_CREATIVITY_OPTS,
+      idx: S.advTemperature, setIdx: (i) => { S.advTemperature = i; } },
+    { key: 'context', label: 'Context', type: 'text', val: S.advContext, placeholder: '(none pasted)', multiline: true,
+      setVal: (v) => { S.advContext = v; } },
+    { key: 'back', label: '◄ BACK TO BROWSE', type: 'action' },
+  ];
+}
+
+function mfdOnCatClick(key) {
+  if (S.running || mfdAdvanced) return;
+  if (mfdEditing && key !== mfdEditing) return;
+  const c = mfdCatDefs().find(c => c.key === key);
+  if (!c) return;
+  if (c.locked) { if (c.lockedMsg) toast(c.lockedMsg, 'info'); return; }
+  if (c.binary) {
+    if (key === 'speakers') S.diarize = !S.diarize;
+    else if (key === 'autocorrect') S.autoCorrect = !S.autoCorrect;
+    mfdEditing = null;
+    mfdFlashKey = key;
+    syncTranscribe();
+    setTimeout(() => { mfdFlashKey = null; renderMfd(); }, 500);
+    return;
+  }
+  mfdEditing = (mfdEditing === key) ? null : key;
+  renderMfd();
+}
+
+async function mfdChangeProvider(dir) {
+  if (mfdBusy) return;
+  mfdBusy = true;
+  const n = S.providers.length;
+  S.providerIdx = ((S.providerIdx + dir) % n + n) % n;
+  S.modelIdx = 0;
+  // Moonshine only ever decodes as English (backend hardcodes it) — lock
+  // the language wheel so picking e.g. Spanish here doesn't silently
+  // produce English-decoded garbage with no error.
+  if (curProv().id === 'moonshine') S.langIdx = 0;
+  await fetchModelsFor(S.providerIdx);
+  mfdBusy = false;
+  syncTranscribe();
+}
+
+function mfdNav(dir) {
+  if (S.running) return;
+  if (mfdAdvanced) {
+    if (mfdAdvSelected) {
+      const f = mfdAdvFieldDefs()[mfdAdvIdx];
+      if (f.type === 'wheel') {
+        const n = f.opts.length;
+        f.setIdx(((f.idx + dir) % n + n) % n);
+        syncTranscribe();
+      }
+      return;
+    }
+    const len = mfdAdvFieldDefs().length;
+    mfdAdvIdx = ((mfdAdvIdx + dir) % len + len) % len;
+    renderMfd();
+    return;
+  }
+  if (!mfdEditing) return;
+  const c = mfdCatDefs().find(c => c.key === mfdEditing);
+  if (!c || c.binary) return;
+  if (c.key === 'provider') { mfdChangeProvider(dir); return; }
+  const n = c.opts.length;
+  const newIdx = ((c.idx + dir) % n + n) % n;
+  if (c.key === 'model') S.modelIdx = newIdx;
+  else if (c.key === 'language') S.langIdx = newIdx;
+  else if (c.key === 'mode') S.mode = ['meeting', 'dictation', 'voice_note'][newIdx];
+  syncTranscribe();
+}
+
+function mfdConfirmAdvInput() {
+  const f = mfdAdvFieldDefs()[mfdAdvIdx];
+  const el = $('mfd-input');
+  if (el && f.setVal) f.setVal(el.value);
+  mfdAdvSelected = false;
+  syncTranscribe();
+}
+
+function mfdOnOk() {
+  if (S.running) return;
+  if (mfdAdvanced) {
+    if (mfdAdvSelected) { mfdConfirmAdvInput(); return; }
+    const f = mfdAdvFieldDefs()[mfdAdvIdx];
+    if (f.type === 'action') { mfdAdvanced = false; mfdAdvIdx = 0; renderMfd(); return; }
+    mfdAdvSelected = true;
+    renderMfd();
+    return;
+  }
+  if (mfdEditing) { mfdEditing = null; renderMfd(); return; }
+  mfdAdvanced = true; mfdAdvIdx = 0; mfdAdvSelected = false;
+  renderMfd();
+}
+
+function wireMfd() {
+  $('mfd-btn-up').addEventListener('click', () => mfdNav(-1));
+  $('mfd-btn-down').addEventListener('click', () => mfdNav(1));
+  $('mfd-btn-ok').addEventListener('click', mfdOnOk);
+}
+
+function fitMfdMarquee() {
+  document.querySelectorAll('#mfd-screenwrap .mfd-valwrap').forEach(wrap => {
+    const span = wrap.querySelector('span');
+    if (!span) return;
+    span.classList.remove('mfd-scroll');
+    span.style.removeProperty('--mfd-marquee-dist');
+    span.style.removeProperty('--mfd-marquee-dur');
+    if (!motionAllowed()) return;
+    const over = span.scrollWidth - wrap.clientWidth;
+    if (over > 4) {
+      span.style.setProperty('--mfd-marquee-dist', '-' + over + 'px');
+      span.style.setProperty('--mfd-marquee-dur', Math.max(3, over / 18) + 's');
+      span.classList.add('mfd-scroll');
+    }
+  });
+}
+
+function renderMfdButtons() {
+  const cats = mfdCatDefs();
+  $('mfd-leftcol').innerHTML = cats.map(c => {
+    let cls = 'mfd-btn';
+    if (!mfdAdvanced && mfdEditing === c.key) cls += ' on';
+    else if (mfdEditing || mfdAdvanced || S.running) cls += ' dim';
+    if (mfdFlashKey === c.key) cls += ' flash';
+    return '<div class="' + cls + '" data-cat="' + c.key + '" title="' + escapeHtml(c.desc) + '"></div>';
+  }).join('');
+  document.querySelectorAll('#mfd-leftcol .mfd-btn').forEach(b => {
+    b.addEventListener('click', () => mfdOnCatClick(b.dataset.cat));
+  });
+}
+
+function renderMfdAdvancedScreen(band) {
+  const fields = mfdAdvFieldDefs();
+  const f = fields[mfdAdvIdx];
+
+  if (mfdAdvSelected && f.type === 'text') {
+    const existing = $('mfd-input');
+    if (existing && existing.dataset.key === f.key) return; // already focused/editing — don't rebuild under the user
+  }
+
+  if (mfdAdvSelected && f.type === 'wheel') {
+    const n = f.opts.length;
+    const prev = f.opts[(f.idx - 1 + n) % n], cur = f.opts[f.idx], next = f.opts[(f.idx + 1) % n];
+    $('mfd-screen').innerHTML =
+      '<div class="mfd-wheel" style="grid-row:1/-1">' +
+      '<div class="mfd-label" style="margin-bottom:10px">' + escapeHtml(f.label) + '</div>' +
+      '<span class="mfd-ghost">' + escapeHtml(prev) + '</span><span class="mfd-value" style="color:var(--green);text-shadow:0 0 5px rgba(95,203,122,0.7)">' + escapeHtml(cur) + '</span><span class="mfd-ghost">' + escapeHtml(next) + '</span>' +
+      '</div>';
+    band.innerHTML = '<div class="mfd-desc">Up/Down to adjust. OK to confirm.</div>';
+    return;
+  }
+
+  if (mfdAdvSelected && f.type === 'text') {
+    const tag = f.multiline ? 'textarea' : 'input';
+    const extra = f.multiline ? ' rows="3"' : ' type="text"';
+    $('mfd-screen').innerHTML =
+      '<div class="mfd-wheel" style="grid-row:1/-1;align-items:stretch;padding:0 4px">' +
+      '<div class="mfd-label" style="margin-bottom:10px">' + escapeHtml(f.label) + '</div>' +
+      '<' + tag + ' class="mfd-input" id="mfd-input" data-key="' + f.key + '"' + extra + '></' + tag + '>' +
+      '</div>';
+    const el = $('mfd-input');
+    el.value = f.val || '';
+    if (!f.multiline) el.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); mfdConfirmAdvInput(); } });
+    band.innerHTML = '<div class="mfd-desc">Type or paste. ' + (f.multiline ? 'OK to confirm.' : 'Enter or OK to confirm.') + '</div>';
+    setTimeout(() => { el.focus(); const v = el.value; el.value = ''; el.value = v; }, 0);
+    return;
+  }
+
+  $('mfd-screen').innerHTML = fields.map((fld, i) => {
+    const active = i === mfdAdvIdx ? ' active' : '';
+    if (fld.type === 'action') {
+      return '<div class="mfd-row mfd-adv-row mfd-adv-back' + active + '"><span class="mfd-label">' + escapeHtml(fld.label) + '</span></div>';
+    }
+    const display = fld.type === 'wheel' ? fld.opts[fld.idx] : (fld.val ? fld.val.replace(/\n+/g, ' ') : fld.placeholder);
+    return '<div class="mfd-row mfd-adv-row' + active + '"><div class="mfd-tick"></div><span class="mfd-label" style="width:130px;flex-shrink:0">' + escapeHtml(fld.label) + '</span>' +
+           '<div class="mfd-valwrap"><span class="mfd-value">' + escapeHtml(display) + '</span></div></div>';
+  }).join('');
+  band.innerHTML = '<div class="mfd-desc">Fine Adjust — per-job overrides. Up/Down to choose a field, OK to select.</div>';
+  fitMfdMarquee();
+}
+
+function renderMfdScreen() {
+  const band = $('mfd-band');
+  if (mfdAdvanced) { renderMfdAdvancedScreen(band); return; }
+
+  if (mfdEditing) {
+    const c = mfdCatDefs().find(c => c.key === mfdEditing);
+    const n = c.opts.length;
+    const prev = c.opts[(c.idx - 1 + n) % n], cur = c.opts[c.idx], next = c.opts[(c.idx + 1) % n];
+    $('mfd-screen').innerHTML =
+      '<div class="mfd-wheel" style="grid-row:1/-1">' +
+      '<div class="mfd-label" style="margin-bottom:10px">' + escapeHtml(c.label) + '</div>' +
+      '<span class="mfd-ghost">' + escapeHtml(prev) + '</span><span class="mfd-value">' + escapeHtml(cur) + '</span><span class="mfd-ghost">' + escapeHtml(next) + '</span>' +
+      '</div>';
+    band.innerHTML = '<div class="mfd-desc">' + escapeHtml(c.desc) + '</div>' + (c.meta ? '<div class="mfd-meta">' + escapeHtml(c.meta) + '</div>' : '');
+    fitMfdMarquee();
+    return;
+  }
+
+  $('mfd-screen').innerHTML = mfdCatDefs().map(c => {
+    const val = c.displayOverride != null ? c.displayOverride : c.opts[c.idx];
+    const flashCls = mfdFlashKey === c.key ? ' flash' : '';
+    return '<div class="mfd-row"><div class="mfd-tick" style="opacity:' + (c.locked ? '0.2' : '0.4') + '"></div><span class="mfd-label" style="width:96px;flex-shrink:0">' + escapeHtml(c.label) + '</span>' +
+           '<div class="mfd-valwrap"><span class="mfd-value' + flashCls + '">' + escapeHtml(val) + '</span></div></div>';
+  }).join('');
+  band.innerHTML = '<div class="mfd-desc">Press a category to adjust it, or OK for Fine Adjust.</div>';
+  fitMfdMarquee();
+}
+
+function renderMfdNav() {
+  const ok = $('mfd-btn-ok');
+  ok.className = 'mfd-navbtn mfd-ok' + (mfdEditing || mfdAdvanced ? ' on' : '');
+}
+
+function renderMfdHint() {
+  const h = $('mfd-hint');
+  if (!h) return;
+  if (mfdAdvanced && mfdAdvSelected) {
+    const f = mfdAdvFieldDefs()[mfdAdvIdx];
+    h.textContent = f.type === 'wheel' ? 'Up/Down: adjust ' + f.label + ' · OK: confirm.' : 'Type or paste into ' + f.label + ' · OK: confirm.';
+  } else if (mfdAdvanced) {
+    h.textContent = 'Fine Adjust — Up/Down: choose field · OK: select · Back row exits to browse.';
+  } else if (mfdEditing) {
+    const c = mfdCatDefs().find(c => c.key === mfdEditing);
+    h.textContent = 'Editing ' + c.label + ' — Up/Down to roll, OK to confirm.';
+  } else {
+    h.textContent = 'Browse mode — pick a category on the left, or press OK for Fine Adjust.';
+  }
+}
+
+function renderMfd() {
+  if (S.page !== 'transcribe' || !$('mfd-leftcol')) return;
+  renderMfdButtons();
+  renderMfdScreen();
+  renderMfdNav();
+  renderMfdHint();
 }
 
 function stageLeds() {
@@ -1929,25 +2134,7 @@ function syncTranscribe() {
 
   // signal path
   $('tx-path-note').textContent = S.running ? 'Locked while running' : 'Applies to the next job';
-  document.querySelectorAll('.ctl').forEach(c => c.classList.toggle('locked', S.running));
-  $('knob-provider').style.transform = 'rotate(' + (-60 + S.providerIdx * 20) + 'deg)';
-  $('knob-model').style.transform = 'rotate(' + (-60 + (S.modelIdx % prov.models.length) * 24) + 'deg)';
-  $('knob-lang').style.transform = 'rotate(' + (-60 + S.langIdx * 18) + 'deg)';
-  setVfd('vfd-provider', prov.name);
-  setVfd('vfd-model', curModel());
-  setVfd('vfd-lang', LANGUAGES[S.langIdx]);
-  // Mode is a 3-state cycle (meeting / dictation / voice_note). The
-  // binary `tog-mode.on` visual still works for the off→on paddle
-  // flip, but the VFD label and the diarize lock need the full set.
-  const modeLabel = S.mode === 'dictation' ? 'DICTATION' : S.mode === 'voice_note' ? 'VOICE NOTE' : 'MEETING';
-  const singleSpeaker = S.mode === 'dictation' || S.mode === 'voice_note';
-  $('tog-mode').classList.toggle('on', singleSpeaker);
-  setVfd('vfd-mode', modeLabel);
-  $('ctl-diarize').classList.toggle('locked', S.running || singleSpeaker);
-  $('tog-diarize').classList.toggle('on', S.diarize && !singleSpeaker);
-  $('tog-autocorrect').classList.toggle('on', S.autoCorrect);
-  setVfd('vfd-diarize', singleSpeaker ? 'N/A' : (S.diarize ? 'ON' : 'OFF'));
-  setVfd('vfd-autocorrect', S.autoCorrect ? 'ON' : 'OFF');
+  renderMfd();
 
   // instruments monitor + nav badge
   $('inst-monitor').textContent = S.permPending ? 'AWAITING MIC' : instrumentsActive() ? 'LIVE' : 'STANDBY';
@@ -1955,6 +2142,55 @@ function syncTranscribe() {
   lamp.style.background = S.stereoLive ? GREEN : 'var(--edge)';
   lamp.style.boxShadow = S.stereoLive ? '0 0 6px ' + GREEN : 'none';
   $('nav-badge-transcribe').textContent = S.running || S.capturing ? 'REC' : '';
+  updateCostEstimate();
+}
+
+async function updateCostEstimate() {
+  // Show a live STT cost estimate on the Transcribe page when provider/model
+  // are selected. Uses POST /api/costs/estimate when duration is known
+  // (live capture or running job), otherwise shows per-minute rates.
+  var box = $('tx-cost-estimate');
+  if (!box || S.page !== 'transcribe') return;
+  var prov = curProv();
+  var model = curModel();
+  if (!prov.id || prov.id === 'builtin' || prov.id === 'moonshine') {
+    // Local providers are free — show a one-line note.
+    box.style.display = '';
+    box.innerHTML = '<span>Local transcription — no cost</span>';
+    return;
+  }
+  if (!prov.ready || model === '—') {
+    box.style.display = 'none';
+    return;
+  }
+  var dur = 0;
+  var durKnown = false;
+  if (S.capturing) {
+    dur = (Date.now() - (S.captureStartedAt || Date.now())) / 1000;
+    durKnown = true;
+  } else if (S.running && S.jobStartedAt) {
+    dur = (Date.now() - S.jobStartedAt) / 1000;
+    durKnown = true;
+  }
+  var est;
+  try {
+    var body = JSON.stringify({ provider: prov.id, model: model, duration_seconds: durKnown ? Math.max(dur, 1) : 0 });
+    est = await api('/api/costs/estimate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: body });
+  } catch (_) {
+    box.style.display = '';
+    box.innerHTML = '<span style="color:var(--amber)">Cost estimate unavailable</span>';
+    return;
+  }
+  box.style.display = '';
+  var label;
+  if (durKnown && dur > 0) {
+    label = 'Est. cost: ~$' + est.cost.toFixed(2) +
+      ' (' + escapeHtml(est.rate_source) + ' · ~' + formatDur(dur) + ')';
+  } else {
+    label = escapeHtml(prov.name) + ' rates: $' + est.rate_per_minute.toFixed(4) + '/min' +
+      ' (' + escapeHtml(est.rate_source) + ')';
+  }
+  box.innerHTML = '<span>' + label + '</span>';
 }
 
 function wireTranscribeDrop() {
@@ -2017,15 +2253,14 @@ async function startJob() {
   form.append('model', curModel());
   const lang = LANGUAGES[S.langIdx];
   form.append('language', lang === 'Auto-detect' ? 'auto' : lang.toLowerCase().slice(0, 2));
-  form.append('temperature', ($('tx-temp') && $('tx-temp').value) || '0');
-  form.append('diarize', S.mode === 'dictation' ? 'false' : (S.diarize ? 'true' : 'false'));
+  form.append('temperature', String(S.advTemperature / 10));
+  form.append('diarize', mfdSingleSpeaker() ? 'false' : (S.diarize ? 'true' : 'false'));
   form.append('auto_correct', S.autoCorrect ? 'true' : 'false');
   form.append('kind', S.mode);
-  const n = $('tx-speakers') && $('tx-speakers').value.trim();
-  if (n) form.append('num_speakers', n);
-  const title = $('tx-title') && $('tx-title').value.trim();
+  if (S.advSpeakerCount != null) form.append('num_speakers', String(S.advSpeakerCount));
+  const title = S.advTitle.trim();
   if (title) form.append('title', title);
-  const ctxDoc = $('tx-context') && $('tx-context').value.trim();
+  const ctxDoc = S.advContext.trim();
   if (ctxDoc) form.append('context_doc', ctxDoc);
 
   S.running = true;
@@ -3826,6 +4061,45 @@ async function summaryHtml(t) {
   }
 }
 
+function fmtCost(n) {
+  // n is a float dollar amount; return a human-readable label.
+  if (n == null || isNaN(n)) return '—';
+  if (n === 0) return 'free';
+  return '$' + n.toFixed(2);
+}
+
+function detailCostHtml(t) {
+  // Build a one-line cost breakdown for the transcript detail metadata block.
+  var c = t.cost;
+  if (!c) return '';
+  var parts = [];
+
+  // STT line — always present
+  var sttDur = c.stt.duration_seconds ? ' · ' + formatDur(c.stt.duration_seconds) : '';
+  parts.push('<span><b>STT&nbsp;</b><span>' + fmtCost(c.stt.cost) +
+    ' · ' + escapeHtml(c.stt.rate_source) + sttDur + '</span></span>');
+
+  // Correction line — show if a correction job ran
+  if (t.correction_model || (c.correction && c.correction.rate_source !== 'no completed job')) {
+    var crSrc = c.correction ? c.correction.rate_source : '—';
+    var crCost = c.correction ? c.correction.cost : 0;
+    parts.push('<span><b>Correction&nbsp;</b><span>' + (crCost > 0 ? '$' + crCost.toFixed(2) : '—') +
+      ' · ' + escapeHtml(crSrc) + '</span></span>');
+  }
+
+  // Summary line — show if a summary exists
+  if (t.has_summary || (c.summary && c.summary.rate_source !== 'no completed job')) {
+    var sSrc = c.summary ? c.summary.rate_source : '—';
+    var sCost = c.summary ? c.summary.cost : 0;
+    parts.push('<span><b>Summary&nbsp;</b><span>' + (sCost > 0 ? '$' + sCost.toFixed(2) : '—') +
+      ' · ' + escapeHtml(sSrc) + '</span></span>');
+  }
+
+  if (!parts.length) return '';
+  return '<div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--seg-edge);font-family:var(--f-mono);font-size:11px;color:var(--body);display:flex;gap:20px;flex-wrap:wrap">' +
+    parts.join('') + '</div>';
+}
+
 function renderDetail() {
   const t = detailData;
   if (!t) return;
@@ -3905,6 +4179,7 @@ function renderDetail() {
         <div style="font-size:12.5px"><div style="font-family:var(--f-mono);font-size:10px;text-transform:uppercase;letter-spacing:0.08em;color:var(--label-dim);margin-bottom:3px">Segments</div>${(t.segments || []).length}</div>
         <div style="font-size:12.5px"><div style="font-family:var(--f-mono);font-size:10px;text-transform:uppercase;letter-spacing:0.08em;color:var(--label-dim);margin-bottom:3px">Mode</div><button class="btn" style="font-size:11px;padding:2px 10px;border-color:var(--inset-edge);cursor:pointer" title="Switch between meeting, dictation, and voice-note modes" data-dact="toggle-kind">${escapeHtml(kindLabel)}</button></div>
       </div>
+      ${detailCostHtml(t)}
     </div>
     ${videoHtml}
     <div style="display:flex;gap:6px;align-items:flex-end;flex-wrap:wrap;margin-bottom:14px;padding:0 36px">
