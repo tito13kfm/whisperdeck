@@ -30,6 +30,8 @@ The LLM only proposes candidate names as structured JSON per transcript. Determi
 
 **5. Orphan cleanup.** Replacing a transcript's mentions on rerun can leave an `Entity` with zero mentions (e.g. the model no longer extracts a person it extracted last time). Decision: auto-delete any `Entity` that hits zero mentions, both on rerun and on transcript delete. This is a data-integrity rule (a mention-less entity was never real to begin with), distinct from part 5's staleness-curation principle ("never auto-delete" for entities that are still mentioned somewhere but have simply gone quiet over time) — the two rules don't conflict because they cover disjoint cases.
 
+**Amendment (added during part 2 design review): exempt entities carrying user-authored state.** Part 2 adds a `status` column to `Entity` (used for `action_item` rows, values `open`/`done`) so a user can mark an action item done. `status` is the first field on `Entity` a human sets directly, rather than something the extraction job derives — and the auto-delete rule above was designed before that existed. Without an exemption, a user's "done" mark can silently evaporate: a rerun that no longer proposes that exact action-item sentence deletes the row via the ordinary orphan rule, and if the model later re-proposes similar wording it comes back as a **fresh** row with `status="open"`, quietly reverting the user's work with no error, no warning, nothing to undo. `delete_orphaned_entities` (`services/entities.py`) must therefore only delete a zero-mention `Entity` when `status` is null/default — i.e. `status IS NULL OR status = 'open'` — never when it's been explicitly set to `done` (or any other non-default value a later part introduces). A `done` action item with zero mentions is data the extraction job doesn't currently need to re-derive to keep; it just sits there until either the model re-extracts it again (converging back onto the same row would be nice but isn't required) or a later curation pass (part 5) decides what to do with it. This keeps the "every Entity has ≥1 mention" invariant as a *default* for parts 2–5's ranking/decay use, not an absolute guarantee for every row.
+
 **6. One narrow, verification-only read route**, `GET /api/transcripts/{id}/entities`, scoped and 404'd exactly like every other transcript route. This exists purely to confirm the feature works end-to-end without needing any frontend — it is explicitly *not* the part-2 browse UI, and the extracted entities are **not** embedded into the main transcript-detail payload (`_serialize_transcript`) in this slice, so this change touches zero existing frontend contracts or tests.
 
 ## Code touchpoints (files + symbols, no line numbers)
@@ -103,7 +105,7 @@ Notes worth preserving from the design review:
 - [ ] Unit tests: determinism under input reordering, short-name guard, fuzzy-vs-exact policy split between `person`/`project` and `decision`/`action_item`, intra-batch threading (two mentions of the same person in one transcript collapse to one create + one merge), voice-roster reconciliation and convergence on repeat mentions
 
 **LLM call + job wiring**
-- [ ] `services/entities.py`: `extract_entities` (prompt, parse, never raises), `apply_extraction`, `delete_orphaned_entities`
+- [ ] `services/entities.py`: `extract_entities` (prompt, parse, never raises), `apply_extraction`, `delete_orphaned_entities` (note: `status`/exemption clause referenced above is added retroactively once part 2's `status` column lands — `delete_orphaned_entities` should be written from the start to check `status IS NULL OR status = 'open'` rather than unconditionally deleting on zero mentions, so part 2 doesn't need to touch this function's core logic later, only add the column it already checks for)
 - [ ] `services/llm_jobs.py`: `VALID_KINDS`/`IO_KINDS`/`AUTO_RETRY_KINDS`; `enqueue_auto_entities`; `run_llm_job` dispatch branch
 - [ ] `app.py` + `services/queue.py`: both auto-enqueue call sites (Complement Rule — see Code touchpoints)
 - [ ] `services/settings.py`: `entity_dedup_threshold` default
@@ -113,6 +115,7 @@ Notes worth preserving from the design review:
 
 **Tests**
 - [ ] `tests/test_entities.py`: kind-partition tests, `enqueue_auto_entities` kind-gating and keyless-skip, worker-dispatch tests with a stubbed LLM response (multi-type extraction, voice-roster reconciliation, cross-transcript merge onto the same entity, rerun replaces mentions and deletes now-orphaned entities but not ones mentioned elsewhere, cancel-during-LLM-call skips the write, cross-user isolation), the new GET route's shape and 404 behavior
+- [ ] `tests/test_entities.py`: `delete_orphaned_entities` does NOT delete a zero-mention entity whose `status` is a non-default value (construct one directly at the DB layer with `status="done"` even though part 1 itself never sets that column — this test exists to pin the contract part 2 depends on, not to exercise part 2's own code)
 
 ## Testing considerations
 
