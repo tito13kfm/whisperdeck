@@ -47,7 +47,7 @@ class TestListBatches:
         assert b_a["failed"] == 1
         assert b_a["pending"] == 0
         assert b_a["total_duration_seconds"] == 50.0
-        assert b_a["first_title"] in ("Test", None)
+        assert b_a["first_title"] == "Test"
 
         b_b = batches[1]  # BATCH_B
         assert b_b["batch_id"] == "BATCH_B"
@@ -226,3 +226,46 @@ class TestCancelBatch:
         data = resp.json()
         assert data["cancelled"] == 0
         assert data["already_terminal"] == 2
+
+    def test_cancel_batch_partial_failure(self, client, db_session, monkeypatch):
+        """Second cancel raises. Assert first still cancelled, errors reported,
+        cancelled count reflects only successful cancels. Regression: missing
+        db.rollback() or wrong error-counting breaks partial-failure path."""
+        import app as _app
+
+        t1 = _transcript(batch_id="BATCH_PARTIAL", status="pending")
+        t2 = _transcript(batch_id="BATCH_PARTIAL", status="pending")
+        t3 = _transcript(batch_id="BATCH_PARTIAL", status="pending")
+        db_session.add_all([t1, t2, t3])
+        db_session.commit()
+
+        orig = _app.cancel_transcript_jobs
+        n = {"i": 0}
+
+        def flaky(db, tid):
+            n["i"] += 1
+            if n["i"] == 2:
+                raise RuntimeError("simulated failure")
+            return orig(db, tid)
+
+        monkeypatch.setattr(_app, "cancel_transcript_jobs", flaky)
+
+        resp = client.post("/api/batches/BATCH_PARTIAL/cancel")
+        assert resp.status_code == 200
+        data = resp.json()
+        # first transcript cancelled, second failed, third cancelled normally
+        assert data["cancelled"] == 2
+        assert data["already_terminal"] == 0
+        assert len(data["errors"]) == 1
+        assert data["errors"][0]["transcript_id"] == t2.id
+        assert "simulated failure" in data["errors"][0]["error"]
+
+        # Verify t1 and t3 were cancelled despite t2's failure
+        db_session.expire_all()
+        db_session.refresh(t1)
+        assert t1.status == "cancelled"
+        db_session.refresh(t3)
+        assert t3.status == "cancelled"
+        # t2 should still be pending (rollback preserved its state)
+        db_session.refresh(t2)
+        assert t2.status == "pending"

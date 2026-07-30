@@ -1522,7 +1522,7 @@ async def list_batches(
             Transcript.batch_id.isnot(None),
         )
         .group_by(Transcript.batch_id)
-        .order_by(func.min(Transcript.created_at).desc())
+        .order_by(func.min(Transcript.created_at).desc(), Transcript.batch_id)
         .offset(offset)
         .limit(limit)
         .all()
