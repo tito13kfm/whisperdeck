@@ -341,10 +341,12 @@ rediarize — the only two distinct diarization actions in the app are the
 upload-time "Speakers" toggle and the post-hoc "Re-diarize" button.
 
 1. Start a fresh upload of the same multispeaker fixture used in
-   Scenario 5, explicitly enabling diarization first: click the
-   "Speakers" toggle at `static/rack.js:769-771` (`id="ctl-diarize"`,
-   `tog-diarize`) before submitting, then submit the upload (form field
-   `diarize=true` on `POST /api/transcribe`).
+   Scenario 5, explicitly enabling diarization first: in the Signal Path
+   VFD panel, click the "Speakers" category button
+   (`static/rack.js`, `mfdOnCatClick`/`data-cat="speakers"` — a binary
+   category, toggles `S.diarize` instantly with no sub-screen) before
+   submitting, then submit the upload (form field `diarize=true` on
+   `POST /api/transcribe`).
    - Check: poll until the job reaches a terminal status (same pattern as
      Scenario 5), then confirm the completed transcript's segments show
      more than one distinct speaker label — i.e. diarization ran as part

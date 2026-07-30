@@ -297,7 +297,7 @@ with sync_playwright() as p:
     #    model, hint 3 speakers, enable diarize + auto-correct, start job -
     #    matching 04-transcript-detail.png's kept figure so the two agree.
     pg.evaluate("navigate('transcribe')")
-    pg.wait_for_selector("#ctl-diarize", state="visible", timeout=10000)
+    pg.wait_for_selector("#mfd-leftcol", state="visible", timeout=10000)
     pg.wait_for_timeout(500)
     # Set state directly (not .click()) - clicking raced renderTranscribe()'s
     # async re-render on first navigation and silently lost the toggle.
@@ -306,13 +306,10 @@ with sync_playwright() as p:
         if (i >= 0) S.modelIdx = i;
         S.diarize = true;
         S.autoCorrect = true;
+        S.advTitle = 'test_meeting';
+        S.advSpeakerCount = 3;
         syncTranscribe();
     }""")
-    pg.locator("summary:has-text('Fine adjust')").click()
-    pg.wait_for_timeout(300)
-    pg.fill("#tx-title", "test_meeting")
-    pg.fill("#tx-speakers", "3")
-    pg.locator("summary:has-text('Fine adjust')").click()  # collapse - keep 02-transcribe.png uncluttered
     pg.wait_for_timeout(300)
     pg.set_input_files("#file-input", SHORT_AUDIO)
     pg.wait_for_timeout(800)
@@ -441,7 +438,7 @@ with sync_playwright() as p:
 
     # 12. Floating video panel: upload the synthetic video fixture, detach it
     pg.evaluate("navigate('transcribe')")
-    pg.wait_for_selector("#ctl-diarize", state="visible", timeout=10000)
+    pg.wait_for_selector("#mfd-leftcol", state="visible", timeout=10000)
     pg.wait_for_timeout(500)
     pg.evaluate("() => { S.diarize = false; syncTranscribe(); }")  # not needed for this job
     pg.set_input_files("#file-input", FIXTURE_VIDEO)
