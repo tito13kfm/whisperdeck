@@ -24,7 +24,7 @@ def _build_transcript(db, kind, username="contract"):
 # Expected key set from a hand-trace of the current code. Any drift from
 # this is a regression.
 EXPECTED_KEYS = {
-    "id", "source_transcript_id", "kind", "title", "filename",
+    "id", "source_transcript_id", "batch_id", "kind", "title", "filename",
     "duration_seconds", "provider", "model", "language", "status",
     "full_text", "segments", "speaker_count", "diarization_method",
     "num_speakers", "error", "corrected_text", "correction_error",
