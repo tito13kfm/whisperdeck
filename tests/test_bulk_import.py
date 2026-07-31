@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, patch
 from fastapi import HTTPException
 
 from database import Transcript, utcnow_naive
+from app import _transcription_queue_entry
 
 
 def _fake_pipeline_result(tid=1, batch_id="20260101_120000_abcdef"):
@@ -453,3 +454,34 @@ class TestBatchIdSerializer:
         assert len(data) >= 1
         found = next(r for r in data if r["id"] == t.id)
         assert found["batch_id"] == "BATCH_SUMMARY"
+
+
+class TestTranscriptionQueueEntryBatchId:
+    """_transcription_queue_entry must include batch_id for queue page grouping."""
+
+    def test_batch_id_in_queue_entry(self, db_session):
+        """Verify batch_id present in _transcription_queue_entry output.
+        Mutation check: batch_id field missing from return dict -> test fails."""
+        t = Transcript(
+            user_id=1, title="Queue Batch", filename="qb.mp3",
+            provider="moonshine", status="processing", batch_id="BATCH_QUEUE",
+        )
+        db_session.add(t)
+        db_session.commit()
+
+        entry = _transcription_queue_entry(db_session, t)
+        assert "batch_id" in entry
+        assert entry["batch_id"] == "BATCH_QUEUE"
+
+    def test_batch_id_null_in_queue_entry(self, db_session):
+        """batch_id should be None for non-batch transcripts."""
+        t = Transcript(
+            user_id=1, title="Non Batch", filename="nb.mp3",
+            provider="moonshine", status="processing", batch_id=None,
+        )
+        db_session.add(t)
+        db_session.commit()
+
+        entry = _transcription_queue_entry(db_session, t)
+        assert "batch_id" in entry
+        assert entry["batch_id"] is None
