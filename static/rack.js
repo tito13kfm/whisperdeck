@@ -2968,8 +2968,9 @@ function wireBulkControls(root) {
       renderBulk();
     }
   });
-  // delegated per-file events
-  root.addEventListener('change', (e) => {
+  // delegated per-file events — assignment (not addEventListener) so repeated
+  // renderBulk() calls don't stack handlers (match loadTranscripts at L2736).
+  root.onchange = (e) => {
     const el = e.target;
     const idx = parseInt(el.dataset.bulkIdx);
     if (isNaN(idx) || idx < 0 || idx >= S.bulkFiles.length) return;
@@ -2986,8 +2987,8 @@ function wireBulkControls(root) {
         renderBulk();
       }
     }
-  });
-  root.addEventListener('click', (e) => {
+  };
+  root.onclick = (e) => {
     const btn = e.target.closest('.bulk-remove');
     if (!btn) return;
     const idx = parseInt(btn.dataset.bulkIdx);
@@ -2995,15 +2996,18 @@ function wireBulkControls(root) {
     const removed = S.bulkFiles.splice(idx, 1);
     toast('Removed ' + (removed[0]?.file?.name || 'file'), 'info');
     renderBulk();
-  });
+  };
 }
 
 function saveBulkDefaults() {
-  api('/api/settings', {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ bulk_defaults: S.bulkDefaults }),
-  }).catch(() => { /* best-effort */ });
+  clearTimeout(saveBulkDefaults._timer);
+  saveBulkDefaults._timer = setTimeout(() => {
+    api('/api/settings', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ bulk_defaults: S.bulkDefaults }),
+    }).catch(() => { /* best-effort */ });
+  }, 500);
 }
 
 async function loadTranscripts() {
