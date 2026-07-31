@@ -3318,6 +3318,13 @@ const KIND_LABELS = {
   format_markdown: 'MD NOTE', format_email: 'EMAIL DRAFT', format_coding_prompt: 'CODE PROMPT', classify_intent: 'CLASSIFY',
 };
 
+// computeBatchAggregate lives in ./batch_aggregate.js -- kept dependency-free
+// (no DOM/global references) so it can be unit-tested directly in Node
+// without loading this whole browser script. esbuild inlines it into the
+// bundle at build time, so the served file is still one self-contained
+// script; nothing changes at runtime.
+const { computeBatchAggregate } = require('./batch_aggregate.js');
+
 async function loadQueue(opts = {}) {
   const root = $('page-queue');
   let data;
@@ -3341,29 +3348,11 @@ async function loadQueue(opts = {}) {
   // Render batch groups first, then non-batch entries
   let batchHtml = '';
   for (const [bid, group] of Object.entries(batchMap)) {
-    const counts = { completed: 0, failed: 0, partial: 0, pending: 0, processing: 0, cancelled: 0 };
-    let activeInBatch = 0, failedInBatch = 0;
-    for (const j of group) {
-      if (j.status === 'running' || j.status === 'queued' || j.status === 'waiting') activeInBatch++;
-      if (j.status === 'failed' || j.status === 'partial') failedInBatch++;
-      if (j.status === 'running') counts.processing++;
-      else if (j.status === 'queued' || j.status === 'waiting') counts.pending++;
-      else if (counts[j.status] != null) counts[j.status] = (counts[j.status] || 0) + 1;
-    }
-    const total = group.length;
-    const done = counts.completed;
-    const lit = total ? Math.max(1, Math.round(done / total * 11)) : 0;
-    const batchColor = failedInBatch > 0 && activeInBatch === 0 ? RED : GREEN;
+    const { counts, activeInBatch, failedInBatch, total, done, lit, batchColor, badgeWord, badgeClass, statusLine } =
+      computeBatchAggregate(group);
     const batchCells = [...Array(11)].map((_, i) => ({ on: i < lit, color: batchColor }));
-    const badgeWord = activeInBatch ? 'ACTIVE' : (failedInBatch > 0 ? 'FAILED' : 'DONE');
-    const badgeClass = activeInBatch ? 'running' : (failedInBatch > 0 ? 'failed' : 'done');
     const batchOpen = openBatchIds.has(bid);
     const titles = group.map(j => j.title || 'Untitled').filter(Boolean).slice(0, 3).join(', ') + (group.length > 3 ? ', ...' : '');
-    const statusLine = [counts.completed ? counts.completed + ' done' : '',
-      counts.processing ? counts.processing + ' processing' : '',
-      counts.pending ? counts.pending + ' pending' : '',
-      counts.failed ? counts.failed + ' failed' : '',
-      counts.cancelled ? counts.cancelled + ' cancelled' : ''].filter(Boolean).join(' · ');
     const totalDurSec = group.reduce((s, j) => s + (j.duration_seconds || 0), 0);
     const durText = formatDur(totalDurSec) + (totalDurSec ? ' total' : '');
 
