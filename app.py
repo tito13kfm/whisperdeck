@@ -2813,6 +2813,7 @@ def _transcription_queue_entry(db, t: Transcript) -> dict:
         "id": f"transcription-{t.id}",
         "kind": "transcription",
         "transcript_id": t.id,
+        "batch_id": t.batch_id,
         "title": t.title or t.filename,
         "status": status,
         "progress": {"done": done, "total": total},
