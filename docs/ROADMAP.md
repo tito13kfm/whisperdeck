@@ -40,6 +40,7 @@ _(nothing right now)_
 - **Windows ML / native app pivot** — DirectML could unlock real AMD GPU use; needs ONNX conversion or a native-app rewrite, not a quick win.
 - **Full-text search across transcripts** — cross-transcript content search endpoint + UI. Currently only title/filename list-filter and single-transcript in-page match exist.
 - **Admin user-management UI** — `GET /api/admin/users`, `POST /api/admin/promote`, `/api/admin/demote` are fully implemented and documented, but there's no UI anywhere in `rack.js` for them. An admin today can only list/promote/demote via raw API calls.
+- **Voice dump: multi-item stream-of-consciousness capture** — split one long dictation (e.g. a page-by-page app audit) into separate bugs/ideas/todos with a review/finalize step, instead of today's one-recording-one-note voice-note chain. Draft plan exists (`docs/plans/12-voice-dump-multi-item-capture.md`), not scheduled.
 
 ## Known accepted gaps
 
