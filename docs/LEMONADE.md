@@ -75,8 +75,8 @@ that tool is available; this file is a redundant, plain-text copy.
 
 ### Correction / summarization (JSON-mode)
 
-- `services/correction.py` defines `_JSON_MODE_PROVIDERS = {"groq", "openai", "openrouter"}`.
-  The `local` provider is NOT in that set, so it does not request JSON
+- `services/llm_client.py` defines `JSON_MODE_PROVIDERS = ("groq", "openai", "openrouter")`.
+  The `local` provider is NOT in that tuple, so it does not request JSON
   mode from the model.
 - Reasoning models (Qwen3, DeepSeek-R1, gpt-oss) emit their thinking
   trace before any JSON, and `local` does not strip it. Result: the
