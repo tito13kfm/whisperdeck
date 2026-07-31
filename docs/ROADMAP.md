@@ -42,6 +42,7 @@ _(nothing right now)_
 - **Admin user-management UI** — `GET /api/admin/users`, `POST /api/admin/promote`, `/api/admin/demote` are fully implemented and documented, but there's no UI anywhere in `rack.js` for them. An admin today can only list/promote/demote via raw API calls.
 - **Voice dump: multi-item stream-of-consciousness capture** — split one long dictation (e.g. a page-by-page app audit) into separate bugs/ideas/todos with a review/finalize step, instead of today's one-recording-one-note voice-note chain. Draft plan exists (`docs/plans/12-voice-dump-multi-item-capture.md`), not scheduled.
 - **Live conversational capture** — streaming transcription, silence-gap-triggered turns, and spoken (TTS) responses for the voice-dump flow above. Draft plan exists (`docs/plans/13-live-conversational-capture.md`), capability-mapping only, not scheduled.
+- **Studio framing** — reframe the app around record/import as the front door with an auto-routed pipeline behind it, replacing today's upfront Mode picker. Exploratory writeup checked against current code exists (`docs/planning/studio-framing.md`), not designed, tracked in issue #264.
 
 ## Known accepted gaps
 
