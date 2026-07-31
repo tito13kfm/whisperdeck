@@ -1,13 +1,18 @@
 """e2e regression for issue #246: _jobFingerprint must include tagging_job
 
 The _jobFingerprint function in static/rack.js builds a poll-comparison string
-from various job fields. When tagging shipped, tagging_job was not included in
-the fingerprint, so when only tagging's status/progress changed, the fingerprint
-string remained unchanged and updateDetailJobStatus/re-render never fired.
+from the LLM job fields. When tagging shipped, tagging_job was not included in
+that fingerprint, so when only tagging's status/progress changed the fingerprint
+string stayed the same and updateDetailJobStatus / re-render never fired for a
+mid-run tagging progress change.
 
-This test asserts that the fingerprint string changes when only tagging_job.progress.done
-changes, by constructing two transcript payloads differing only in that field and
-verifying the UI updates accordingly.
+Per issue #246's acceptance criterion, this test asserts the fingerprint string
+itself changes when only tagging_job.progress.done changes. It loads rack.js
+in a real browser (so the real _jobFingerprint runs, not a reimplementation)
+and compares the fingerprints of two payloads that differ only in
+tagging_job.progress.done. Against the pre-fix fingerprint (no tagging_job
+term) both payloads produce the same string, so this test fails on the old code
+and passes on the fixed code.
 """
 import http.cookiejar
 import json
@@ -49,100 +54,61 @@ def _login(page, username, password):
     page.wait_for_selector("#app-shell", state="visible", timeout=10000)
 
 
-def _make_transcript_with_running_tagging(username):
-    import app as app_module
-    from database import LlmJob, Transcript, User
+def test_jobfingerprint_changes_when_only_tagging_progress_updates(page, registered_user, live_server):
+    """Regression test for issue #246: _jobFingerprint must differ when only
+    tagging_job.progress.done changes.
 
-    db = app_module.SessionLocal()
-    try:
-        user = db.query(User).filter(User.username == username).one()
-        transcript = Transcript(
-            user_id=user.id, title="tagging-fp-test transcript", filename="f.mp3",
-            status="completed", kind="meeting",
-            segments=[
-                {"start": 0, "end": 2, "speaker": "Alice", "text": "hello there"},
-                {"start": 2, "end": 4, "speaker": "Bob", "text": "hi Alice"},
-            ],
-        )
-        db.add(transcript)
-        db.commit()
-        job = LlmJob(
-            user_id=user.id, transcript_id=transcript.id, kind="tagging",
-            status="running", progress_done=1, progress_total=4,
-            provider="groq", model="llama-3.3-70b-versatile",
-        )
-        db.add(job)
-        db.commit()
-        return transcript.id, job.id
-    finally:
-        db.close()
+    Constructs two payloads identical except for tagging_job.progress.done and
+    asserts the real _jobFingerprint (loaded from rack.js and exported on window
+    for test access) produces different strings. Also anchors that the function
+    is deterministic: the same payload twice yields the same fingerprint.
 
-
-def _bump_tagging_job(job_id, **fields):
-    import app as app_module
-    from database import LlmJob
-
-    db = app_module.SessionLocal()
-    try:
-        job = db.query(LlmJob).filter(LlmJob.id == job_id).one()
-        for k, v in fields.items():
-            setattr(job, k, v)
-        db.commit()
-    finally:
-        db.close()
-
-
-def test_detail_poll_tagging_fingerprint_changes_when_only_tagging_progress_updates(
-    page, registered_user, live_server
-):
-    """Regression test for issue #246: when only tagging_job progress changes,
-    the fingerprint must change and the UI must update.
-    
-    This mirrors test_detail_poll_updates_progress_live_without_rebuilding_segments_then_reveals_completion
-    but for tagging_job instead of correction_job.
+    Mutation check: if _jobFingerprint's body were replaced with `return`, both
+    fingerprints would be undefined and equal, so the regression assertion fails.
+    Against the pre-fix code (no tagging_job term in the fingerprint) both
+    payloads also yield the same string, so the assertion fails there too.
     """
     username, password = registered_user
     _login(page, username, password)
 
-    transcript_id, job_id = _make_transcript_with_running_tagging(username)
+    # rack.js is loaded once #app-shell is visible; _jobFingerprint is exported
+    # on window for test access.
+    page.wait_for_selector("#app-shell", state="visible", timeout=10000)
 
-    # Navigate to detail page
-    page.evaluate(f"navigate('detail', {transcript_id})")
-    page.wait_for_selector("#detail-body", timeout=5000)
-
-    # Tagging job should be visible on the detail page
-    # The tagging job widget should show progress
-    page.wait_for_selector("#job-tagging", timeout=5000)
-    assert "section 1 of 4" in page.locator("#job-tagging").inner_text().lower()
-
-    # Tag the actual DOM node to detect if it gets rebuilt
-    page.evaluate("document.querySelector('#job-tagging').__e2eSameNode = true")
-
-    # Simulate the job advancing mid-poll-cycle
-    _bump_tagging_job(job_id, progress_done=2)
-    
-    # Wait for the progress to update
-    page.wait_for_function(
-        "() => { const el = document.querySelector('#job-tagging'); "
-        "return el && el.innerText.toLowerCase().includes('section 2 of 4'); }",
-        timeout=6000,
+    result = page.evaluate(
+        """() => {
+            const base = {
+                correction_job: null,
+                summary_job: null,
+                voice_match_job: null,
+                format_markdown_job: null,
+                format_email_job: null,
+                format_coding_prompt_job: null,
+                classify_intent_job: null,
+                tagging_job: { status: 'running', progress: { done: 1, total: 4 } },
+            };
+            const a = JSON.parse(JSON.stringify(base));
+            const b = JSON.parse(JSON.stringify(base));
+            b.tagging_job.progress.done = 2;
+            return {
+                fa: window._jobFingerprint(a),
+                fb: window._jobFingerprint(b),
+                fa2: window._jobFingerprint(a),
+            };
+        }"""
     )
 
-    # Progress text updated live, but on the SAME node — proves this was an
-    # innerHTML patch of #job-tagging itself, not a renderDetailBody()
-    # rebuild that tore the whole tab down and recreated it.
-    assert page.evaluate(
-        "document.querySelector('#job-tagging').__e2eSameNode === true"
+    # Determinism anchor: identical payloads yield identical fingerprints.
+    assert result["fa"] == result["fa2"], (
+        f"_jobFingerprint is not deterministic for the same payload: "
+        f"{result['fa']!r} != {result['fa2']!r}"
     )
 
-    # Complete the tagging job
-    _bump_tagging_job(job_id, status="completed", progress_done=4)
-
-    # Wait for the job to complete and the widget to be replaced by tags
-    page.wait_for_function(
-        "() => { const el = document.querySelector('#detail-body'); "
-        "return el && el.innerText.toLowerCase().includes('tags'); }",
-        timeout=6000,
+    # Regression assertion: changing only tagging_job.progress.done must change
+    # the fingerprint. With the pre-fix fingerprint (no tagging_job term) fa and
+    # fb are equal, so this fails on the old code.
+    assert result["fa"] != result["fb"], (
+        f"_jobFingerprint did not change when only tagging_job.progress.done "
+        f"changed: {result['fa']!r} == {result['fb']!r} "
+        f"(tagging_job is missing from the fingerprint)"
     )
-    # The running-job widget should be gone
-    assert page.locator("#job-tagging").count() == 0

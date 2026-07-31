@@ -5867,5 +5867,5 @@ document.addEventListener('DOMContentLoaded', () => {
    works identically in both, survives future build-config changes, and
    makes the supported test-hook surface self-documenting. */
 if (typeof window !== 'undefined') {
-  Object.assign(window, { navigate, S, syncTranscribe, renderDetail, curProv, logout, api, loadCostsPage });
+  Object.assign(window, { navigate, S, syncTranscribe, renderDetail, curProv, logout, api, loadCostsPage, _jobFingerprint });
 }
