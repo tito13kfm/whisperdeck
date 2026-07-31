@@ -1,6 +1,6 @@
 # Voice dump: multi-item stream-of-consciousness capture
 
-> One-line status: Draft plan, exploratory. Not scheduled, no code written. Captured for later reference per the user's live-audit-of-WhisperDeck use case.
+> One-line status: Draft plan, exploratory. Not scheduled, no code written. Captured for later reference per the user's live-audit-of-WhisperDeck use case. Live-mode material (streaming STT, silence-gap turns, TTS) split out to `docs/plans/13-live-conversational-capture.md`.
 
 ## Motivation
 
@@ -27,6 +27,16 @@ This plan adds a second capture mode, "voice dump," that splits one recording in
 **Clarifying questions are folded into the existing structure call, not a separate round-trip.** Extend the structure prompt's requested JSON keys with an optional `"clarifying_questions": [...]` (empty when the LLM isn't unsure of anything) — no new LLM call, no new job state, no pause/resume machinery. V1 grounding is just the other items in the same dump ("is this related to the earlier note about X?"); the deferred per-project-brief phase (below) adds extra prompt context later.
 
 **User edits between job-complete and Finalize are persisted, not client-only.** A page reload before Finalize would otherwise lose an entire audit session's worth of edits. A lightweight "Save draft" action PATCHes the edited item list back into the same `LlmJob.result_json` blob — no new table, reuses the job row that already exists.
+
+## Model selection for the split/structure/clarify chain
+
+**STT and the voice-dump LLM are already separate, independently-configured slots — this isn't new architecture.** `backends/*.py` (`moonshine.py`, `groq.py`, `openai.py`, `assemblyai.py`, `replicate.py`, `local.py`, `builtin.py`) all implement `BaseProvider` (`backends/base.py:34`), whose contract is just `async def transcribe(audio_path, **kwargs)` (`base.py:46`) — this is the STT-only provider set (`backends/groq.py` is Groq's *Whisper* wrapper, not its chat API; same provider name string, different code path). LLM text generation goes through `services/llm_client.py:chat_completion()` (`llm_client.py:69`), resolved via `resolve_model(provider_name, model, feature_name)` (`llm_client.py:44`) — the same hook `correction_provider`/`correction_model` already plug into in `services/settings.py`'s `DEFAULT_SETTINGS`. A `voice_dump_provider`/`voice_dump_model` setting is one more entry in that existing pattern, not a new abstraction. This means the STT provider (Moonshine, local, default) and the model running the split/structure/clarify chain can already be two completely different providers with zero new plumbing.
+
+**Lemonade is a live option for the LLM half.** `docs/LEMONADE.md` documents WhisperDeck's existing integration with a local Lemonade server (`http://localhost:13305`, OpenAI-compatible, `Local / Custom` provider). Lemonade serves distinct model IDs simultaneously — a chat model, a Whisper model, a TTS model — all independently callable under one running server; the `LMX-Omni-5.5B-Lite` "Omni" bundle is an *alternative* single-checkpoint option, not the mechanism that enables multi-model use (Lemonade already runs several separate small models concurrently without it).
+
+**Gotcha that will actually bite: JSON mode + reasoning-model think-traces.** `services/llm_client.py:15` — `JSON_MODE_PROVIDERS = ("groq", "openai", "openrouter")` — `"local"` (Lemonade) is not in that tuple, so JSON mode is never requested from it. The voice-dump chain's segmentation and per-item structure calls both need strict JSON output (same as the existing `voice_notes.py` chain's `json_mode=True` calls). Point a reasoning model (`Qwen3-*`, `DeepSeek-R1-*`, `gpt-oss-20b`) at those calls through Lemonade and it emits a thinking trace before any JSON, which `local` doesn't strip — the parser sees `"Okay, let's start by..."` and the call fails, same failure mode `docs/LEMONADE.md` already documents for correction/summary jobs today, just at new call sites. Mitigation: point the voice-dump provider at a non-reasoning Lemonade model (`Bonsai-8B-gguf`, per the doc) or a hosted JSON-mode provider for that slot — can reuse the user's existing `correction_provider` value, or a distinct `voice_dump_provider` if a smaller/faster model is wanted for the higher call volume (segmentation + N structure calls per dump, vs. 2 calls for the existing single-note chain).
+
+**Resource-contention gotcha (verified, not assumed).** `services/queue.py:723` creates `local_provider_lock = asyncio.Semaphore(1)` once per worker tick, threaded only into the transcription chunk path (`_process_transcript_jobs`/`_run_chunk_job`, `queue.py:411/589`) — it serializes Moonshine STT calls against each other, per `backends/moonshine.py:10,23`. It does **not** extend to `services/llm_jobs.py`, which has its own independent concurrency caps (`_MAX_CONCURRENT_IO_JOBS = 2`, `_MAX_CONCURRENT_CPU_JOBS = 1`, `llm_jobs.py:44-45`) and no shared lock with the transcription side. Concretely: a Moonshine transcription (in-process, ~980MB resident) and a Lemonade LLM call (separate process, multi-GB depending on model) can run fully concurrently and unserialized on the same box, both contending for CPU. Not a correctness bug, but a real performance consideration on a single machine worth naming rather than assuming the existing lock covers it — it was never designed to.
 
 ## Proposed approach
 
@@ -74,7 +84,7 @@ The eventual want is for notes (including finalized `VoiceDumpItem`s) to automat
 
 ### Explicitly out of scope (documented, not built)
 
-- Live mid-recording clarification/interruption. Candidate mechanism if built later: a configurable silence-gap threshold (e.g. 5-10s of no speech) as the turn-end trigger — detect the pause, treat it as "the user finished this item," and only then decide whether to interject a clarifying question, rather than interrupting mid-utterance. Worth prototyping against whatever VAD/silence-detection already exists in the live-capture pipeline (`services/transcription.py`) before inventing new detection logic.
+- Live mid-recording clarification/interruption, streaming transcription, silence-gap turn-taking, and spoken (TTS) responses — the whole live-conversational cluster is designed separately in `docs/plans/13-live-conversational-capture.md`, since none of it has a consumer until live mode exists (this doc's Phase 1 is post-hoc, text-only).
 - Auto-created GitHub issues from detected bugs/feature-ideas.
 - Any live filesystem search over a project's source/docs.
 
@@ -84,7 +94,8 @@ The eventual want is for notes (including finalized `VoiceDumpItem`s) to automat
 - `services/voice_notes.py`: `_structure_from_text` extraction, new `segment_voice_dump`.
 - `services/llm_jobs.py`: `VALID_KINDS`, `IO_KINDS`, `run_voice_dump_job` dispatch.
 - `services/queue.py`: auto-enqueue gate for `kind == "voice_dump"`.
-- `services/settings.py`: `bulk_defaults.kind` allowed values; later, `projects` list for Phase 2.
+- `services/settings.py`: `bulk_defaults.kind` allowed values; new `voice_dump_provider`/`voice_dump_model` settings (mirrors `correction_provider`/`correction_model`); later, `projects` list for Phase 2.
+- `services/llm_client.py`: `resolve_model()`, `JSON_MODE_PROVIDERS` — the voice-dump provider must resolve to a non-reasoning model when pointed at `local`/Lemonade, see the JSON-mode gotcha above.
 - `services/transcription.py`: diarization-default branch for the new kind.
 - `app.py`: new voice-dump endpoints (rerun/save-draft/finalize/list), `voice_dump_job` serialization field.
 - `static/rack.js`: record-kind picker, new "Dump Review" tab + inline edit UI, new board section, reuse of `NOTE_TYPE_LABELS`/`NOTE_TYPE_COLORS`.
