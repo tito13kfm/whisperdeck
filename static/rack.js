@@ -55,6 +55,10 @@ const S = {
   assistantHistory: [],
   bankSearchResults: null,           // FTS5 search results (issue #108)
   bankSearchController: null,        // AbortController for in-flight search
+  // bulk import
+  bulkFiles: [],
+  bulkDefaults: null,                // cached from /api/settings
+  bulkSubmitting: false,
 };
 
 const LANGUAGES = ['English', 'Auto-detect', 'Spanish', 'French', 'German', 'Japanese', 'Chinese'];
@@ -409,7 +413,7 @@ function stageSegmentBar(segments, height = 16) {
 }
 
 /* ══════════════════ navigation ══════════════════ */
-const PAGES = ['dashboard', 'transcribe', 'transcripts', 'voicenotes', 'queue', 'costs', 'detail', 'voices', 'files', 'settings', 'assistant'];
+const PAGES = ['dashboard', 'transcribe', 'transcripts', 'voicenotes', 'bulk', 'queue', 'costs', 'detail', 'voices', 'files', 'settings', 'assistant'];
 
 // Rail chrome (Tape-library/Voice-roster nav badges, storage meter) is
 // otherwise only refreshed as a side effect of loadDashboard() — visiting
@@ -444,6 +448,7 @@ function navigate(page, data) {
     transcribe: renderTranscribe,
     transcripts: loadTranscripts,
     voicenotes: loadVoiceNotes,
+    bulk: loadBulk,
     queue: () => loadQueue({force: true}),
     costs: loadCostsPage,
     detail: () => loadTranscriptDetail(S.detailId),
@@ -816,6 +821,9 @@ function resetDeckState() {
   dashPollTimer = null;
   clearTimeout(queuePollTimer);
   queuePollTimer = null;
+  S.bulkFiles = [];
+  S.bulkDefaults = null;
+  S.bulkSubmitting = false;
   detailData = null;
   bankListCache = [];
   seedClips = {};
@@ -2677,6 +2685,329 @@ async function discardVoiceNote(id) {
   if (!(await styledConfirm('Discard this voice note? The transcript stays.'))) return;
   try { await api('/api/voice-notes/' + id, { method: 'DELETE' }); toast('Voice note discarded'); loadVoiceNotes(); }
   catch (e) { toast(e.message, 'error'); }
+}
+
+/* ══════════════════ bulk import page ══════════════════ */
+const DEFAULT_BULK_DEFAULTS = {
+  provider: 'moonshine', model: '', language: 'auto',
+  diarize: false, auto_correct: true, kind: 'meeting', num_speakers: null,
+};
+
+async function loadBulk() {
+  if (!S.user) { showLogin(); return; }
+  const root = $('page-bulk');
+  root.innerHTML = '<div style="text-align:center;padding:60px"><div class="t-title">Loading Bulk Import…</div></div>';
+  try {
+    await ensureProviders();
+    const settings = await api('/api/settings');
+    S.bulkDefaults = settings.bulk_defaults || DEFAULT_BULK_DEFAULTS;
+    const defaultProvId = S.bulkDefaults.provider || 'moonshine';
+    const provIdx = S.providers.findIndex(p => p.id === defaultProvId);
+    if (provIdx >= 0) {
+      S.providerIdx = provIdx;
+      await fetchModelsFor(provIdx);
+    }
+    renderBulk();
+  } catch (e) {
+    toast(e.message, 'error');
+    root.innerHTML = '<div class="empty-unit">Failed to load Bulk Import page: ' + escapeHtml(e.message) + '</div>';
+  }
+}
+
+function renderBulk() {
+  const root = $('page-bulk');
+  const prov = curProv();
+  const n = S.bulkFiles.length;
+
+  root.innerHTML = `
+    <div class="page-head">
+      <h1 class="t-title">Bulk Import</h1>
+      <div class="page-status page-status--ok">${n ? n + ' file' + (n !== 1 ? 's' : '') : 'No files loaded'}</div>
+    </div>
+    <div class="unit" style="padding:24px;margin-bottom:14px">
+      <div id="bulk-drop" style="border:2px dashed var(--edge);border-radius:3px;padding:40px 20px;text-align:center;cursor:pointer;transition:border-color 0.2s">
+        <div class="t-cap" style="font-size:11.5px;letter-spacing:0.08em;margin-bottom:4px">Drop audio files here — or click to browse</div>
+        <div style="font-family:var(--f-mono);font-size:9px;color:var(--label-faint);letter-spacing:0.04em">MP3 · WAV · M4A · FLAC · OGG · MP4 · WEBM</div>
+      </div>
+      <input type="file" id="bulk-file-input" multiple accept=".mp3,.wav,.m4a,.flac,.ogg,.mp4,.webm" style="display:none">
+    </div>
+    ${n ? `
+    <div class="unit" style="margin-bottom:14px">
+      <div style="padding:18px 34px 14px;border-bottom:1px solid var(--edge)">
+        <div class="t-unit" style="margin-bottom:12px">Global defaults</div>
+        <div style="display:flex;flex-wrap:wrap;gap:12px;align-items:end">
+          <div class="field" style="min-width:140px">
+            <label class="t-label">Provider</label>
+            <select id="bulk-provider" class="inp">${(S.providers || []).map((p, i) =>
+              '<option value="' + i + '" ' + (p.id === (S.bulkDefaults.provider || 'moonshine') ? 'selected' : '') + (p.ready ? '' : ' disabled') + '>' + escapeHtml(p.name) + (p.ready ? '' : ' (unavailable)') + '</option>'
+            ).join('')}</select>
+          </div>
+          <div class="field" style="min-width:160px">
+            <label class="t-label">Model</label>
+            <select id="bulk-model" class="inp">${prov.models.map((m, i) =>
+              '<option value="' + i + '" ' + (m === S.bulkDefaults.model ? 'selected' : '') + '>' + escapeHtml(m) + '</option>'
+            ).join('')}</select>
+          </div>
+          <div class="field" style="min-width:110px">
+            <label class="t-label">Language</label>
+            <select id="bulk-language" class="inp">${LANGUAGES.map((l, i) =>
+              '<option value="' + i + '" ' + (l === (S.bulkDefaults.language === 'auto' ? 'Auto-detect' : LANGUAGES.find(x => x.toLowerCase().slice(0, 2) === S.bulkDefaults.language) || 'Auto-detect') ? 'selected' : '') + '>' + escapeHtml(l) + '</option>'
+            ).join('')}</select>
+          </div>
+          <div class="field" style="min-width:100px">
+            <label class="t-label">Kind</label>
+            <select id="bulk-kind" class="inp">
+              <option value="meeting" ${S.bulkDefaults.kind === 'meeting' ? 'selected' : ''}>Meeting</option>
+              <option value="dictation" ${S.bulkDefaults.kind === 'dictation' ? 'selected' : ''}>Dictation</option>
+              <option value="voice_note" ${S.bulkDefaults.kind === 'voice_note' ? 'selected' : ''}>Voice Note</option>
+            </select>
+          </div>
+          <div class="field">
+            <label class="t-label">&nbsp;</label>
+            <label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer">
+              <input type="checkbox" id="bulk-diarize" ${S.bulkDefaults.diarize ? 'checked' : ''}> Diarize
+            </label>
+          </div>
+          <div class="field" id="bulk-speakers-field" style="min-width:80px;${S.bulkDefaults.diarize ? '' : 'display:none'}">
+            <label class="t-label">Speakers</label>
+            <input type="number" id="bulk-speakers" class="inp" min="1" max="12" value="${S.bulkDefaults.num_speakers || ''}" placeholder="auto" style="width:70px">
+          </div>
+          <div class="field">
+            <label class="t-label">&nbsp;</label>
+            <label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer">
+              <input type="checkbox" id="bulk-autocorrect" ${S.bulkDefaults.auto_correct ? 'checked' : ''}> Auto-correct
+            </label>
+          </div>
+          <div class="field">
+            <label class="t-label">&nbsp;</label>
+            <button class="btn" id="bulk-apply-all" style="font-size:11px;padding:6px 14px;white-space:nowrap">Apply to All</button>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="unit" style="margin-bottom:14px;padding:0">
+      <div style="padding:14px 34px;border-bottom:1px solid var(--edge)">
+        <div style="display:flex;align-items:center;justify-content:space-between">
+          <div class="t-unit">Files in batch</div>
+          <button class="btn" id="bulk-reset-all" style="font-size:11px;padding:5px 12px">Reset to Defaults</button>
+        </div>
+      </div>
+      ${S.bulkFiles.map((bf, i) => renderBulkFileRow(bf, i)).join('')}
+    </div>
+    <div class="unit" style="padding:16px 34px;display:flex;align-items:center;gap:14px">
+      <button class="key key--wide" id="bulk-start" style="font-size:13px;padding:10px 28px;${S.bulkSubmitting ? 'opacity:0.4;pointer-events:none' : ''}">
+        ${S.bulkSubmitting ? 'Submitting…' : 'Start Batch · ' + n + ' file' + (n !== 1 ? 's' : '')}
+      </button>
+      <span style="font-family:var(--f-mono);font-size:10.5px;color:var(--label-dim)">
+        Total: ${fmtBytes(S.bulkFiles.reduce((s, f) => s + f.file.size, 0))}
+      </span>
+    </div>
+    ` : '<div class="empty-unit">Drop audio files above to get started. Each file gets its own settings row.</div>'}`;
+
+  wireBulkDrop();
+  wireBulkControls(root);
+}
+
+function renderBulkFileRow(bf, i) {
+  return `
+    <div class="bulk-file-row" data-bulk-idx="${i}" style="display:flex;align-items:center;gap:10px;padding:10px 34px;border-bottom:1px solid var(--seg-edge);flex-wrap:wrap">
+      <div style="flex:1;min-width:180px">
+        <div style="font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(bf.file.name)}</div>
+        <div style="font-family:var(--f-mono);font-size:10px;color:var(--label-dim)">${fmtBytes(bf.file.size)}</div>
+      </div>
+      <input type="text" class="inp bulk-title" data-bulk-idx="${i}" data-field="title" value="${escapeHtml(bf.title || '')}" placeholder="${escapeHtml(bf.file.name.replace(/\.[^.]+$/, '') || bf.file.name)}" style="width:150px;font-size:11px">
+      <select class="inp bulk-field" data-bulk-idx="${i}" data-field="kind" style="font-size:11px;width:100px">
+        <option value="meeting" ${(bf.kind || S.bulkDefaults.kind) === 'meeting' ? 'selected' : ''}>Meeting</option>
+        <option value="dictation" ${(bf.kind || S.bulkDefaults.kind) === 'dictation' ? 'selected' : ''}>Dictation</option>
+        <option value="voice_note" ${(bf.kind || S.bulkDefaults.kind) === 'voice_note' ? 'selected' : ''}>Voice Note</option>
+      </select>
+      <select class="inp bulk-field" data-bulk-idx="${i}" data-field="language" style="font-size:11px;width:100px">
+        ${LANGUAGES.map(l => '<option value="' + l + '" ' + ((bf.language == null && l === 'Auto-detect') || bf.language === (l === 'Auto-detect' ? 'auto' : l.toLowerCase().slice(0, 2)) ? 'selected' : '') + '>' + escapeHtml(l) + '</option>').join('')}
+      </select>
+      <input type="number" class="inp bulk-field" data-bulk-idx="${i}" data-field="num_speakers" min="1" max="12" value="${bf.num_speakers != null ? bf.num_speakers : ''}" placeholder="auto" style="width:70px;font-size:11px;display:${(bf.diarize != null ? bf.diarize : S.bulkDefaults.diarize) ? '' : 'none'}">
+      <label style="display:flex;align-items:center;gap:4px;font-size:11px;cursor:pointer;margin:0;white-space:nowrap">
+        <input type="checkbox" class="bulk-field" data-bulk-idx="${i}" data-field="diarize" style="margin:0" ${(bf.diarize != null ? bf.diarize : S.bulkDefaults.diarize) ? 'checked' : ''}>Diarize
+      </label>
+      <button class="btn btn--red bulk-remove" data-bulk-idx="${i}" style="font-size:10px;padding:4px 8px">✕</button>
+    </div>`;
+}
+
+function wireBulkDrop() {
+  const drop = $('bulk-drop');
+  const input = $('bulk-file-input');
+  if (!drop || !input) return;
+  drop.addEventListener('click', () => input.click());
+  input.addEventListener('change', () => {
+    if (input.files.length) { addBulkFiles([...input.files]); input.value = ''; }
+  });
+  drop.addEventListener('dragover', (e) => { e.preventDefault(); drop.style.borderColor = 'var(--nixie)'; });
+  drop.addEventListener('dragleave', () => drop.style.borderColor = 'var(--edge)');
+  drop.addEventListener('drop', (e) => {
+    e.preventDefault();
+    drop.style.borderColor = 'var(--edge)';
+    if (e.dataTransfer.files.length) addBulkFiles([...e.dataTransfer.files]);
+  });
+}
+
+function addBulkFiles(newFiles) {
+  for (const f of newFiles) {
+    if (S.bulkFiles.some(bf => bf.file.name === f.name)) {
+      toast('Duplicate: ' + f.name + ' already in list', 'info');
+    }
+    S.bulkFiles.push({
+      file: f,
+      title: null,
+      kind: null,
+      language: null,
+      num_speakers: null,
+      diarize: null,
+    });
+  }
+  renderBulk();
+}
+
+function wireBulkControls(root) {
+  $('bulk-provider')?.addEventListener('change', async () => {
+    const idx = parseInt($('bulk-provider').value);
+    S.providerIdx = idx;
+    S.bulkDefaults.provider = S.providers[idx].id;
+    await fetchModelsFor(idx);
+    S.bulkDefaults.model = '';
+    saveBulkDefaults();
+    renderBulk();
+  });
+  $('bulk-model')?.addEventListener('change', () => {
+    S.bulkDefaults.model = curProv().models[parseInt($('bulk-model').value)] || '';
+    saveBulkDefaults();
+  });
+  $('bulk-language')?.addEventListener('change', () => {
+    const v = LANGUAGES[$('bulk-language').value];
+    S.bulkDefaults.language = v === 'Auto-detect' ? 'auto' : v.toLowerCase().slice(0, 2);
+    saveBulkDefaults();
+  });
+  $('bulk-kind')?.addEventListener('change', () => {
+    S.bulkDefaults.kind = $('bulk-kind').value;
+    saveBulkDefaults();
+  });
+  $('bulk-diarize')?.addEventListener('change', () => {
+    S.bulkDefaults.diarize = $('bulk-diarize').checked;
+    const spk = $('bulk-speakers-field');
+    if (spk) spk.style.display = S.bulkDefaults.diarize ? '' : 'none';
+    if (!S.bulkDefaults.diarize) S.bulkDefaults.num_speakers = null;
+    saveBulkDefaults();
+  });
+  $('bulk-speakers')?.addEventListener('change', () => {
+    const v = $('bulk-speakers').value;
+    S.bulkDefaults.num_speakers = v ? parseInt(v) : null;
+    saveBulkDefaults();
+  });
+  $('bulk-autocorrect')?.addEventListener('change', () => {
+    S.bulkDefaults.auto_correct = $('bulk-autocorrect').checked;
+    saveBulkDefaults();
+  });
+  $('bulk-apply-all')?.addEventListener('click', () => {
+    for (const bf of S.bulkFiles) {
+      bf.kind = S.bulkDefaults.kind;
+      bf.language = null;
+      bf.num_speakers = S.bulkDefaults.num_speakers;
+      bf.diarize = S.bulkDefaults.diarize;
+      bf.title = null;
+    }
+    renderBulk();
+    toast('Applied defaults to ' + S.bulkFiles.length + ' file' + (S.bulkFiles.length !== 1 ? 's' : ''), 'info');
+  });
+  $('bulk-reset-all')?.addEventListener('click', () => {
+    for (const bf of S.bulkFiles) {
+      bf.kind = null; bf.language = null; bf.num_speakers = null; bf.diarize = null; bf.title = null;
+    }
+    renderBulk();
+    toast('All files reset to global defaults', 'info');
+  });
+  $('bulk-start')?.addEventListener('click', async () => {
+    if (!S.bulkFiles.length || S.bulkSubmitting) return;
+    const prov = curProv();
+    const totalSize = S.bulkFiles.reduce((s, f) => s + f.file.size, 0);
+    const langLabel = S.bulkDefaults.language === 'auto' ? 'Auto-detect' : (LANGUAGES.find(l => l.toLowerCase().slice(0, 2) === S.bulkDefaults.language) || 'Auto-detect');
+    if (!(await styledConfirm(
+      'Upload ' + S.bulkFiles.length + ' file' + (S.bulkFiles.length !== 1 ? 's' : '') +
+      ' (' + fmtBytes(totalSize) + ') using ' + prov.name + '/' + (S.bulkDefaults.model || prov.models[0] || 'default') +
+      '. Language: ' + langLabel + '. Diarize: ' + (S.bulkDefaults.diarize ? 'yes' : 'no') +
+      '. Kind: ' + S.bulkDefaults.kind + '. Continue?'
+    ))) return;
+    S.bulkSubmitting = true;
+    renderBulk();
+    const form = new FormData();
+    for (const bf of S.bulkFiles) form.append('files', bf.file);
+    const settings = {
+      kind: S.bulkDefaults.kind, provider: prov.id,
+      model: S.bulkDefaults.model || prov.models[0] || '',
+      language: S.bulkDefaults.language, diarize: S.bulkDefaults.diarize,
+      auto_correct: S.bulkDefaults.auto_correct, num_speakers: S.bulkDefaults.num_speakers,
+    };
+    form.append('settings', JSON.stringify(settings));
+    const fileOverrides = S.bulkFiles.map(bf => {
+      const ov = {};
+      if (bf.kind != null) ov.kind = bf.kind;
+      if (bf.title != null) ov.title = bf.title;
+      if (bf.language != null) ov.language = bf.language;
+      if (bf.num_speakers != null) ov.num_speakers = bf.num_speakers;
+      if (bf.diarize != null) ov.diarize = bf.diarize;
+      return ov;
+    });
+    form.append('file_settings', JSON.stringify(fileOverrides));
+    try {
+      const r = await api('/api/bulk-transcribe', { method: 'POST', body: form });
+      toast('Batch ' + r.batch_id + ': ' + r.transcripts.length + ' file' + (r.transcripts.length !== 1 ? 's' : '') + ' queued', 'ok');
+      S.bulkFiles = [];
+      S.bulkSubmitting = false;
+      if (r.batch_id) navigate('queue');
+      else renderBulk();
+    } catch (e) {
+      toast(e.message, 'error');
+      S.bulkSubmitting = false;
+      renderBulk();
+    }
+  });
+  // delegated per-file events — assignment (not addEventListener) so repeated
+  // renderBulk() calls don't stack handlers (match loadTranscripts at L2736).
+  root.onchange = (e) => {
+    const el = e.target;
+    const idx = parseInt(el.dataset.bulkIdx);
+    if (isNaN(idx) || idx < 0 || idx >= S.bulkFiles.length) return;
+    if (el.classList.contains('bulk-title')) {
+      S.bulkFiles[idx].title = el.value || null;
+    } else if (el.classList.contains('bulk-field')) {
+      const field = el.dataset.field;
+      if (field === 'kind') S.bulkFiles[idx].kind = el.value;
+      else if (field === 'language') S.bulkFiles[idx].language = el.value === 'Auto-detect' ? 'auto' : el.value.toLowerCase().slice(0, 2);
+      else if (field === 'num_speakers') S.bulkFiles[idx].num_speakers = el.value ? parseInt(el.value) : null;
+      else if (field === 'diarize') {
+        S.bulkFiles[idx].diarize = el.checked;
+        if (!el.checked) S.bulkFiles[idx].num_speakers = null;
+        renderBulk();
+      }
+    }
+  };
+  root.onclick = (e) => {
+    const btn = e.target.closest('.bulk-remove');
+    if (!btn) return;
+    const idx = parseInt(btn.dataset.bulkIdx);
+    if (idx < 0 || idx >= S.bulkFiles.length) return;
+    const removed = S.bulkFiles.splice(idx, 1);
+    toast('Removed ' + (removed[0]?.file?.name || 'file'), 'info');
+    renderBulk();
+  };
+}
+
+function saveBulkDefaults() {
+  clearTimeout(saveBulkDefaults._timer);
+  saveBulkDefaults._timer = setTimeout(() => {
+    api('/api/settings', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ bulk_defaults: S.bulkDefaults }),
+    }).catch(() => { /* best-effort */ });
+  }, 500);
 }
 
 async function loadTranscripts() {
