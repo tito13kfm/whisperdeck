@@ -3278,7 +3278,6 @@ let queuePollTimer = null;
 
 // Batch state for Queue page grouping and Tape Library filtering
 S.batchSnapshots = {};       // {batch_id: {active: N, failed: N}} for transition detection
-S.expandedBatches = new Set(); // which batch groups are expanded on Queue
 S.batchFilter = '';          // current batch filter on Tape Library ('' = all, 'with-batch', 'no-batch', or batch_id)
 
 function jobStatusView(j) {
@@ -3328,6 +3327,7 @@ async function loadQueue(opts = {}) {
   refreshRailChrome(); // covers a job finishing while parked here across poll ticks
 
   const openIds = new Set([...root.querySelectorAll('details[open]')].map(d => d.dataset.qid));
+  const openBatchIds = new Set([...root.querySelectorAll('.batch-group[open]')].map(d => d.dataset.bid));
 
   // Separate transcription entries from LLM jobs for batch grouping
   const txs = jobs.filter(j => j.kind === 'transcription' && j.batch_id);
@@ -3341,25 +3341,29 @@ async function loadQueue(opts = {}) {
   // Render batch groups first, then non-batch entries
   let batchHtml = '';
   for (const [bid, group] of Object.entries(batchMap)) {
-    if (group.length < 2) { others.push(...group); continue; }
     const counts = { completed: 0, failed: 0, partial: 0, pending: 0, processing: 0, cancelled: 0 };
     let activeInBatch = 0, failedInBatch = 0;
     for (const j of group) {
       if (j.status === 'running' || j.status === 'queued' || j.status === 'waiting') activeInBatch++;
       if (j.status === 'failed' || j.status === 'partial') failedInBatch++;
-      if (counts[j.status] != null) counts[j.status] = (counts[j.status] || 0) + 1;
+      if (j.status === 'running') counts.processing++;
       else if (j.status === 'queued' || j.status === 'waiting') counts.pending++;
+      else if (counts[j.status] != null) counts[j.status] = (counts[j.status] || 0) + 1;
     }
     const total = group.length;
-    const done = counts.completed + counts.cancelled;
+    const done = counts.completed;
     const lit = total ? Math.max(1, Math.round(done / total * 11)) : 0;
-    const batchCells = [...Array(11)].map((_, i) => ({ on: i < lit, color: GREEN }));
-    const batchOpen = S.expandedBatches.has(bid);
+    const batchColor = failedInBatch > 0 && activeInBatch === 0 ? RED : GREEN;
+    const batchCells = [...Array(11)].map((_, i) => ({ on: i < lit, color: batchColor }));
+    const badgeWord = activeInBatch ? 'ACTIVE' : (failedInBatch > 0 ? 'FAILED' : 'DONE');
+    const badgeClass = activeInBatch ? 'running' : (failedInBatch > 0 ? 'failed' : 'done');
+    const batchOpen = openBatchIds.has(bid);
     const titles = group.map(j => j.title || 'Untitled').filter(Boolean).slice(0, 3).join(', ') + (group.length > 3 ? ', ...' : '');
     const statusLine = [counts.completed ? counts.completed + ' done' : '',
       counts.processing ? counts.processing + ' processing' : '',
       counts.pending ? counts.pending + ' pending' : '',
-      counts.failed ? counts.failed + ' failed' : ''].filter(Boolean).join(' · ');
+      counts.failed ? counts.failed + ' failed' : '',
+      counts.cancelled ? counts.cancelled + ' cancelled' : ''].filter(Boolean).join(' · ');
     const totalDurSec = group.reduce((s, j) => s + (j.duration_seconds || 0), 0);
     const durText = formatDur(totalDurSec) + (totalDurSec ? ' total' : '');
 
@@ -3368,8 +3372,10 @@ async function loadQueue(opts = {}) {
     if (snap && snap.active > 0 && activeInBatch === 0) {
       if (failedInBatch > 0) {
         toast(`Batch complete with ${failedInBatch} failure${failedInBatch !== 1 ? 's' : ''}`, 'error');
+      } else if (counts.cancelled > 0 && counts.completed === 0) {
+        toast(`Batch cancelled (${counts.cancelled} file${counts.cancelled !== 1 ? 's' : ''})`, 'info');
       } else {
-        toast(`Batch complete: ${done}/${total} files transcribed`, 'info');
+        toast(`Batch complete: ${done}/${total} files transcribed${counts.cancelled ? ' (' + counts.cancelled + ' cancelled)' : ''}`, 'info');
       }
     }
     S.batchSnapshots[bid] = { active: activeInBatch, failed: failedInBatch };
@@ -3385,7 +3391,7 @@ async function loadQueue(opts = {}) {
         ${bargraph(batchCells)}
         <div style="display:flex;flex-direction:column;align-items:flex-end;gap:3px">
           ${nixie(String(done + '/' + total))}
-          <div class="status-badge status-badge--${activeInBatch ? 'running' : 'done'}" data-word="${activeInBatch ? 'ACTIVE' : 'DONE'}">${activeInBatch ? 'ACTIVE' : 'DONE'}</div>
+          <div class="status-badge status-badge--${badgeClass}" data-word="${badgeWord}">${badgeWord}</div>
         </div>
       </summary>
       <div style="padding:12px 22px 14px 34px;border-top:1px solid var(--panel-lo);display:flex;gap:8px;flex-wrap:wrap">
@@ -3469,10 +3475,6 @@ async function loadQueue(opts = {}) {
       </div>
     </div>
     ${batchHtml + otherRows || '<div class="empty-unit">Queue idle — jobs appear here when the machine is working</div>'}`;
-
-  // Track expanded batch state for open-preservation across polls
-  root.querySelectorAll('.batch-group[open]').forEach(d => S.expandedBatches.add(d.dataset.bid));
-  root.querySelectorAll('.batch-group:not([open])').forEach(d => S.expandedBatches.delete(d.dataset.bid));
 
   // Wire batch-level actions
   root.querySelectorAll('[data-bact]').forEach(b => b.addEventListener('click', (e) => {
