@@ -3528,7 +3528,7 @@ function _jobFingerprint(t) {
   const f = (j) => j ? j.status + ':' + (j.progress ? j.progress.done : 0) : '-';
   return f(t.correction_job) + '|' + f(t.summary_job) + '|' + f(t.voice_match_job) + '|' +
     f(t.format_markdown_job) + '|' + f(t.format_email_job) + '|' + f(t.format_coding_prompt_job) + '|' +
-    f(t.classify_intent_job);
+    f(t.classify_intent_job) + '|' + f(t.tagging_job);
 }
 
 // While an LLM job is active for the open transcript, refresh quietly and
