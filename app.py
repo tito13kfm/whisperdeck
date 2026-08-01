@@ -49,10 +49,12 @@ from services.correction import extract_hotwords_from_doc
 from services.model_catalog import get_correction_models
 from services.llm_jobs import (
     enqueue_llm_job, enqueue_auto_correction, enqueue_auto_classify, enqueue_auto_voice_note, enqueue_auto_tagging,
+    enqueue_pipeline_classify,
     serialize_llm_job,
     cancel_llm_job, rerun_llm_job, llm_worker_loop, reset_stuck_llm_jobs,
     dismiss_llm_job, clear_finished_llm_jobs,
 )
+from services.classification import effective_kind
 from services.relabel import record_relabel, latest_relabel, clear_relabel_history
 from backends import list_providers, get_provider, LOCAL_PROVIDERS
 from services.security import (
@@ -363,14 +365,15 @@ def _serialize_transcript(db: Session, t: Transcript, *, jobs_map: dict[tuple[in
 
 def _dictation_job_fields(jobs_map: dict[tuple[int, str], LlmJob], t: Transcript) -> dict:
     """format_*_job / classify_intent_job / classify_intent_hint /
-    voice_note_job / tagging_job — kind-gated, but every field is always
-    present (null for kinds that can never have that job). The shape is
-    uniform across all kinds so the frontend doesn't have to switch on
-    kind to read the response (test_meeting_and_dictation_have_same_job_field_names
-    pins this). `tagging_job` is uniform because tagging runs on every
-    kind, not just one."""
+    voice_note_job / tagging_job — gated on effective_kind() (design
+    decision 11), but every field is always present (null for kinds that
+    can never have that job). The shape is uniform across all kinds so the
+    frontend doesn't have to switch on kind to read the response
+    (test_all_kinds_have_same_job_field_names pins this). `tagging_job` is
+    uniform because tagging runs on every kind, not just one."""
     tagging_job = jobs_map.get((t.id, "tagging"))
-    if t.kind == "dictation":
+    kind = effective_kind(t)
+    if kind == "dictation":
         classify_job = jobs_map.get((t.id, "classify_intent"))
         return {
             "format_markdown_job": serialize_llm_job(jobs_map[(t.id, "format_markdown")]) if (t.id, "format_markdown") in jobs_map else None,
@@ -387,7 +390,7 @@ def _dictation_job_fields(jobs_map: dict[tuple[int, str], LlmJob], t: Transcript
             "voice_note_job": None,
             "tagging_job": serialize_llm_job(tagging_job) if tagging_job else None,
         }
-    if t.kind == "voice_note":
+    if kind == "voice_note":
         vn_job = jobs_map.get((t.id, "voice_note"))
         return {
             "format_markdown_job": None, "format_email_job": None, "format_coding_prompt_job": None,
@@ -1051,6 +1054,28 @@ async def _run_transcription_pipeline(
     forced off here, server-side, rather than trusting the client to have
     sent diarize=false. Enforced once at this convergence point so it can't
     be bypassed by calling either entry point directly."""
+    # "auto" (design decision 11) defers kind to the pipeline classifier —
+    # store a placeholder kind (never read while classification_status is
+    # "pending", see effective_kind()) and leave classification_status at
+    # its "pending" starting point. An explicit kind is a manual override,
+    # recorded as such rather than left to the column default so callers of
+    # this function never need to know the default happens to agree.
+    #
+    # This function is also the retranscribe entry point (source_transcript_id
+    # is set only there), which always passes an already-resolved kind, never
+    # "auto" — deliberately not stamping classification_status on that path:
+    # #271 owns deciding whether a retranscribed child re-runs classification
+    # (auto-classified parent) or carries an override forward unchanged
+    # (design decision 9), and stamping "override" here unconditionally would
+    # leave #271 fighting this line instead of a clean column default.
+    is_retranscribe = source_transcript_id is not None
+    if kind == "auto":
+        classification_status = "pending"
+        kind = "meeting"
+    elif not is_retranscribe:
+        classification_status = "override"
+    else:
+        classification_status = None  # leave column default; #271's territory
     if kind in ("dictation", "voice_note"):
         diarize = False
     if capture_source not in (None, "live_stereo"):
@@ -1209,6 +1234,8 @@ async def _run_transcription_pipeline(
             transcript.duration_seconds = duration_seconds
             transcript.source_transcript_id = source_transcript_id
             transcript.batch_id = batch_id
+            if classification_status is not None:
+                transcript.classification_status = classification_status
             db.commit()
         except Exception:
             _discard_stereo_copy()
@@ -1234,6 +1261,8 @@ async def _run_transcription_pipeline(
         transcript.source_transcript_id = source_transcript_id
         transcript.batch_id = batch_id
         transcript.kind = kind
+        if classification_status is not None:
+            transcript.classification_status = classification_status
         transcript.num_speakers = num_speakers
         transcript.stereo_audio_path = stereo_audio_path
         db.commit()
@@ -1259,22 +1288,28 @@ async def _run_transcription_pipeline(
                 print(f"[diarization] non-fatal failure for transcript {transcript.id}: {e}")
 
         # Post-hoc correction pass — queued as a background LlmJob (visible
-        # on the Queue screen) instead of blocking this response.
-        # Voice-note transcripts get a different post-pipeline set: the
-        # voice-note chain IS the post-pipeline. They don't want
-        # correction (the structure call already cleans up prose) and
-        # they don't want classify_intent (that's a dictation-only
-        # format-tab hint). Both enqueue helpers no-op on wrong kind
-        # anyway, but skipping the call sites is the cheap belt-and-
-        # braces so a future change to one helper can't quietly
-        # cross-pollinate the wrong kind's flow.
+        # on the Queue screen) instead of blocking this response. Runs
+        # unconditionally of kind now (design decision 11): classification
+        # needs corrected text (decision 2) even for a not-yet-classified
+        # 'auto' transcript, and voice_note no longer opts out. Only the
+        # auto_correct user setting gates it. enqueue_auto_classify and the
+        # voice-note-chain enqueue below both no-op on the wrong kind via
+        # effective_kind(), so calling them unconditionally is safe.
         if auto_correct is None:
             auto_correct = user_settings.get("auto_correct", True)
-        if kind != "voice_note":
-            if auto_correct:
-                enqueue_auto_correction(db, transcript, user_settings)
-            enqueue_auto_classify(db, transcript, user_settings)
+        if auto_correct:
+            enqueue_auto_correction(db, transcript, user_settings)
         else:
+            # No correction pass means correction-completion (the usual
+            # classify_pipeline trigger, services/llm_jobs.py's "correction"
+            # branch) never fires — trigger classification directly instead,
+            # or an auto-kind transcript would stay pending forever
+            # (issue #268 comment 2's gap). No-ops via its own status guard
+            # when kind was explicitly chosen (classification_status is
+            # already 'override', never 'pending').
+            enqueue_pipeline_classify(db, transcript, user_settings)
+        enqueue_auto_classify(db, transcript, user_settings)
+        if effective_kind(transcript) == "voice_note":
             enqueue_auto_voice_note(db, transcript, user_settings)
         # Tagging fires for every kind — keep this site in lockstep
         # with services/queue.py:_finalize_if_done (issue #171).
@@ -1308,8 +1343,8 @@ async def transcribe_audio(
     current_user: User = Depends(get_current_user),
 ):
     """Upload and transcribe an audio file."""
-    if kind not in ("meeting", "dictation", "voice_note"):
-        raise HTTPException(status_code=400, detail="kind must be 'meeting', 'dictation', or 'voice_note'")
+    if kind not in ("meeting", "dictation", "voice_note", "auto"):
+        raise HTTPException(status_code=400, detail="kind must be 'meeting', 'dictation', 'voice_note', or 'auto'")
     # Save uploaded file
     file_ext = os.path.splitext(file.filename or "audio.mp3")[1] or ".mp3"
     safe_name = f"{utcnow_naive().strftime('%Y%m%d_%H%M%S')}_{hash(file.filename or 'audio')}{file_ext}"
@@ -1385,10 +1420,10 @@ async def bulk_transcribe(
     for idx, override in enumerate(per_file_overrides):
         if not isinstance(override, dict):
             raise HTTPException(status_code=400, detail=f"file_settings[{idx}] must be an object")
-        if "kind" in override and override["kind"] not in ("meeting", "dictation", "voice_note"):
+        if "kind" in override and override["kind"] not in ("meeting", "dictation", "voice_note", "auto"):
             raise HTTPException(
                 status_code=400,
-                detail=f"file_settings[{idx}].kind must be 'meeting', 'dictation', or 'voice_note'",
+                detail=f"file_settings[{idx}].kind must be 'meeting', 'dictation', 'voice_note', or 'auto'",
             )
         if "provider" in override:
             try:
@@ -1401,8 +1436,8 @@ async def bulk_transcribe(
 
     # Validate kind
     kind = global_settings.get("kind", "meeting")
-    if kind not in ("meeting", "dictation", "voice_note"):
-        raise HTTPException(status_code=400, detail="kind must be 'meeting', 'dictation', or 'voice_note'")
+    if kind not in ("meeting", "dictation", "voice_note", "auto"):
+        raise HTTPException(status_code=400, detail="kind must be 'meeting', 'dictation', 'voice_note', or 'auto'")
 
     # Validate provider
     provider = global_settings.get("provider", "moonshine")
@@ -1943,6 +1978,10 @@ async def update_transcript(transcript_id: int, data: dict = Body(...), db: Sess
         if data["kind"] != t.kind and t.status == "processing":
             raise HTTPException(status_code=409, detail="Cannot change mode while transcription is running")
         t.kind = data["kind"]
+        # Explicitly picking a kind is a manual override (design decision 5)
+        # — must supersede any classification in flight (pending/uncertain/
+        # failed), even if the value happens to match the placeholder kind.
+        t.classification_status = "override"
     t.updated_at = utcnow_naive()
     db.commit()
     return _serialize_transcript(db, t, jobs_map=_batch_latest_jobs(db, [t.id]))
@@ -2353,7 +2392,7 @@ async def summarize_transcript(
     ).first()
     if not t:
         raise HTTPException(status_code=404, detail="Transcript not found")
-    if t.kind == "voice_note":
+    if effective_kind(t) == "voice_note":
         raise HTTPException(status_code=400, detail="Voice notes have their own structured summary — see the Notes tab; the meeting-style summary doesn't apply")
     if t.status != "completed":
         raise HTTPException(status_code=400, detail=f"Transcript {transcript_id} is not completed")
@@ -2395,8 +2434,9 @@ async def format_transcript(
     ).first()
     if not t:
         raise HTTPException(status_code=404, detail="Transcript not found")
-    if t.kind != "dictation":
-        if t.kind == "voice_note":
+    ek = effective_kind(t)
+    if ek != "dictation":
+        if ek == "voice_note":
             raise HTTPException(status_code=400, detail="Voice notes have their own structured view — see the Notes tab or Voice notes board; reformatting doesn't apply")
         raise HTTPException(status_code=400, detail="Reformatting is only available for dictation transcripts")
     if t.status != "completed":
@@ -2512,10 +2552,17 @@ async def rediarize_transcript(
     ).first()
     if not t:
         raise HTTPException(status_code=404, detail="Transcript not found")
-    if t.kind in ("dictation", "voice_note"):
-        if t.kind == "voice_note":
+    ek = effective_kind(t)
+    if ek != "meeting":
+        # Allow-list, not a blocklist (design decision 8): pending/uncertain/
+        # failed must block here too, unlike summary/reformat above — a
+        # missing or unconfident classification can never silently unlock
+        # re-diarize.
+        if ek == "voice_note":
             raise HTTPException(status_code=400, detail="Voice notes are single-speaker — re-diarize doesn't apply")
-        raise HTTPException(status_code=400, detail="Dictation transcripts are single-speaker — re-diarize doesn't apply")
+        if ek == "dictation":
+            raise HTTPException(status_code=400, detail="Dictation transcripts are single-speaker — re-diarize doesn't apply")
+        raise HTTPException(status_code=400, detail="Re-diarize isn't available yet — classification hasn't completed")
     if t.status not in ("completed", "partial"):
         raise HTTPException(status_code=400, detail=f"Transcript {transcript_id} is not completed")
     if not (t.audio_path and os.path.exists(t.audio_path)):
@@ -2545,10 +2592,16 @@ async def voice_match_transcript(
     ).first()
     if not t:
         raise HTTPException(status_code=404, detail="Transcript not found")
-    if t.kind in ("dictation", "voice_note"):
-        if t.kind == "voice_note":
+    ek = effective_kind(t)
+    if ek != "meeting":
+        # Allow-list, not a blocklist (design decision 8) — same reasoning
+        # as rediarize above, minus the diarization pre-pass condition
+        # (voice-match doesn't depend on diarization method).
+        if ek == "voice_note":
             raise HTTPException(status_code=400, detail="Voice notes are single-speaker — voice matching doesn't apply")
-        raise HTTPException(status_code=400, detail="Dictation transcripts are single-speaker — voice matching doesn't apply")
+        if ek == "dictation":
+            raise HTTPException(status_code=400, detail="Dictation transcripts are single-speaker — voice matching doesn't apply")
+        raise HTTPException(status_code=400, detail="Voice matching isn't available yet — classification hasn't completed")
     if not (t.audio_path and os.path.exists(t.audio_path)):
         raise HTTPException(status_code=400, detail="No stored audio for this transcript")
     job = enqueue_llm_job(db, current_user.id, transcript_id, "voice_match", "", "")
@@ -2697,7 +2750,7 @@ async def rerun_voice_note_chain(
     ).first()
     if not t:
         raise HTTPException(status_code=404, detail="Transcript not found")
-    if t.kind != "voice_note":
+    if effective_kind(t) != "voice_note":
         raise HTTPException(status_code=400, detail="Voice-note chain only applies to voice_note transcripts")
     if t.status not in ("completed", "partial"):
         raise HTTPException(status_code=400, detail=f"Transcript {transcript_id} is not completed")

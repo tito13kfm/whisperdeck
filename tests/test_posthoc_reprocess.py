@@ -82,6 +82,32 @@ def test_retranscribe_creates_new_row_and_keeps_original(client, db_session):
     assert old.full_text == "first pass"
 
 
+def test_retranscribe_child_classification_status_not_forced_by_268(client, db_session):
+    """Issue #268 introduces the 'auto' kind sentinel for fresh uploads, but
+    retranscribe (source_transcript_id set) never passes kind='auto' — its
+    child must land at the plain column default ('override'), not have
+    #268's upload-path logic silently stamp a value that would block #271's
+    real carry-forward/reclassify decision (design decision 9) later.
+    Regression guard for a real review finding, not yet observably different
+    from #268's actual (guarded) behavior -- exists to catch a future
+    accidental removal of the source_transcript_id guard."""
+    client.put("/api/settings", json={"auto_correct": False})
+    original = _upload(client, text="first pass").json()
+    parent = db_session.query(Transcript).filter(Transcript.id == original["id"]).first()
+    parent.classification_status = "success"
+    db_session.commit()
+
+    p1, p2, p3 = _pipeline_patches(text="second pass")
+    with p1, p2, p3:
+        r = client.post(
+            f"/api/transcripts/{original['id']}/retranscribe",
+            data={"provider": "groq", "model": "whisper-large-v3"},
+        )
+    assert r.status_code == 200
+    child = db_session.query(Transcript).filter(Transcript.id == r.json()["id"]).first()
+    assert child.classification_status == "override"
+
+
 def test_retranscribe_chain_sets_source_transcript_id_to_root(client, db_session):
     client.put("/api/settings", json={"auto_correct": False})
     original = _upload(client, text="first pass").json()

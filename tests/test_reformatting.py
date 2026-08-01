@@ -246,6 +246,24 @@ def test_meeting_upload_does_not_enqueue_classify_intent_job(client):
     assert runs == []
 
 
+def test_enqueue_auto_classify_no_ops_while_pending_even_if_kind_is_dictation(db_session):
+    """effective_kind(), not raw kind, gates enqueue_auto_classify (design
+    decision 11) -- a placeholder/stale kind value on a still-pending
+    transcript must never trigger the dictation reformat hint."""
+    from database import User
+    from services.llm_jobs import enqueue_auto_classify
+    user = User(username="pending_classify", password_hash="x", password_salt="y")
+    db_session.add(user)
+    db_session.commit()
+    t = Transcript(
+        user_id=user.id, title="t", filename="t.mp3", status="completed",
+        full_text="x", kind="dictation", classification_status="pending",
+    )
+    db_session.add(t)
+    db_session.commit()
+    assert enqueue_auto_classify(db_session, t, {}) is None
+
+
 def test_format_route_rejects_meeting_transcript(client):
     """A meeting transcript accepting a format job would burn an LLM call
     into a result no UI surface can show (only the Format tab renders it,

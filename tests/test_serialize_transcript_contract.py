@@ -108,6 +108,31 @@ def test_classification_state_defaults_to_override(db_session):
     assert out["classification_provenance"] is None
 
 
+def test_pending_transcript_gets_meeting_shaped_job_fields(db_session):
+    """_dictation_job_fields must branch on effective_kind(), not raw kind
+    (design decision 11) -- a placeholder kind on a still-pending 'auto'
+    transcript must not surface a stray classify_intent job under
+    classify_intent_job, since no kind-gated job should have been dispatched
+    for it while unclassified (routes to the same branch as meeting).
+    Uses a real LlmJob row (not just "is the field None") so the assertion
+    actually discriminates between the dictation branch and the fallback
+    branch -- both would show None here if no job existed at all."""
+    from database import LlmJob
+    user = User(username="contract-pending", password_hash="x", password_salt="y")
+    db_session.add(user)
+    db_session.commit()
+    t = Transcript(
+        user_id=user.id, title="c", filename="c.mp3", kind="dictation",
+        classification_status="pending", status="processing", full_text="", segments=[],
+    )
+    db_session.add(t)
+    db_session.commit()
+    db_session.add(LlmJob(user_id=user.id, transcript_id=t.id, kind="classify_intent", provider="local_llm", model="m", status="pending"))
+    db_session.commit()
+    out = _serialize_transcript(db_session, t, jobs_map=_batch_latest_jobs(db_session, [t.id]))
+    assert out["classify_intent_job"] is None, "a pending transcript must not surface classify_intent_job even if a stray job row exists"
+
+
 def test_include_relabel_adds_only_last_relabel_key(db_session):
     user, t = _build_transcript(db_session, kind="meeting")
     base = _serialize_transcript(db_session, t, jobs_map=_batch_latest_jobs(db_session, [t.id]))
