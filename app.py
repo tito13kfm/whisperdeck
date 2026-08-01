@@ -192,10 +192,16 @@ async def enforce_csrf(request: Request, call_next):
         # cookie/session-authenticated, so it isn't CSRF-exploitable -- a
         # cross-origin page can't attach an Authorization header on the
         # victim's behalf the way it can rely on an ambient cookie. Skip
-        # the CSRF check only when a bearer token is present; whether that
+        # the CSRF check only for the one route that actually honors a
+        # bearer token for auth (/api/transcribe); every other /api/*
+        # route ignores the header entirely, so exempting them here would
+        # only widen the CSRF-skip surface for no reason. Whether the
         # token is actually valid is decided downstream by whichever auth
         # dependency the route uses (still 401s on a bad or unhonored token).
-        has_bearer = (request.headers.get("authorization") or "").lower().startswith("bearer ")
+        has_bearer = (
+            request.url.path == "/api/transcribe"
+            and (request.headers.get("authorization") or "").lower().startswith("bearer ")
+        )
         if not has_bearer:
             csrf = request.headers.get("x-csrf-token") or ""
             if not validate_csrf_token(request.session, csrf):
@@ -295,9 +301,11 @@ def get_current_user_or_device(request: Request, db: Session = Depends(get_db)) 
     since every other route keeps session-only auth."""
     user = _resolve_session_user(request, db)
     if user:
+        request.state.device_authenticated = False
         return user
     user = _resolve_device_token_user(request, db)
     if user:
+        request.state.device_authenticated = True
         return user
     raise HTTPException(status_code=401, detail="Not logged in")
 
@@ -1370,7 +1378,7 @@ async def transcribe_audio(
     """Upload and transcribe an audio file."""
     if kind not in ("meeting", "dictation", "voice_note"):
         raise HTTPException(status_code=400, detail="kind must be 'meeting', 'dictation', or 'voice_note'")
-    is_device_call = (request.headers.get("authorization") or "").lower().startswith("bearer ")
+    is_device_call = getattr(request.state, "device_authenticated", False)
     if is_device_call and not rate_limiter.check(f"device-upload:{current_user.id}", max_requests=30, window_seconds=3600):
         raise HTTPException(status_code=429, detail="Too many device uploads, try again later")
     # Save uploaded file

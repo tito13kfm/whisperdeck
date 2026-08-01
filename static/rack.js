@@ -5735,7 +5735,7 @@ async function loadSettingsPage() {
       <div class="t-cap" style="font-size:10.5px;letter-spacing:0.14em;margin:0 0 8px 36px">Device token — headless capture devices</div>
       <div class="unit unit--svc" style="border-radius:3px;padding:16px 34px;display:flex;flex-direction:column;gap:12px">
         <div style="font-size:11.5px;color:var(--label-dim)">Lets a device with no browser (e.g. a standalone recorder) upload directly to /api/transcribe using a bearer token instead of logging in. Regenerating invalidates the previous token immediately.</div>
-        <div id="device-token-status" style="font-family:var(--f-mono);font-size:11.5px;color:var(--label)">${deviceToken.has_token ? `Token active since ${new Date(deviceToken.created_at).toLocaleString()}` : 'No token generated'}</div>
+        <div id="device-token-status" style="font-family:var(--f-mono);font-size:11.5px;color:var(--label)">${deviceToken.has_token ? `Token active since ${new Date(deviceToken.created_at + 'Z').toLocaleString()}` : 'No token generated'}</div>
         <div id="device-token-value" style="display:none;font-family:var(--f-mono);font-size:11.5px;background:var(--input);border:1px solid var(--input-edge);color:var(--label);padding:8px;border-radius:2px;word-break:break-all"></div>
         <div style="display:flex;gap:8px">
           <button id="device-token-generate" style="font-family:var(--f-cond);font-weight:600;font-size:12px;text-transform:uppercase;background:var(--input);border:1px solid var(--input-edge);color:var(--label);padding:8px 14px;border-radius:2px;cursor:pointer">${deviceToken.has_token ? 'Regenerate' : 'Generate'}</button>
@@ -5922,8 +5922,11 @@ async function loadSettingsPage() {
       const valueBox = $('device-token-value');
       valueBox.textContent = result.token;
       valueBox.style.display = 'block';
+      $('device-token-status').textContent =
+        `Token active since ${new Date(result.created_at + 'Z').toLocaleString()}`;
+      $('device-token-generate').textContent = 'Regenerate';
+      $('device-token-revoke').disabled = false;
       toast('Device token generated. Copy it now, it will not be shown again.', 'success');
-      loadSettingsPage();
     } catch (e) { toast(e.message, 'error'); }
   });
   $('device-token-revoke').addEventListener('click', async () => {
