@@ -104,18 +104,22 @@ score). None are retroactively reclassified. All existing behavior for
 already-processed transcripts stays byte-for-byte the same; auto-
 classification only applies to new recordings going forward.
 
-### 8. Pending/uncertain/failed fallback: always the conservative behavior
+### 8. Pending/uncertain/failed fallback: conservative, but does not touch diarization
 
-While classification is pending, below the confidence threshold, or has
-failed, the pipeline behaves like today's Dictation: diarization stays off,
-auto-correction still runs (matches today's default-on correction), and the
-voice-note-only chain, voice-match, and rediarize stay locked until a real
-kind (accepted auto-classification or manual override) is known. The
-fallback never defaults toward the more permissive Meeting behavior — a
-missing or uncertain classification can never silently enable a speaker-
-identity-adjacent capability (diarization, voice-match). This directly
-satisfies #268's acceptance criterion that "classification failure cannot
-silently enable an unsafe capability."
+Diarization is governed solely by decision 1's pre-pass and never by
+classification status — that independence is the entire point of decision 1,
+and this fallback does not re-couple them. What actually waits on a
+confirmed `kind` (accepted auto-classification or manual override) is the
+set of capabilities that are genuinely kind-dependent: the voice-note-only
+chain, voice-match, rediarize, and reformat stay locked while classification
+is pending, below the confidence threshold, or has failed. Auto-correction
+still runs regardless (matches today's default-on behavior). The fallback
+never treats a pending/uncertain/failed classification as `voice_note` or
+`dictation` becoming true — a missing or uncertain classification can never
+silently unlock voice-match or rediarize. This satisfies #268's acceptance
+criterion that "classification failure cannot silently enable an unsafe
+capability" — read as applying to the kind-dependent capability set, not to
+diarization, which was never gated on `kind` in this design to begin with.
 
 ### 9. Retranscription semantics
 
@@ -141,6 +145,34 @@ defined order: loudnorm/denoise (#236) → VAD (#237) → chunking → transcrib
 as a separate opt-in pre-step for noisy local recordings. Each step keeps its
 own on/off setting and a safe fallback to the original audio if it fails —
 this is architectural coherence, not a forced always-on bundle.
+
+### 11. Guard mapping (#266's required deliverable — every current kind guard, marked changed/preserved/deprecated)
+
+Verified against current code, not the child issues' own cited line numbers
+(several have already drifted). `Transcript.kind` and `LlmJob.kind` are two
+different columns that share a name — this table is about `Transcript.kind`
+only; `LlmJob.kind` (`"correction"`, `"summary"`, `"rediarize"`, etc., the
+job-type discriminator) is untouched by this design.
+
+| Site | Current behavior | Future predicate | Change |
+|---|---|---|---|
+| `database/__init__.py:38` | `Transcript.kind` column, default `"meeting"` | unchanged value set; add `status`, `confidence`, `provenance` columns alongside (decision 6) | **changed** (additive) |
+| `app.py:1050` (`if kind in ("dictation","voice_note"): diarize = False`) | diarization forced off by kind | **decoupled from kind entirely** — replaced by decision 1's pre-pass result (`diarize = prepass.eligible`) | **changed** (re-based, not just converted) |
+| `app.py:1269-1277` (correction/classify/voice-note-chain/tagging dispatch) | `if kind != "voice_note": correction+classify else: voice-note chain`; tagging always | correction always runs; voice-note chain gated on **accepted** kind == `voice_note` (deferred while pending, triggered retroactively on acceptance, see #267 item 3 and #270/queue.py:565 sibling); tagging unchanged | **changed** |
+| `app.py:1307`, `app.py:1400` (kind validation on upload / bulk-transcribe) | must be one of the 3 kinds | add `"auto"` as a valid sentinel meaning "defer to classifier"; explicit values behave exactly as today (recorded as override) | **changed** (additive, back-compat preserved) |
+| `app.py:369-399` (`_dictation_job_fields` serializer) | branches on `t.kind` for job-field shape | branches on **effective kind** (accepted classification or override); shape/fields unchanged | **preserved** (input source changes, output contract doesn't) |
+| `app.py:2023` (retranscribe: `kind=t.kind or "meeting"`) | blindly copies old kind forward | copies **status-aware**: override carries forward unchanged; auto-classified (`success`/`uncertain`) triggers a fresh classification job against the new transcript's corrected text instead of copying the old value (decision 9) | **changed** |
+| `app.py:2352` (`if t.kind == "voice_note": block summary`) | blocks summary for voice notes | same check against **accepted** kind; while pending, `t.kind` isn't `voice_note` yet so summary stays available (no safety concern here, unlike voice-match/rediarize) | **preserved** |
+| `app.py:2394-2397` (reformat: dictation-only, voice_note gets its own message) | blocks non-dictation | same check against accepted kind; blocked while pending (unlocks once classified, not a safety issue, just not applicable yet) | **preserved** |
+| `app.py:2511-2514` (rediarize: blocks dictation/voice_note) | blocks non-meeting kinds | blocked while pending/uncertain/failed **and** while accepted kind is dictation/voice_note (decision 8); additionally requires decision 1's pre-pass having found the recording diarization-eligible | **changed** (stricter: adds the pending-block and the pre-pass condition) |
+| `app.py:2544-2547` (voice-match: blocks dictation/voice_note) | blocks non-meeting kinds | same as rediarize above, minus the pre-pass condition (voice-match doesn't depend on diarization method) | **changed** |
+| `app.py:2696` (voice-note chain rerun: requires kind == voice_note) | blocks non-voice-note | same check against accepted kind; blocked while pending | **preserved** |
+| `services/llm_jobs.py:182` (`enqueue_auto_classify`: dictation-only) | no-ops for non-dictation | same check against accepted kind; naturally no-ops during pending (this IS `classify_intent`'s dictation-only enqueue guard, distinct from the new pipeline classifier of decision 2 — do not conflate) | **preserved** |
+| `services/llm_jobs.py:203` (`enqueue_auto_voice_note`: voice_note-only) | no-ops for non-voice-note | same check against accepted kind; must be triggered retroactively once a pending transcript resolves to `voice_note` (paired with `app.py:1269-1277` above) | **changed** (retroactive trigger added) |
+| `services/queue.py:565` (chunked finalization: voice_note branch) | same voice_note check as `app.py:1269-1277`, for the chunked-completion path | same retroactive-trigger requirement, chunked path — #267 item 3's "no duplicate enqueue across inline/chunked" applies here | **changed** |
+| `services/transcription.py:187,221` (kind-specific summary/prompt selection) | branches on `transcript.kind` | branches on accepted kind; template selection logic itself unchanged | **preserved** |
+| `services/reformatting.py:88` (`classify_intent`) | dictation-only reformat-tab hint, unrelated to routing | **untouched** — explicitly out of scope, do not rename or merge with decision 2's classifier | **preserved, unrelated** |
+| `static/rack.js:1714,1727-1731,1811,4207,4246,4275,4379-4404` | mode/speaker controls, detail label, kind toggle | frontend mirror of the predicates above; owned by #269's implementation, not re-derived here | **changed** (#269's scope) |
 
 ## Explicitly out of scope (tracked separately)
 
