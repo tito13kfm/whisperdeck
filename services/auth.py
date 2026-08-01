@@ -41,6 +41,44 @@ def verify_password(password: str, salt: str, expected_hash: str) -> bool:
     return secrets.compare_digest(hash_password(password, salt), expected_hash)
 
 
+def generate_device_token() -> str:
+    return secrets.token_hex(32)
+
+
+def hash_device_token(token: str) -> str:
+    """Hash a device bearer token for storage. SHA-256, not PBKDF2, same
+    reasoning as hash_reset_token: the token is already a 256-bit random
+    value, not a low-entropy password, so slow key derivation buys nothing."""
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def set_device_token(db, user: User) -> str:
+    """Generate and store a new device token for *user*, invalidating any
+    previous one (single token per user). Returns the plaintext token,
+    the only time it is ever visible outside the request that created it."""
+    token = generate_device_token()
+    user.local_device_token_hash = hash_device_token(token)
+    user.local_device_token_created_at = utcnow()
+    db.commit()
+    return token
+
+
+def revoke_device_token(db, user: User) -> None:
+    user.local_device_token_hash = None
+    user.local_device_token_created_at = None
+    db.commit()
+
+
+def get_user_by_device_token(db, token: str) -> Optional[User]:
+    """Look up a user by their device bearer token. Returns None for an
+    empty token, a token that matches no user, or when no user has a
+    token set at all."""
+    if not token:
+        return None
+    token_hash = hash_device_token(token)
+    return db.query(User).filter(User.local_device_token_hash == token_hash).first()
+
+
 def create_user(db, username: str, password: str) -> User:
     """Create a new user. The first user (empty table) is auto-admin."""
     is_first = db.query(User).count() == 0
