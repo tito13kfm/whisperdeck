@@ -1997,18 +1997,34 @@ async def update_transcript(transcript_id: int, data: dict = Body(...), db: Sess
     if "full_text" in data:
         t.full_text = data["full_text"]
     if "kind" in data:
-        if data["kind"] not in ("meeting", "dictation", "voice_note"):
-            raise HTTPException(status_code=400, detail="kind must be 'meeting', 'dictation', or 'voice_note'")
+        if data["kind"] not in ("meeting", "dictation", "voice_note", "auto"):
+            raise HTTPException(status_code=400, detail="kind must be 'meeting', 'dictation', 'voice_note', or 'auto'")
         # The pipeline reads kind mid-job (dictation skips diarization), so a
         # flip during processing would diarize later chunks differently than
         # earlier ones. Only allow changing kind on settled transcripts.
         if data["kind"] != t.kind and t.status == "processing":
             raise HTTPException(status_code=409, detail="Cannot change mode while transcription is running")
-        t.kind = data["kind"]
-        # Explicitly picking a kind is a manual override (design decision 5)
-        # — must supersede any classification in flight (pending/uncertain/
-        # failed), even if the value happens to match the placeholder kind.
-        t.classification_status = "override"
+        if data["kind"] == "auto":
+            # Revert to auto-classification: store placeholder kind + pending
+            # status, same as _run_transcription_pipeline for a fresh 'auto'
+            # recording. Enqueue classification directly — correction
+            # already completed on this settled transcript, so the usual
+            # correction-completion trigger won't fire (issue #269 gap).
+            t.kind = "meeting"
+            t.classification_status = "pending"
+            t.classification_confidence = None
+            t.classification_provenance = None
+            t.updated_at = utcnow_naive()
+            db.commit()
+            user_settings = get_user_settings(db, current_user.id)
+            enqueue_pipeline_classify(db, t, user_settings)
+            return _serialize_transcript(db, t, jobs_map=_batch_latest_jobs(db, [t.id]))
+        else:
+            t.kind = data["kind"]
+            # Explicitly picking a kind is a manual override (design decision 5)
+            # — must supersede any classification in flight (pending/uncertain/
+            # failed), even if the value happens to match the placeholder kind.
+            t.classification_status = "override"
     t.updated_at = utcnow_naive()
     db.commit()
     return _serialize_transcript(db, t, jobs_map=_batch_latest_jobs(db, [t.id]))

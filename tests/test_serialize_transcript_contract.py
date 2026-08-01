@@ -143,3 +143,28 @@ def test_include_relabel_adds_only_last_relabel_key(db_session):
     assert with_relabel["last_relabel"] is None  # no relabel row exists
     # No other keys should differ.
     assert set(base.keys()) | {"last_relabel"} == set(with_relabel.keys())
+
+
+def test_auto_kind_pending_serialization(db_session):
+    """An auto-classified transcript in pending state serializes with
+    classification_status='pending' and the placeholder kind, not the
+    raw 'auto' value (which is never stored on the row)."""
+    user = User(username="contract-auto", password_hash="x", password_salt="y")
+    db_session.add(user)
+    db_session.commit()
+    t = Transcript(
+        user_id=user.id, title="c", filename="c.mp3", kind="meeting",
+        classification_status="pending", status="processing",
+        full_text="some text", segments=[],
+    )
+    db_session.add(t)
+    db_session.commit()
+    out = _serialize_transcript(db_session, t, jobs_map=_batch_latest_jobs(db_session, [t.id]))
+    assert out["kind"] == "meeting"
+    assert out["classification_status"] == "pending"
+    assert out["classification_confidence"] is None
+    assert out["classification_provenance"] is None
+    # _dictation_job_fields with effective_kind()=None (pending) returns
+    # meeting-shaped job fields (all dictation/voice-note fields are None).
+    assert out["classify_intent_job"] is None
+    assert out["voice_note_job"] is None

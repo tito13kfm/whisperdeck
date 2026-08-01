@@ -139,6 +139,22 @@ class TestBulkTranscribe:
         )
         assert resp.status_code == 400
 
+    def test_bulk_transcribe_auto_kind_accepted(self, client):
+        """'auto' kind in global settings — validated and passed to pipeline."""
+        settings = json.dumps({"provider": "moonshine", "kind": "auto", "language": "en"})
+        files = [
+            ("files", ("a.mp3", io.BytesIO(b"fake audio"), "audio/mpeg")),
+        ]
+        with patch("app._run_transcription_pipeline", new_callable=AsyncMock) as mock_pipeline:
+            mock_pipeline.return_value = _fake_pipeline_result(tid=1)
+            resp = client.post(
+                "/api/bulk-transcribe",
+                data={"settings": settings},
+                files=files,
+            )
+            assert resp.status_code == 200
+            assert mock_pipeline.call_args.kwargs["kind"] == "auto"
+
     def test_bulk_transcribe_no_files(self, client):
         """Assert 400 on zero files. Mutation check: no-files guard not present → test fails."""
         settings = json.dumps({"provider": "moonshine", "kind": "meeting"})
