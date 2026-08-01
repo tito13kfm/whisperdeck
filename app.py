@@ -33,6 +33,7 @@ from services.auth import (
     password_min_length, get_user_by_reset_token,
     list_usernames, generate_reset_token, reset_password,
     set_admin_status, get_all_users,
+    set_device_token, revoke_device_token,
 )
 from services.settings import get_user_settings, update_user_settings
 from services.transcription import TranscriptionService
@@ -838,6 +839,28 @@ async def get_settings(db: Session = Depends(get_db), current_user: User = Depen
 @app.put("/api/settings")
 async def put_settings(data: dict = Body(...), db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     return update_user_settings(db, current_user.id, data)
+
+
+@app.post("/api/settings/device-token")
+async def generate_device_token_route(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    """Generate (or regenerate) this user's device bearer token. Returns
+    the plaintext token once; only its hash is ever stored."""
+    token = set_device_token(db, current_user)
+    return {"token": token, "created_at": current_user.local_device_token_created_at.isoformat()}
+
+
+@app.get("/api/settings/device-token")
+async def device_token_status(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    return {
+        "has_token": bool(current_user.local_device_token_hash),
+        "created_at": current_user.local_device_token_created_at.isoformat() if current_user.local_device_token_created_at else None,
+    }
+
+
+@app.delete("/api/settings/device-token")
+async def revoke_device_token_route(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    revoke_device_token(db, current_user)
+    return {"ok": True}
 
 
 # ── Hotword Glossary ─────────────────────────────────────────────────────
