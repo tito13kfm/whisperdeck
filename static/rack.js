@@ -5638,12 +5638,13 @@ function setJackLed(id, connected) {
 
 async function loadSettingsPage() {
   const root = $('page-settings');
-  let provs, settings, health, status, localLlmCfg;
+  let provs, settings, health, status, localLlmCfg, deviceToken;
   try {
-    [provs, settings, health, status, localLlmCfg] = await Promise.all([
+    [provs, settings, health, status, localLlmCfg, deviceToken] = await Promise.all([
       api('/api/providers'), api('/api/settings'), api('/api/health'), api('/api/status'),
       // Not in the transcription provider registry — fetched separately.
       api('/api/providers/local_llm'),
+      api('/api/settings/device-token'),
     ]);
   } catch (e) { toast(e.message, 'error'); return; }
   const provMap = Object.fromEntries(provs.map(p => [p.id, p]));
@@ -5727,6 +5728,19 @@ async function loadSettingsPage() {
           <input id="llm-fmt-model-text" class="inp" style="padding:6px 8px;font-size:12px;width:250px;display:none" placeholder="model served by your endpoint">
         </div>
         <button id="llm-defaults-save" style="font-family:var(--f-cond);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:0.03em;background:var(--input);border:1px solid var(--input-edge);color:var(--label);padding:8px 14px;border-radius:2px;cursor:pointer;align-self:flex-start">Save defaults</button>
+      </div>
+    </div>
+
+    <div style="margin-top:30px">
+      <div class="t-cap" style="font-size:10.5px;letter-spacing:0.14em;margin:0 0 8px 36px">Device token — headless capture devices</div>
+      <div class="unit unit--svc" style="border-radius:3px;padding:16px 34px;display:flex;flex-direction:column;gap:12px">
+        <div style="font-size:11.5px;color:var(--label-dim)">Lets a device with no browser (e.g. a standalone recorder) upload directly to /api/transcribe using a bearer token instead of logging in. Regenerating invalidates the previous token immediately.</div>
+        <div id="device-token-status" style="font-family:var(--f-mono);font-size:11.5px;color:var(--label)">${deviceToken.has_token ? `Token active since ${new Date(deviceToken.created_at).toLocaleString()}` : 'No token generated'}</div>
+        <div id="device-token-value" style="display:none;font-family:var(--f-mono);font-size:11.5px;background:var(--input);border:1px solid var(--input-edge);color:var(--label);padding:8px;border-radius:2px;word-break:break-all"></div>
+        <div style="display:flex;gap:8px">
+          <button id="device-token-generate" style="font-family:var(--f-cond);font-weight:600;font-size:12px;text-transform:uppercase;background:var(--input);border:1px solid var(--input-edge);color:var(--label);padding:8px 14px;border-radius:2px;cursor:pointer">${deviceToken.has_token ? 'Regenerate' : 'Generate'}</button>
+          <button id="device-token-revoke" style="font-family:var(--f-cond);font-weight:600;font-size:12px;text-transform:uppercase;background:var(--input);border:1px solid var(--input-edge);color:var(--label);padding:8px 14px;border-radius:2px;cursor:pointer" ${deviceToken.has_token ? '' : 'disabled'}>Revoke</button>
+        </div>
       </div>
     </div>
 
@@ -5901,6 +5915,24 @@ async function loadSettingsPage() {
       toast(val ? 'Export directory saved' : 'Export directory cleared');
     } catch (e) { toast(e.message, 'error'); }
   }));
+
+  $('device-token-generate').addEventListener('click', async () => {
+    try {
+      const result = await api('/api/settings/device-token', { method: 'POST' });
+      const valueBox = $('device-token-value');
+      valueBox.textContent = result.token;
+      valueBox.style.display = 'block';
+      toast('Device token generated. Copy it now, it will not be shown again.', 'success');
+      loadSettingsPage();
+    } catch (e) { toast(e.message, 'error'); }
+  });
+  $('device-token-revoke').addEventListener('click', async () => {
+    try {
+      await api('/api/settings/device-token', { method: 'DELETE' });
+      toast('Device token revoked.', 'success');
+      loadSettingsPage();
+    } catch (e) { toast(e.message, 'error'); }
+  });
 
   // faceplate prefs
   $('ctl-theme').addEventListener('click', () => {
