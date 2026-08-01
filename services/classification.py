@@ -20,6 +20,18 @@ SCHEMA_VERSION = 1
 CLASSIFICATION_KINDS = ("meeting", "dictation", "voice_note")
 
 
+def effective_kind(transcript) -> str | None:
+    """The kind capability guards should actually branch on (design decision
+    8/11): `transcript.kind` only once classification has been accepted
+    (`success`) or explicitly chosen (`override`). While pending, uncertain,
+    or failed, no kind is confirmed yet — returns None so a guard checking
+    `effective_kind(t) == "voice_note"` (or `!= "meeting"`) can never be
+    fooled into treating an unresolved classification as a real kind."""
+    if transcript.classification_status in ("success", "override"):
+        return transcript.kind
+    return None
+
+
 def _text_for_classification(transcript) -> str:
     """Corrected text is the intended signal (design decision 2). Falls back
     to full_text/segments when correction hasn't run (e.g. auto_correct off,

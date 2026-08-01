@@ -199,6 +199,22 @@ def test_enqueue_auto_voice_note_kind_gating(db_session):
     assert enqueue_auto_voice_note(db_session, meeting, {}) is None
 
 
+def test_enqueue_auto_voice_note_no_ops_while_pending_even_if_kind_is_voice_note(db_session):
+    """effective_kind(), not raw kind, gates enqueue_auto_voice_note (design
+    decision 11) -- a placeholder/stale kind value on a still-pending
+    transcript must never trigger the voice-note chain."""
+    user = User(username="pending_vn", password_hash="x", password_salt="y")
+    db_session.add(user)
+    db_session.commit()
+    t = Transcript(
+        user_id=user.id, title="t", filename="t.mp3", status="completed",
+        full_text="x", segments=[], kind="voice_note", classification_status="pending",
+    )
+    db_session.add(t)
+    db_session.commit()
+    assert enqueue_auto_voice_note(db_session, t, {}) is None
+
+
 def test_enqueue_auto_voice_note_creates_prefailed_job_without_key(db_session):
     """No API key for groq saved → the job is pre-failed with the skip
     reason (the same shape enqueue_auto_correction / enqueue_auto_classify
