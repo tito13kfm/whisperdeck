@@ -28,6 +28,12 @@ DEFAULT_SETTINGS = {
     "summary_model": "gpt-oss-20b-mxfp4-GGUF",
     "format_provider": "local_llm",
     "format_model": "gpt-oss-20b-mxfp4-GGUF",
+    "classification_provider": "local_llm",
+    "classification_model": "gpt-oss-20b-mxfp4-GGUF",
+    # Conservative on purpose (design decision 3): a low-confidence guess is
+    # rejected (stored as 'uncertain', safe fallback) rather than accepted —
+    # a wrong-but-confident-looking auto-kind is worse than staying safe.
+    "classification_confidence_threshold": 0.75,
     "export_directory": "",  # empty = feature disabled (Save as .md button hidden in detail toolbar)
     "bulk_defaults": {
         "provider": "moonshine",
