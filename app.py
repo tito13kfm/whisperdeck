@@ -33,7 +33,7 @@ from services.auth import (
     password_min_length, get_user_by_reset_token,
     list_usernames, generate_reset_token, reset_password,
     set_admin_status, get_all_users,
-    set_device_token, revoke_device_token,
+    set_device_token, revoke_device_token, get_user_by_device_token,
 )
 from services.settings import get_user_settings, update_user_settings
 from services.transcription import TranscriptionService
@@ -188,11 +188,20 @@ _CSRF_SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 
 async def enforce_csrf(request: Request, call_next):
     if request.method not in _CSRF_SAFE_METHODS and request.url.path.startswith("/api/"):
-        csrf = request.headers.get("x-csrf-token") or ""
-        if not validate_csrf_token(request.session, csrf):
-            # This literal string is matched by the client retry logic in rack.js api().
-            # Keep the two in sync.
-            return JSONResponse(status_code=403, content={"detail": "Invalid or missing CSRF token"})
+        # A request bearing a device's Authorization: Bearer token is not
+        # cookie/session-authenticated, so it isn't CSRF-exploitable -- a
+        # cross-origin page can't attach an Authorization header on the
+        # victim's behalf the way it can rely on an ambient cookie. Skip
+        # the CSRF check only when a bearer token is present; whether that
+        # token is actually valid is decided downstream by whichever auth
+        # dependency the route uses (still 401s on a bad or unhonored token).
+        has_bearer = (request.headers.get("authorization") or "").lower().startswith("bearer ")
+        if not has_bearer:
+            csrf = request.headers.get("x-csrf-token") or ""
+            if not validate_csrf_token(request.session, csrf):
+                # This literal string is matched by the client retry logic in rack.js api().
+                # Keep the two in sync.
+                return JSONResponse(status_code=403, content={"detail": "Invalid or missing CSRF token"})
     return await call_next(request)
 
 
@@ -264,6 +273,33 @@ def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
     if not user:
         raise HTTPException(status_code=401, detail="Not logged in")
     return user
+
+
+def _resolve_device_token_user(request: Request, db: Session) -> User | None:
+    """Look up the user for a device bearer token, if the request carries
+    one. Kept separate from _resolve_session_user because this path is
+    only trusted on routes that explicitly opt in via
+    get_current_user_or_device below, not on get_current_user itself."""
+    auth_header = request.headers.get("authorization") or ""
+    if not auth_header.lower().startswith("bearer "):
+        return None
+    token = auth_header[len("bearer "):].strip()
+    return get_user_by_device_token(db, token)
+
+
+def get_current_user_or_device(request: Request, db: Session = Depends(get_db)) -> User:
+    """Auth dependency for the one route that must also accept a device's
+    bearer token. Session cookie is tried first so a logged-in browser tab
+    is unaffected; the bearer token is the fallback for a headless caller
+    with no cookie jar. Deliberately not the default get_current_user —
+    every other route keeps session-only auth."""
+    user = _resolve_session_user(request, db)
+    if user:
+        return user
+    user = _resolve_device_token_user(request, db)
+    if user:
+        return user
+    raise HTTPException(status_code=401, detail="Not logged in")
 
 
 # `rediarize` is in services.llm_jobs.VALID_KINDS but the serializer
@@ -1328,7 +1364,7 @@ async def transcribe_audio(
     kind: str = Form("meeting"),
     capture_source: Optional[str] = Form(None),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user_or_device),
 ):
     """Upload and transcribe an audio file."""
     if kind not in ("meeting", "dictation", "voice_note"):
