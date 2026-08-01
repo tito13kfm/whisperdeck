@@ -27,4 +27,4 @@ jobs:
         run: npm ci
 
       - name: Run verification gate
-        run: ./scripts/verify.sh
+        run: bash scripts/verify.sh
