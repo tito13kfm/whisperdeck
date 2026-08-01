@@ -62,6 +62,36 @@ def parse_build_pairs(repo_root: Path):
     return pairs
 
 
+def find_worktree_for_branch_dir(self_audit_path: Path):
+    """Self-audit files live at .omo/runs/issue-<N>/<branch-name>/self-audit.md.
+    That <branch-name> directory is conventionally named after the git branch
+    the run is on. Resolve it to the actual worktree path via `git worktree
+    list`, so citation/build checks run against the checkout that actually
+    has the new files -- regardless of which directory the script itself was
+    invoked from. Returns None if no worktree's branch matches."""
+    branch_dir = self_audit_path.resolve().parent.name
+    try:
+        proc = subprocess.run(
+            ["git", "worktree", "list", "--porcelain"],
+            capture_output=True, text=True, timeout=15,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+
+    worktree_path = None
+    for line in proc.stdout.splitlines():
+        if line.startswith("worktree "):
+            worktree_path = line[len("worktree "):].strip()
+        elif line.startswith("branch ") and worktree_path:
+            branch = line[len("branch "):].strip()
+            branch = branch.removeprefix("refs/heads/")
+            if branch == branch_dir or branch_dir in branch or branch in branch_dir:
+                return Path(worktree_path)
+    return None
+
+
 def check_build_freshness(repo_root: Path):
     findings = []
     for script_name, cmd, src, out in parse_build_pairs(repo_root):
@@ -211,9 +241,23 @@ def main():
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("self_audit_path", type=Path)
-    ap.add_argument("--repo-root", type=Path, default=Path.cwd())
+    ap.add_argument(
+        "--repo-root", type=Path, default=None,
+        help="Defaults to auto-detecting the worktree whose branch matches "
+             "the self-audit's parent directory name, falling back to CWD "
+             "if no match is found.",
+    )
     ap.add_argument("--skip-build-check", action="store_true")
     args = ap.parse_args()
+
+    if args.repo_root is None:
+        detected = find_worktree_for_branch_dir(args.self_audit_path)
+        if detected is not None:
+            print(f"Auto-detected repo root: {detected}")
+            args.repo_root = detected
+        else:
+            print(f"No matching worktree found, defaulting repo root to CWD: {Path.cwd()}")
+            args.repo_root = Path.cwd()
 
     findings = []
     if not args.skip_build_check:
