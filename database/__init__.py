@@ -36,6 +36,13 @@ class Transcript(Base):
     title = Column(String(255), nullable=False)
     filename = Column(String(255), nullable=False)
     kind = Column(String(16), default="meeting")  # meeting | dictation | voice_note — drives default diarization, summary prompt, available reformat actions, and whether the voice-note LLM chain fires
+    # Studio classification (issue #267/design 2026-08-01-studio-classification-design.md).
+    # classification_status: pending | success | uncertain | failed | override.
+    # A separate column from `status` above (transcription lifecycle) —
+    # same name would collide with an unrelated concept.
+    classification_status = Column(String(16), default="override")
+    classification_confidence = Column(Float, nullable=True)  # present only when status is success/uncertain
+    classification_provenance = Column(JSON, nullable=True)  # {provider, model, schema_version, classified_at} | {legacy_migration: true} | override metadata
     duration_seconds = Column(Float, default=0)
     provider = Column(String(64), default="groq")
     model = Column(String(64), default="whisper-large-v3-turbo")
@@ -408,6 +415,50 @@ def backfill_llm_job_result_snapshots(SessionLocal, kinds: tuple = ("correction"
         db.close()
 
 
+def classification_columns_were_absent(engine) -> bool:
+    """Must be called right after create_all() and before ensure_columns()
+    adds classification_status/_confidence/_provenance to "transcripts" —
+    that's the only moment column absence is observable. The result feeds
+    backfill_legacy_classification() later, once SessionLocal exists.
+    Every other startup ORM query (backfill_llm_job_result_snapshots,
+    populate_fts, etc.) runs after ensure_columns has already added these
+    columns, so none of them ever see a pre-#267 schema."""
+    inspector = inspect(engine)
+    if "transcripts" not in inspector.get_table_names():
+        return False  # fresh DB — create_all() already built the column
+    existing = {c["name"] for c in inspector.get_columns("transcripts")}
+    return "classification_provenance" not in existing
+
+
+def backfill_legacy_classification(SessionLocal, was_absent: bool) -> int:
+    """One-time migration for issue #267 (design decision 7): every transcript
+    that existed before classification_provenance was added becomes a
+    permanent manual-override record — status=override, no confidence,
+    provenance={legacy_migration: true}. None are retroactively classified.
+
+    `was_absent` (from classification_columns_were_absent(), captured before
+    ensure_columns() ran) is what makes this one-time: a null provenance on
+    a later restart can also mean "created after this shipped, not yet
+    classified" (once #268 introduces the 'auto' kind sentinel), which must
+    never be relabeled as legacy.
+    """
+    if not was_absent:
+        return 0
+    db = SessionLocal()
+    try:
+        count = (
+            db.query(Transcript)
+            .update(
+                {"classification_status": "override", "classification_provenance": {"legacy_migration": True}},
+                synchronize_session=False,
+            )
+        )
+        db.commit()
+        return count
+    finally:
+        db.close()
+
+
 def populate_fts(engine) -> None:
     """Backfill transcripts_fts and the segment_text column from existing data.
 
@@ -504,8 +555,12 @@ def init_db(db_path: str = "data/whisperdesk.db") -> tuple:
 
     migrated_tables = migrate_schema(engine)
     Base.metadata.create_all(engine)
+    # Must be captured here — right after create_all(), right before
+    # ensure_columns() adds these same columns below. Any later check would
+    # always see them present and never detect a genuinely pre-#267 database.
+    _classification_cols_were_absent = classification_columns_were_absent(engine)
     ensure_columns(engine, "users", {"settings": "JSON"})
-    ensure_columns(engine, "transcripts", {"audio_path": "TEXT", "diarize_requested": "BOOLEAN", "num_speakers": "INTEGER", "processed_size_bytes": "INTEGER", "corrected_text": "TEXT", "correction_error": "TEXT", "correction_model": "TEXT", "queue_dismissed": "BOOLEAN DEFAULT 0", "source_transcript_id": "INTEGER", "batch_id": "TEXT", "video_path": "TEXT", "kind": "TEXT DEFAULT 'meeting'", "diarization_method": "TEXT", "stereo_audio_path": "TEXT", "segment_text": "TEXT"})
+    ensure_columns(engine, "transcripts", {"audio_path": "TEXT", "diarize_requested": "BOOLEAN", "num_speakers": "INTEGER", "processed_size_bytes": "INTEGER", "corrected_text": "TEXT", "correction_error": "TEXT", "correction_model": "TEXT", "queue_dismissed": "BOOLEAN DEFAULT 0", "source_transcript_id": "INTEGER", "batch_id": "TEXT", "video_path": "TEXT", "kind": "TEXT DEFAULT 'meeting'", "diarization_method": "TEXT", "stereo_audio_path": "TEXT", "segment_text": "TEXT", "classification_status": "TEXT DEFAULT 'override'", "classification_confidence": "REAL", "classification_provenance": "JSON"})
     ensure_columns(engine, "llm_jobs", {"dismissed": "BOOLEAN DEFAULT 0", "result_json": "JSON", "attempts": "INTEGER DEFAULT 0"})
     ensure_nullable_llm_job_transcript_id(engine)
     ensure_columns(engine, "summaries", {"provider": "TEXT"})
@@ -583,6 +638,7 @@ def init_db(db_path: str = "data/whisperdesk.db") -> tuple:
     populate_fts(engine)
     SessionLocal = sessionmaker(bind=engine)
     backfill_llm_job_result_snapshots(SessionLocal)
+    backfill_legacy_classification(SessionLocal, _classification_cols_were_absent)
 
     # First-user-is-admin migration: if any user exists and no admin exists,
     # promote the earliest-created user to admin.
@@ -605,4 +661,5 @@ def init_db(db_path: str = "data/whisperdesk.db") -> tuple:
 __all__ = [
     "Base", "User", "Transcript", "Summary", "VoiceNote", "VoiceProfile", "VoiceClip", "ProviderConfig", "TranscriptionJob", "LlmJob", "RelabelHistory", "HotwordEntry", "TranscriptTag",
     "init_db", "migrate_schema", "backfill_user_id", "ensure_columns", "ensure_nullable_llm_job_transcript_id", "backfill_llm_job_result_snapshots",
+    "backfill_legacy_classification", "classification_columns_were_absent",
 ]

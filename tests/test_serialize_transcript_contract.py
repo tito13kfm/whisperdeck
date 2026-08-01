@@ -24,14 +24,16 @@ def _build_transcript(db, kind, username="contract"):
 # Expected key set from a hand-trace of the current code. Any drift from
 # this is a regression.
 EXPECTED_KEYS = {
-    "id", "source_transcript_id", "batch_id", "kind", "title", "filename",
+    "id", "source_transcript_id", "batch_id", "kind",
+    "classification_status", "classification_confidence", "classification_provenance",
+    "title", "filename",
     "duration_seconds", "provider", "model", "language", "status",
     "full_text", "segments", "speaker_count", "diarization_method",
     "num_speakers", "error", "corrected_text", "correction_error",
     "correction_model", "created_at", "updated_at", "has_summary",
     "has_audio", "has_video", "job_progress", "processed_size_bytes",
     "queue_status",
-    "correction_job", "summary_job", "voice_match_job",
+    "correction_job", "summary_job", "voice_match_job", "classify_pipeline_job",
     "format_markdown_job", "format_email_job", "format_coding_prompt_job",
     "classify_intent_job", "classify_intent_hint",
     "voice_note_job", "tagging_job",
@@ -83,10 +85,27 @@ def test_all_kinds_have_same_job_field_names(db_session):
     assert m["tagging_job"] is None
     assert d["tagging_job"] is None
     assert v["tagging_job"] is None
+    # classify_pipeline_job is uniform too (issue #267) — null until a
+    # classification job exists, regardless of kind.
+    assert m["classify_pipeline_job"] is None
+    assert d["classify_pipeline_job"] is None
+    assert v["classify_pipeline_job"] is None
     # tags list is also uniform, empty when no job has completed.
     assert m["tags"] == []
     assert d["tags"] == []
     assert v["tags"] == []
+
+
+def test_classification_state_defaults_to_override(db_session):
+    """Every transcript created today picks an explicit kind (issue #268
+    hasn't introduced the 'auto' sentinel yet) — the column default reflects
+    that: 'override', no confidence, no provenance until #268/#269 wire real
+    override provenance recording."""
+    user, t = _build_transcript(db_session, kind="meeting", username="contract-override")
+    out = _serialize_transcript(db_session, t, jobs_map=_batch_latest_jobs(db_session, [t.id]))
+    assert out["classification_status"] == "override"
+    assert out["classification_confidence"] is None
+    assert out["classification_provenance"] is None
 
 
 def test_include_relabel_adds_only_last_relabel_key(db_session):

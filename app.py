@@ -271,7 +271,7 @@ def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
 _SERIALIZED_JOB_KINDS = (
     "correction", "summary", "voice_match",
     "format_markdown", "format_email", "format_coding_prompt", "classify_intent",
-    "voice_note", "tagging", "assistant",
+    "voice_note", "tagging", "assistant", "classify_pipeline",
 )
 
 
@@ -316,6 +316,9 @@ def _serialize_transcript(db: Session, t: Transcript, *, jobs_map: dict[tuple[in
         "source_transcript_id": t.source_transcript_id,
         "batch_id": t.batch_id or None,
         "kind": t.kind or "meeting",
+        "classification_status": t.classification_status or "override",
+        "classification_confidence": t.classification_confidence,
+        "classification_provenance": t.classification_provenance,
         "title": t.title,
         "filename": t.filename,
         "duration_seconds": t.duration_seconds,
@@ -345,6 +348,7 @@ def _serialize_transcript(db: Session, t: Transcript, *, jobs_map: dict[tuple[in
         "correction_job": serialize_llm_job(jobs_map[(t.id, "correction")]) if (t.id, "correction") in jobs_map else None,
         "summary_job": serialize_llm_job(jobs_map[(t.id, "summary")]) if (t.id, "summary") in jobs_map else None,
         "voice_match_job": serialize_llm_job(jobs_map[(t.id, "voice_match")]) if (t.id, "voice_match") in jobs_map else None,
+        "classify_pipeline_job": serialize_llm_job(jobs_map[(t.id, "classify_pipeline")]) if (t.id, "classify_pipeline") in jobs_map else None,
         "cost": transcript_cost(db, t),
         "tags": _tags_for_transcript(db, t.id),
         **_dictation_job_fields(jobs_map, t),

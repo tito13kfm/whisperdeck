@@ -20,7 +20,7 @@ TERMINAL_LLM_STATUSES = ("completed", "failed", "cancelled")
 VALID_KINDS = (
     "correction", "summary", "rediarize", "voice_match",
     "format_markdown", "format_email", "format_coding_prompt", "classify_intent",
-    "voice_note", "tagging", "assistant",
+    "voice_note", "tagging", "assistant", "classify_pipeline",
 )
 # Auto-retry (issue #14) is scoped to network-dependent kinds only —
 # correction/summary/format_*/classify_intent call a provider API and can
@@ -32,14 +32,14 @@ VALID_KINDS = (
 # "Open Design Questions" in
 # docs/superpowers/plans/2026-07-07-queue-audit-llmjob-auto-retry.md
 # if reconsidering.
-AUTO_RETRY_KINDS = ("correction", "summary", "format_markdown", "format_email", "format_coding_prompt", "classify_intent", "voice_note", "tagging", "assistant")
+AUTO_RETRY_KINDS = ("correction", "summary", "format_markdown", "format_email", "format_coding_prompt", "classify_intent", "voice_note", "tagging", "assistant", "classify_pipeline")
 # Two independent concurrency pools, capped separately (issue #14): I/O-bound
 # kinds are provider API calls (bounded by provider rate limits, not local
 # resources), CPU-bound kinds are local compute (diarization clustering /
 # embedding extraction) and stay small so they don't fight each other for
 # the same CPU. IO_KINDS/CPU_KINDS must partition VALID_KINDS exactly — see
 # test_io_cpu_pools_partition_valid_kinds.
-IO_KINDS = ("correction", "summary", "format_markdown", "format_email", "format_coding_prompt", "classify_intent", "voice_note", "tagging", "assistant")
+IO_KINDS = ("correction", "summary", "format_markdown", "format_email", "format_coding_prompt", "classify_intent", "voice_note", "tagging", "assistant", "classify_pipeline")
 CPU_KINDS = ("rediarize", "voice_match")
 _MAX_CONCURRENT_IO_JOBS = 2
 _MAX_CONCURRENT_CPU_JOBS = 1
@@ -232,6 +232,28 @@ def enqueue_auto_tagging(db, transcript, user_settings: dict) -> LlmJob:
     return enqueue_llm_job(db, transcript.user_id, transcript.id, "tagging", provider, model, error=error)
 
 
+def enqueue_pipeline_classify(db, transcript, user_settings: dict) -> LlmJob | None:
+    """Studio pipeline classification entry point (issue #267). No-ops unless
+    the transcript is actually awaiting classification (`classification_status
+    == "pending"`) — today nothing sets that state (kind is always chosen
+    explicitly at upload), so this is inert until issue #268 introduces the
+    'auto' kind sentinel. Callers trigger this once the correction pass has
+    finished (design decision 2: classification runs against full corrected
+    text), not at upload/finalize time — see run_llm_job's 'correction'
+    branch, the single call site for both inline and chunked completion."""
+    if transcript.classification_status != "pending":
+        return None
+    from services.settings import resolve_provider_key, KEYLESS_PROVIDERS
+
+    provider = user_settings.get("classification_provider", "local_llm")
+    model = user_settings.get("classification_model", "gpt-oss-20b-mxfp4-GGUF")
+    api_key, _ = resolve_provider_key(db, transcript.user_id, provider)
+    error = None
+    if provider not in KEYLESS_PROVIDERS and not api_key:
+        error = f"classification skipped: no {provider} API key saved (see service panel)"
+    return enqueue_llm_job(db, transcript.user_id, transcript.id, "classify_pipeline", provider, model, error=error)
+
+
 def cancel_llm_job(db, user_id: int, job_id: int) -> LlmJob:
     job = db.query(LlmJob).filter(LlmJob.id == job_id, LlmJob.user_id == user_id).first()
     if not job:
@@ -319,6 +341,22 @@ async def run_llm_job(SessionLocal, job_id: int, transcription_service, diarizat
                 job.result_json = {"corrected_text": transcript.corrected_text}
                 db.commit()
                 _finish(db, job, "completed")
+                # A cancel can race in between correct_transcript() returning
+                # and _finish() running — _finish() detects that and leaves
+                # the job 'cancelled' instead of 'completed'. Only trigger
+                # classification when correction actually completed; a
+                # cancelled correction must not be treated as if it
+                # succeeded.
+                if job.status == "completed":
+                    # Classification needs the corrected text (design
+                    # decision 2) — trigger it here, the one place both
+                    # inline and chunked completion paths funnel through, so
+                    # there's no separate call site to keep in lockstep and
+                    # no risk of a duplicate enqueue (enqueue_pipeline_classify
+                    # no-ops unless the transcript is actually awaiting
+                    # classification).
+                    from services.settings import get_user_settings
+                    enqueue_pipeline_classify(db, transcript, get_user_settings(db, job.user_id))
             elif result == "failed":
                 _finish(db, job, "failed", transcript.correction_error)
             # 'cancelled': status already set by cancel_llm_job — leave it.
@@ -369,6 +407,49 @@ async def run_llm_job(SessionLocal, job_id: int, transcription_service, diarizat
                 provider_config=provider_config, model=job.model,
             )
             job.result_json = {"format": label}
+            job.progress_done = 1
+            db.commit()
+            _finish(db, job, "completed")
+        elif job.kind == "classify_pipeline":
+            job.progress_total = 1
+            db.commit()
+            from services.classification import classify_pipeline_kind, SCHEMA_VERSION
+            from services.settings import get_user_settings
+            user_settings = get_user_settings(db, job.user_id)
+            threshold = user_settings.get("classification_confidence_threshold", 0.75)
+            try:
+                result = await classify_pipeline_kind(
+                    transcript, api_key=api_key, provider_name=job.provider,
+                    provider_config=provider_config, model=job.model,
+                )
+            except Exception as e:
+                db.refresh(job)
+                if job.status != "cancelled":
+                    # A distinct 'failed' state, not left at 'pending' —
+                    # 'pending' would be indistinguishable from "never
+                    # attempted", but the job-level retry (AUTO_RETRY_KINDS)
+                    # will flip this forward again on a successful rerun.
+                    transcript.classification_status = "failed"
+                    transcript.updated_at = utcnow_naive()
+                    db.commit()
+                _finish(db, job, "failed", str(e))
+                return
+            db.refresh(job)
+            if job.status == "cancelled":
+                return
+            accepted = result["confidence"] >= threshold
+            transcript.classification_status = "success" if accepted else "uncertain"
+            transcript.classification_confidence = result["confidence"]
+            transcript.classification_provenance = {
+                "provider": job.provider,
+                "model": job.model,
+                "schema_version": SCHEMA_VERSION,
+                "classified_at": utcnow_naive().isoformat(),
+            }
+            if accepted:
+                transcript.kind = result["kind"]
+            transcript.updated_at = utcnow_naive()
+            job.result_json = {"kind": result["kind"], "confidence": result["confidence"], "accepted": accepted}
             job.progress_done = 1
             db.commit()
             _finish(db, job, "completed")

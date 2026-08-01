@@ -464,6 +464,213 @@ def test_io_cpu_pools_partition_valid_kinds():
     assert set(IO_KINDS) & set(CPU_KINDS) == set()
 
 
+# --- Studio pipeline classification (issue #267) ---------------------------
+
+def test_enqueue_pipeline_classify_noops_when_not_pending(db_session):
+    """Nothing sets classification_status='pending' yet (issue #268
+    introduces the 'auto' kind sentinel) — the default 'override' status
+    must make this enqueue a no-op, matching the other kind-gated helpers'
+    belt-and-braces pattern."""
+    from services.llm_jobs import enqueue_pipeline_classify
+    user, t = _make_user_and_transcript(db_session)
+    assert t.classification_status == "override"
+    job = enqueue_pipeline_classify(db_session, t, {})
+    assert job is None
+    assert db_session.query(LlmJob).filter(LlmJob.transcript_id == t.id, LlmJob.kind == "classify_pipeline").count() == 0
+
+
+def test_enqueue_pipeline_classify_fires_when_pending(db_session):
+    from services.llm_jobs import enqueue_pipeline_classify
+    user, t = _make_user_and_transcript(db_session)
+    t.classification_status = "pending"
+    db_session.commit()
+    job = enqueue_pipeline_classify(db_session, t, {"classification_provider": "local_llm", "classification_model": "m"})
+    assert job is not None
+    assert job.kind == "classify_pipeline"
+    assert job.status == "pending"
+
+
+def test_run_llm_job_correction_completion_triggers_pipeline_classify_when_pending(db_session):
+    user, t = _make_user_and_transcript(db_session)
+    t.classification_status = "pending"
+    db_session.commit()
+    job = enqueue_llm_job(db_session, user.id, t.id, "correction", "groq", "m1")
+    job.status = "running"
+    db_session.commit()
+
+    fake_post = AsyncMock(return_value=_FakeResponse("S: fixed"))
+    factory = lambda: _NoCloseSession(db_session)
+    with patch("httpx.AsyncClient.post", fake_post):
+        asyncio.run(run_llm_job(factory, job.id, transcription_service=None))
+
+    classify_job = (
+        db_session.query(LlmJob)
+        .filter(LlmJob.transcript_id == t.id, LlmJob.kind == "classify_pipeline")
+        .first()
+    )
+    assert classify_job is not None
+    assert classify_job.status == "pending"
+
+
+def test_run_llm_job_correction_completion_skips_pipeline_classify_when_override(db_session):
+    """Default state today — every transcript has an explicit kind, so
+    correction completing must NOT spuriously enqueue a classification job."""
+    user, t = _make_user_and_transcript(db_session)
+    assert t.classification_status == "override"
+    job = enqueue_llm_job(db_session, user.id, t.id, "correction", "groq", "m1")
+    job.status = "running"
+    db_session.commit()
+
+    fake_post = AsyncMock(return_value=_FakeResponse("S: fixed"))
+    factory = lambda: _NoCloseSession(db_session)
+    with patch("httpx.AsyncClient.post", fake_post):
+        asyncio.run(run_llm_job(factory, job.id, transcription_service=None))
+
+    count = db_session.query(LlmJob).filter(LlmJob.transcript_id == t.id, LlmJob.kind == "classify_pipeline").count()
+    assert count == 0
+
+
+def test_run_llm_job_classify_pipeline_accepts_above_threshold(db_session):
+    user, t = _make_user_and_transcript(db_session)
+    t.classification_status = "pending"
+    t.kind = "meeting"  # placeholder pre-classification value
+    db_session.commit()
+    job = enqueue_llm_job(db_session, user.id, t.id, "classify_pipeline", "groq", "m1")
+    job.status = "running"
+    db_session.commit()
+
+    fake_post = AsyncMock(return_value=_FakeResponse('{"kind": "dictation", "confidence": 0.95}'))
+    factory = lambda: _NoCloseSession(db_session)
+    with patch("httpx.AsyncClient.post", fake_post):
+        asyncio.run(run_llm_job(factory, job.id, transcription_service=None))
+
+    db_session.refresh(job)
+    db_session.refresh(t)
+    assert job.status == "completed"
+    assert job.result_json == {"kind": "dictation", "confidence": 0.95, "accepted": True}
+    assert t.kind == "dictation"
+    assert t.classification_status == "success"
+    assert t.classification_confidence == 0.95
+    assert t.classification_provenance["provider"] == "groq"
+    assert t.classification_provenance["schema_version"] == 1
+    assert "classified_at" in t.classification_provenance
+
+
+def test_run_llm_job_classify_pipeline_stays_uncertain_below_threshold(db_session):
+    """Below the confidence threshold (default 0.75): status becomes
+    'uncertain', but Transcript.kind is NOT overwritten — an unconfident
+    guess must never silently change routing (design decision 3/8)."""
+    user, t = _make_user_and_transcript(db_session)
+    t.classification_status = "pending"
+    t.kind = "meeting"
+    db_session.commit()
+    job = enqueue_llm_job(db_session, user.id, t.id, "classify_pipeline", "groq", "m1")
+    job.status = "running"
+    db_session.commit()
+
+    fake_post = AsyncMock(return_value=_FakeResponse('{"kind": "voice_note", "confidence": 0.4}'))
+    factory = lambda: _NoCloseSession(db_session)
+    with patch("httpx.AsyncClient.post", fake_post):
+        asyncio.run(run_llm_job(factory, job.id, transcription_service=None))
+
+    db_session.refresh(job)
+    db_session.refresh(t)
+    assert job.status == "completed"
+    assert job.result_json["accepted"] is False
+    assert t.kind == "meeting"  # unchanged
+    assert t.classification_status == "uncertain"
+    assert t.classification_confidence == 0.4
+
+
+def test_run_llm_job_classify_pipeline_fails_retryably_on_malformed_response(db_session):
+    """A malformed/empty classifier response must land the job 'failed' (not
+    silently default to a fallback kind) so AUTO_RETRY_KINDS' retry sweep can
+    resurrect it — this is what makes 'failure leaves a safe, retryable
+    state' (issue #267 acceptance) actually true. transcript.classification_status
+    must also move to 'failed', not stay at 'pending' — 'pending' would be
+    indistinguishable from "never attempted" (PR #273 review finding)."""
+    user, t = _make_user_and_transcript(db_session)
+    t.classification_status = "pending"
+    db_session.commit()
+    job = enqueue_llm_job(db_session, user.id, t.id, "classify_pipeline", "groq", "m1")
+    job.status = "running"
+    job.attempts = 1
+    db_session.commit()
+
+    fake_post = AsyncMock(return_value=_FakeResponse("not json"))
+    factory = lambda: _NoCloseSession(db_session)
+    with patch("httpx.AsyncClient.post", fake_post):
+        asyncio.run(run_llm_job(factory, job.id, transcription_service=None))
+
+    db_session.refresh(job)
+    db_session.refresh(t)
+    assert job.status == "failed"
+    assert t.classification_status == "failed"
+    assert t.classification_confidence is None
+    from services.llm_jobs import serialize_llm_job
+    assert serialize_llm_job(job)["will_retry"] is True
+
+
+def test_run_llm_job_classify_pipeline_failure_respects_concurrent_cancel(db_session):
+    """If a cancel wins the race against a classifier failure, the cancel
+    must stick — transcript.classification_status must NOT be overwritten
+    to 'failed' out from under a cancel the user just issued."""
+    user, t = _make_user_and_transcript(db_session)
+    t.classification_status = "pending"
+    db_session.commit()
+    job = enqueue_llm_job(db_session, user.id, t.id, "classify_pipeline", "groq", "m1")
+    job.status = "running"
+    db_session.commit()
+
+    async def _raise_and_cancel(*args, **kwargs):
+        # Simulate a cancel landing (via a separate request) while the
+        # classifier call is in flight, just before it raises.
+        job.status = "cancelled"
+        db_session.commit()
+        raise RuntimeError("provider exploded")
+
+    factory = lambda: _NoCloseSession(db_session)
+    with patch("services.classification.classify_pipeline_kind", _raise_and_cancel):
+        asyncio.run(run_llm_job(factory, job.id, transcription_service=None))
+
+    db_session.refresh(job)
+    db_session.refresh(t)
+    assert job.status == "cancelled"
+    assert t.classification_status == "pending"  # untouched by the failure path
+
+
+def test_run_llm_job_correction_cancel_race_skips_pipeline_classify(db_session):
+    """A cancel that wins the race between correct_transcript() returning
+    'ok' and _finish() running must leave the job 'cancelled' — and, since
+    the correction didn't actually complete, must NOT enqueue classification
+    (PR #273 review finding)."""
+    user, t = _make_user_and_transcript(db_session)
+    t.classification_status = "pending"
+    db_session.commit()
+    job = enqueue_llm_job(db_session, user.id, t.id, "correction", "groq", "m1")
+    job.status = "running"
+    db_session.commit()
+
+    async def _correct_then_cancel(db, transcript, **kwargs):
+        # Simulate a cancel landing (via a separate request) between the
+        # correction pass finishing and this job's own _finish() call.
+        transcript.corrected_text = "fixed"
+        transcript.correction_model = "groq/m1"
+        db.commit()
+        job.status = "cancelled"
+        db.commit()
+        return "ok"
+
+    factory = lambda: _NoCloseSession(db_session)
+    with patch("services.correction.correct_transcript", _correct_then_cancel):
+        asyncio.run(run_llm_job(factory, job.id, transcription_service=None))
+
+    db_session.refresh(job)
+    count = db_session.query(LlmJob).filter(LlmJob.transcript_id == t.id, LlmJob.kind == "classify_pipeline").count()
+    assert job.status == "cancelled"
+    assert count == 0
+
+
 def test_worker_tick_io_cap_limits_dispatch(db_session, tmp_path):
     """IO pool cap defaults to 2 — one already-running IO job plus one
     freshly claimed IO job fill it; a third pending IO job must wait."""
