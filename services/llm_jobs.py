@@ -178,8 +178,13 @@ def enqueue_auto_classify(db, transcript, user_settings: dict) -> LlmJob | None:
     dictation transcripts only. Guesses which reformat action (Markdown /
     email / coding prompt) best fits, surfaced as a UI hint; the underlying
     classify_intent() call never raises, so this never needs an error path
-    of its own beyond the usual missing-API-key skip."""
-    if transcript.kind != "dictation":
+    of its own beyond the usual missing-API-key skip.
+
+    Gated on effective_kind(), not raw transcript.kind (design decision 11)
+    — naturally no-ops while a pipeline classification is pending/uncertain/
+    failed, same as every other capability guard."""
+    from services.classification import effective_kind
+    if effective_kind(transcript) != "dictation":
         return None
     from services.settings import resolve_provider_key, KEYLESS_PROVIDERS
 
@@ -199,8 +204,14 @@ def enqueue_auto_voice_note(db, transcript, user_settings: dict) -> LlmJob | Non
     reformat flow, since both are LLM-only text-in/text-out). The chain
     itself never raises (classify falls back to "general", structure
     falls back to a stub body), so the only error path is the missing
-    API key skip — same shape as the other auto-enqueue helpers."""
-    if transcript.kind != "voice_note":
+    API key skip — same shape as the other auto-enqueue helpers.
+
+    Gated on effective_kind(), not raw transcript.kind (design decision 11)
+    — this is also the retroactive-trigger call site, invoked once a
+    pending transcript's classification resolves to voice_note (see
+    run_llm_job's classify_pipeline branch)."""
+    from services.classification import effective_kind
+    if effective_kind(transcript) != "voice_note":
         return None
     from services.settings import resolve_provider_key, KEYLESS_PROVIDERS
 
@@ -359,6 +370,17 @@ async def run_llm_job(SessionLocal, job_id: int, transcription_service, diarizat
                     enqueue_pipeline_classify(db, transcript, get_user_settings(db, job.user_id))
             elif result == "failed":
                 _finish(db, job, "failed", transcript.correction_error)
+                # Same cancel-race guard as the "ok" branch above: only
+                # trigger classification if the failure actually stuck (not
+                # superseded by a concurrent cancel). Correction failing
+                # must not permanently strand classification — trigger it
+                # against whatever text is available (see
+                # services/classification.py's _text_for_classification
+                # fallback) rather than waiting on a trigger that will
+                # never come (issue #268 comment 2's gap).
+                if job.status == "failed":
+                    from services.settings import get_user_settings
+                    enqueue_pipeline_classify(db, transcript, get_user_settings(db, job.user_id))
             # 'cancelled': status already set by cancel_llm_job — leave it.
         elif job.kind == "summary":
             job.progress_total = 1
@@ -452,6 +474,15 @@ async def run_llm_job(SessionLocal, job_id: int, transcription_service, diarizat
             job.result_json = {"kind": result["kind"], "confidence": result["confidence"], "accepted": accepted}
             job.progress_done = 1
             db.commit()
+            # classification_status and kind are committed above, before this
+            # runs — enqueue_auto_voice_note reads effective_kind(), which
+            # depends on both being in their final state. There is no earlier
+            # dispatch-time call site that already knows this transcript's
+            # kind for an 'auto' upload (design decision 11, services/
+            # llm_jobs.py:203 row), so the retroactive trigger lives here.
+            if accepted and result["kind"] == "voice_note":
+                from services.settings import get_user_settings
+                enqueue_auto_voice_note(db, transcript, get_user_settings(db, job.user_id))
             _finish(db, job, "completed")
         elif job.kind == "tagging":
             # Mirrors classify_intent: single LLM call, progress_total=1,

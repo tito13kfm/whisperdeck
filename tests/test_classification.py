@@ -9,7 +9,7 @@ import pytest
 from unittest.mock import AsyncMock, patch
 
 from database import Transcript
-from services.classification import classify_pipeline_kind, CLASSIFICATION_KINDS
+from services.classification import classify_pipeline_kind, effective_kind, CLASSIFICATION_KINDS
 
 
 class _FakeResponse:
@@ -113,3 +113,18 @@ def test_classify_pipeline_kind_raises_on_provider_http_error():
 
 def test_classification_kinds_match_transcript_kind_values():
     assert set(CLASSIFICATION_KINDS) == {"meeting", "dictation", "voice_note"}
+
+
+@pytest.mark.parametrize("status", ["success", "override"])
+def test_effective_kind_returns_kind_when_confirmed(status):
+    t = _transcript(kind="dictation", classification_status=status)
+    assert effective_kind(t) == "dictation"
+
+
+@pytest.mark.parametrize("status", ["pending", "uncertain", "failed"])
+def test_effective_kind_returns_none_when_not_confirmed(status):
+    """A missing or uncertain classification must never resolve to a real
+    kind — capability guards read this as "not yet decided", not as a
+    default kind (design decision 8)."""
+    t = _transcript(kind="meeting", classification_status=status)
+    assert effective_kind(t) is None

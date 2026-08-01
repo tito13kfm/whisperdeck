@@ -58,3 +58,14 @@ def test_patch_same_kind_allowed_while_processing(client, db_session):
     t = _make_transcript(db_session, status="processing", kind="meeting")
     r = client.patch(f"/api/transcripts/{t.id}", json={"kind": "meeting"})
     assert r.status_code == 200
+
+
+def test_patch_kind_records_explicit_override(client, db_session):
+    """Explicitly picking a kind via PATCH is a manual override (design
+    decision 5) — must flip classification_status to 'override' even if the
+    transcript was previously 'pending' (auto-classification in flight)."""
+    t = _make_transcript(db_session, kind="meeting", classification_status="pending")
+    r = client.patch(f"/api/transcripts/{t.id}", json={"kind": "dictation"})
+    assert r.status_code == 200
+    db_session.refresh(t)
+    assert t.classification_status == "override"

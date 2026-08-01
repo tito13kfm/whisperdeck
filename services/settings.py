@@ -34,6 +34,21 @@ DEFAULT_SETTINGS = {
     # rejected (stored as 'uncertain', safe fallback) rather than accepted —
     # a wrong-but-confident-looking auto-kind is worse than staying safe.
     "classification_confidence_threshold": 0.75,
+    # Audio cleanup stage (issue #270): per-step opt-in with safe fallback to
+    # original audio on failure. All thresholds are provisional — benchmark
+    # before adjusting (the referenced whisperhallu-review.md is missing).
+    "cleanup_loudnorm_enabled": False,      # loudnorm + highpass + afftdn chain
+    "cleanup_loudnorm_target": -23.0,       # LUFS target (EBU R128)
+    "cleanup_highpass_enabled": False,      # rumble/handling-noise filter (80Hz)
+    "cleanup_denoise_enabled": False,       # ffmpeg afftdn denoiser
+    "cleanup_vad_enabled": True,            # Silero VAD (builtin-only, default-on)
+    "cleanup_vad_min_silence_ms": 100,      # ms
+    "cleanup_vad_threshold": 0.5,           # speech probability 0-1
+    "cleanup_hallu_enabled": False,         # post-hoc repetition+low-confidence filter
+    "cleanup_hallu_rep_window": 3,          # n-gram window for repetition detection
+    "cleanup_hallu_logprob_cutoff": -2.0,   # avg_logprob below this = suspect
+    "cleanup_hallu_no_speech_cutoff": 0.6,  # no_speech_prob above this = suspect
+    "cleanup_demucs_enabled": False,        # Demucs vocal isolation (local-only, expensive)
     "export_directory": "",  # empty = feature disabled (Save as .md button hidden in detail toolbar)
     "bulk_defaults": {
         "provider": "moonshine",
