@@ -3029,6 +3029,19 @@ async function loadTranscripts() {
     </div>
     <div class="unit" style="border-radius:3px;display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px;padding:12px 34px">
       <input id="bank-search" class="inp" type="text" placeholder="Search transcripts…" value="${escapeHtml(S.bankQuery || '')}" style="font-size:12px;padding:8px 10px 8px 16px;flex:1;max-width:320px">
+      <select id="bank-batch-filter" class="inp" style="font-size:12px;padding:8px 10px">
+        <option value="" ${!S.batchFilter ? 'selected' : ''}>All transcripts</option>
+        <option value="with-batch" ${S.batchFilter === 'with-batch' ? 'selected' : ''}>In a batch</option>
+        <option value="no-batch" ${S.batchFilter === 'no-batch' ? 'selected' : ''}>Single uploads</option>
+        ${(() => {
+          const batchIds = [...new Set(list.filter(t => t.batch_id).map(t => t.batch_id))];
+          return batchIds.map(bid => {
+            const first = list.find(t => t.batch_id === bid);
+            const label = (first ? (first.batch_id || 'Batch') : bid).slice(0, 30);
+            return '<option value="' + escapeHtml(bid) + '" ' + (S.batchFilter === bid ? 'selected' : '') + '>' + escapeHtml(label) + (first ? ' (' + list.filter(t => t.batch_id === bid).length + ')' : '') + '</option>';
+          }).join('');
+        })()}
+      </select>
       <select id="bank-sort" class="inp" style="font-size:12px;padding:8px 10px">
         <option value="date-desc" ${(!S.bankSort || S.bankSort === 'date-desc') ? 'selected' : ''}>Newest first</option>
         <option value="date-asc" ${S.bankSort === 'date-asc' ? 'selected' : ''}>Oldest first</option>
@@ -3060,11 +3073,23 @@ async function loadTranscripts() {
     S.bankSort = $('bank-sort').value;
     renderBankRows();
   });
+  $('bank-batch-filter')?.addEventListener('change', () => {
+    S.batchFilter = $('bank-batch-filter').value;
+    renderBankRows();
+  });
 
   // Delegated on the stable `root` node (not per-row) so it keeps working
   // after renderBankRows() replaces #bank-rows' contents. Assignment (not
   // addEventListener) so it doesn't stack a duplicate handler on every poll.
   root.onclick = (e) => {
+    // Batch pill click — filter to this batch
+    const pill = e.target.closest('.batch-pill');
+    if (pill) {
+      e.preventDefault();
+      S.batchFilter = pill.dataset.batchId;
+      renderBankRows();
+      return;
+    }
     const b = e.target.closest('[data-act]');
     if (!b) return;
     e.preventDefault();
@@ -3171,11 +3196,17 @@ function renderBankRows(preservedOpenIds) {
   const openIds = preservedOpenIds || new Set([...rowsContainer.querySelectorAll('details[open]')].map(d => d.dataset.tid));
 
   const q = (S.bankQuery || '').trim().toLowerCase();
-  const filtered = q
+  let filtered = q
     ? bankListCache.filter(t => (t.title || '').toLowerCase().includes(q)
       || (t.filename || '').toLowerCase().includes(q)
       || (t.tags || []).some(tag => tag.toLowerCase().includes(q)))
     : bankListCache.slice();
+
+  // Apply batch filter
+  if (S.batchFilter === 'with-batch') filtered = filtered.filter(t => t.batch_id);
+  else if (S.batchFilter === 'no-batch') filtered = filtered.filter(t => !t.batch_id);
+  else if (S.batchFilter) filtered = filtered.filter(t => t.batch_id === S.batchFilter);
+
   const sortFns = {
     'date-desc': (a, b) => new Date(b.created_at) - new Date(a.created_at),
     'date-asc': (a, b) => new Date(a.created_at) - new Date(b.created_at),
@@ -3214,12 +3245,15 @@ function renderBankRows(preservedOpenIds) {
     const tagPills = tags.length
       ? `<div style="display:flex;flex-wrap:wrap;gap:4px;margin-top:4px">${tags.map(tag => `<span style="display:inline-block;font-family:var(--f-mono);font-size:10px;padding:2px 7px;border:1px solid var(--panel-lo);border-radius:9px;background:var(--panel-lo);color:var(--label);text-transform:lowercase;letter-spacing:0.02em" title="Tag from issue #171 auto-tagging">${escapeHtml(tag)}</span>`).join('')}</div>`
       : '';
+    const batchPill = t.batch_id
+      ? `<span class="batch-pill" data-batch-id="${escapeHtml(t.batch_id)}" title="Part of batch ${escapeHtml(t.batch_id)}" style="display:inline-block;font-family:var(--f-mono);font-size:9px;padding:1px 6px;border:1px solid var(--nixie);border-radius:8px;color:var(--nixie);text-transform:uppercase;letter-spacing:0.06em;cursor:pointer;margin-left:6px;vertical-align:middle">BATCH</span>`
+      : '';
     return `
     <details class="unit" data-tid="${t.id}" ${openIds.has(String(t.id)) ? 'open' : ''}>
       <summary style="list-style:none;cursor:pointer;padding:12px 22px 12px 34px;display:grid;grid-template-columns:16px 1fr 190px 112px;align-items:center;gap:16px">
         <span class="row-chevron" style="font-family:var(--f-mono);font-size:11px;color:var(--label-dim)" title="Click row to expand details">▸</span>
         <div style="min-width:0">
-          <div style="font-weight:600;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(t.title || t.filename || 'Untitled')}</div>
+          <div style="font-weight:600;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(t.title || t.filename || 'Untitled')}${batchPill}</div>
           <div style="font-family:var(--f-mono);font-size:11px;color:var(--label-dim);margin-top:2px">${escapeHtml(transcriptMeta(t))} · click to expand</div>
           ${tagPills}
         </div>
@@ -3241,6 +3275,10 @@ function renderBankRows(preservedOpenIds) {
 
 /* ══════════════════ master job queue ══════════════════ */
 let queuePollTimer = null;
+
+// Batch state for Queue page grouping and Tape Library filtering
+S.batchSnapshots = {};       // {batch_id: {active: N, failed: N}} for transition detection
+S.batchFilter = '';          // current batch filter on Tape Library ('' = all, 'with-batch', 'no-batch', or batch_id)
 
 function jobStatusView(j) {
   const total = j.progress && j.progress.total ? j.progress.total : 0;
@@ -3280,6 +3318,13 @@ const KIND_LABELS = {
   format_markdown: 'MD NOTE', format_email: 'EMAIL DRAFT', format_coding_prompt: 'CODE PROMPT', classify_intent: 'CLASSIFY',
 };
 
+// computeBatchAggregate lives in ./batch_aggregate.js -- kept dependency-free
+// (no DOM/global references) so it can be unit-tested directly in Node
+// without loading this whole browser script. esbuild inlines it into the
+// bundle at build time, so the served file is still one self-contained
+// script; nothing changes at runtime.
+const { computeBatchAggregate } = require('./batch_aggregate.js');
+
 async function loadQueue(opts = {}) {
   const root = $('page-queue');
   let data;
@@ -3289,17 +3334,95 @@ async function loadQueue(opts = {}) {
   refreshRailChrome(); // covers a job finishing while parked here across poll ticks
 
   const openIds = new Set([...root.querySelectorAll('details[open]')].map(d => d.dataset.qid));
+  const openBatchIds = new Set([...root.querySelectorAll('.batch-group[open]')].map(d => d.dataset.bid));
 
-  const rows = jobs.map(j => {
+  // Separate transcription entries from LLM jobs for batch grouping
+  const txs = jobs.filter(j => j.kind === 'transcription' && j.batch_id);
+  const others = jobs.filter(j => j.kind !== 'transcription' || !j.batch_id);
+  const batchMap = {};
+  for (const j of txs) {
+    if (!batchMap[j.batch_id]) batchMap[j.batch_id] = [];
+    batchMap[j.batch_id].push(j);
+  }
+
+  // Render batch groups first, then non-batch entries
+  let batchHtml = '';
+  for (const [bid, group] of Object.entries(batchMap)) {
+    const { counts, activeInBatch, failedInBatch, total, done, lit, batchColor, badgeWord, badgeClass, statusLine } =
+      computeBatchAggregate(group);
+    const batchCells = [...Array(11)].map((_, i) => ({ on: i < lit, color: batchColor }));
+    const batchOpen = openBatchIds.has(bid);
+    const titles = group.map(j => j.title || 'Untitled').filter(Boolean).slice(0, 3).join(', ') + (group.length > 3 ? ', ...' : '');
+    const totalDurSec = group.reduce((s, j) => s + (j.duration_seconds || 0), 0);
+    const durText = formatDur(totalDurSec) + (totalDurSec ? ' total' : '');
+
+    // Detect batch completion transition
+    const snap = S.batchSnapshots[bid];
+    if (snap && snap.active > 0 && activeInBatch === 0) {
+      if (failedInBatch > 0) {
+        toast(`Batch complete with ${failedInBatch} failure${failedInBatch !== 1 ? 's' : ''}`, 'error');
+      } else if (counts.cancelled > 0 && counts.completed === 0) {
+        toast(`Batch cancelled (${counts.cancelled} file${counts.cancelled !== 1 ? 's' : ''})`, 'info');
+      } else {
+        toast(`Batch complete: ${done}/${total} files transcribed${counts.cancelled ? ' (' + counts.cancelled + ' cancelled)' : ''}`, 'info');
+      }
+    }
+    S.batchSnapshots[bid] = { active: activeInBatch, failed: failedInBatch };
+
+    batchHtml += `
+    <details class="unit batch-group" data-bid="${escapeHtml(bid)}" ${batchOpen ? 'open' : ''}>
+      <summary style="list-style:none;cursor:pointer;padding:12px 22px 12px 34px;display:grid;grid-template-columns:88px 1fr 170px 100px;align-items:center;gap:14px">
+        <span class="vfd" style="width:88px"><span>BATCH</span></span>
+        <div style="min-width:0">
+          <div style="font-weight:600;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">Batch — ${total} file${total !== 1 ? 's' : ''} — ${escapeHtml(titles)}</div>
+          <div style="font-family:var(--f-mono);font-size:10.5px;color:var(--label-dim);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(statusLine)}${statusLine && durText ? ' · ' : ''}${escapeHtml(durText)}</div>
+        </div>
+        ${bargraph(batchCells)}
+        <div style="display:flex;flex-direction:column;align-items:flex-end;gap:3px">
+          ${nixie(String(done + '/' + total))}
+          <div class="status-badge status-badge--${badgeClass}" data-word="${badgeWord}">${badgeWord}</div>
+        </div>
+      </summary>
+      <div style="padding:12px 22px 14px 34px;border-top:1px solid var(--panel-lo);display:flex;gap:8px;flex-wrap:wrap">
+        <button class="btn" style="font-size:12px;padding:6px 12px;border-color:var(--inset-edge)" data-bact="cancel" data-bid="${escapeHtml(bid)}">Cancel all</button>
+        <button class="btn" style="font-size:12px;padding:6px 12px;border-color:var(--inset-edge)" data-bact="open-batch" data-bid="${escapeHtml(bid)}">Open batch</button>
+      </div>
+      ${group.map(j => {
+        const sv = jobStatusView(j);
+        const cells = [...Array(11)].map((_, i) => ({ on: sv.color !== null && i < sv.lit, color: sv.color }));
+        const prog = j.progress && j.progress.total
+          ? ' · section ' + Math.min(j.progress.done + (j.status === 'running' ? 1 : 0), j.progress.total) + ' of ' + j.progress.total : '';
+        const meta = [(j.provider || '—') + (j.model ? ' · ' + j.model : ''), j.status === 'running' ? 'working' + prog : null,
+          j.error ? humanizeJobError(j.error) : null, timeAgo(j.created_at)].filter(Boolean).join(' · ');
+        return `
+      <details class="batch-entry" data-qid="${escapeHtml(String(j.id))}" ${openIds.has(String(j.id)) ? 'open' : ''} style="margin:0 0 1px 34px;border-left:1px solid var(--panel-lo)">
+        <summary style="list-style:none;cursor:pointer;padding:10px 22px 10px 22px;display:grid;grid-template-columns:1fr 170px 100px;align-items:center;gap:14px">
+          <div style="min-width:0">
+            <div style="font-weight:600;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(j.title || 'Untitled')}</div>
+            <div style="font-family:var(--f-mono);font-size:10.5px;color:${j.error ? 'var(--red)' : 'var(--label-dim)'};margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(meta)}</div>
+          </div>
+          ${bargraph(cells)}
+          <div style="display:flex;flex-direction:column;align-items:flex-end;gap:3px">
+            ${nixie(sv.nix, sv.variant)}
+            <div class="status-badge status-badge--${escapeHtml(sv.word)}" data-word="${escapeHtml(sv.word)}">${escapeHtml(sv.word)}</div>
+          </div>
+        </summary>
+        <div style="padding:10px 22px 12px 22px;border-top:1px solid var(--panel-lo);display:flex;gap:8px;flex-wrap:wrap">
+          ${jobActions(j)}
+        </div>
+      </details>`;
+      }).join('')}
+    </details>`;
+  }
+
+  // Non-batch entries render as before
+  const otherRows = others.map(j => {
     const sv = jobStatusView(j);
     const cells = [...Array(11)].map((_, i) => ({ on: sv.color !== null && i < sv.lit, color: sv.color }));
     const prog = j.progress && j.progress.total
-      ? ' · section ' + Math.min(j.progress.done + (j.status === 'running' ? 1 : 0), j.progress.total) + ' of ' + j.progress.total
-      : '';
-    const meta = [(j.provider || '—') + (j.model ? ' · ' + j.model : ''),
-                  j.status === 'running' ? 'working' + prog : null,
-                  j.error ? humanizeJobError(j.error) : null,
-                  timeAgo(j.created_at)].filter(Boolean).join(' · ');
+      ? ' · section ' + Math.min(j.progress.done + (j.status === 'running' ? 1 : 0), j.progress.total) + ' of ' + j.progress.total : '';
+    const meta = [(j.provider || '—') + (j.model ? ' · ' + j.model : ''), j.status === 'running' ? 'working' + prog : null,
+      j.error ? humanizeJobError(j.error) : null, timeAgo(j.created_at)].filter(Boolean).join(' · ');
     return `
     <details class="unit" data-qid="${escapeHtml(String(j.id))}" ${openIds.has(String(j.id)) ? 'open' : ''}>
       <summary style="list-style:none;cursor:pointer;padding:12px 22px 12px 34px;display:grid;grid-template-columns:88px 1fr 170px 100px;align-items:center;gap:14px">
@@ -3340,7 +3463,28 @@ async function loadQueue(opts = {}) {
         ${finishedCount ? `<button class="btn" style="font-size:12px;padding:6px 12px;border-color:var(--inset-edge)" data-jact="clear-finished">Clear finished (${finishedCount})</button>` : ''}
       </div>
     </div>
-    ${jobs.length ? rows : '<div class="empty-unit">Queue idle — jobs appear here when the machine is working</div>'}`;
+    ${batchHtml + otherRows || '<div class="empty-unit">Queue idle — jobs appear here when the machine is working</div>'}`;
+
+  // Wire batch-level actions
+  root.querySelectorAll('[data-bact]').forEach(b => b.addEventListener('click', (e) => {
+    e.preventDefault();
+    const bact = b.dataset.bact, bid = b.dataset.bid;
+    if (bact === 'open-batch') {
+      navigate('transcripts');
+      S.batchFilter = bid;
+      setTimeout(() => { if (S.page === 'transcripts') loadTranscripts(); }, 50);
+      return;
+    }
+    if (bact === 'cancel') {
+      withBusy(b, async () => {
+        try {
+          const r = await api('/api/batches/' + encodeURIComponent(bid) + '/cancel', { method: 'POST' });
+          toast('Cancelled ' + r.cancelled + ' file' + (r.cancelled !== 1 ? 's' : '') + ' in batch', 'info');
+          loadQueue({force: true});
+        } catch (err) { toast(err.message, 'error'); }
+      });
+    }
+  }));
 
   root.querySelectorAll('[data-jact]').forEach(b => b.addEventListener('click', (e) => {
     e.preventDefault();

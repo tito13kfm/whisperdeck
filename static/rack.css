@@ -865,3 +865,11 @@ details.unit[open] > summary .row-chevron { transform: rotate(90deg); }
 textarea.mfd-input { resize: none; line-height: 1.5; }
 
 .mfd-hint { font-family: var(--f-mono); font-size: 11px; color: var(--label-faint); margin-top: 10px; text-align: center; }
+
+/* batch grouping on Queue page */
+.batch-group[open] { border-color: var(--nixie); }
+.batch-entry { margin: 0 0 1px 0; border: none; border-left: 1px solid var(--panel-lo); background: var(--panel); }
+.batch-entry[open] { border-left-color: var(--nixie); }
+
+/* batch indicator pill on Tape Library rows */
+.batch-pill:hover { background: var(--nixie); color: #04140C; border-color: var(--nixie); }
