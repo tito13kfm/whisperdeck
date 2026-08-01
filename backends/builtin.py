@@ -107,6 +107,19 @@ class BuiltinProvider(BaseProvider):
         temperature = kwargs.get("temperature", 0.0)
         initial_prompt = kwargs.get("prompt", "")
         vad_filter = kwargs.get("vad_filter", True)
+        vad_threshold = kwargs.get("vad_threshold")
+        vad_min_silence_ms = kwargs.get("vad_min_silence_duration_ms")
+
+        # Per the cleanup-params contract from settings (issue #270), VAD
+        # defaults live in DEFAULT_SETTINGS but the provider receives them
+        # through kwargs — construct a fast-whisper vad_parameters dict.
+        vad_parameters = None
+        if vad_filter is not False and (vad_threshold is not None or vad_min_silence_ms is not None):
+            vad_parameters = {}
+            if vad_threshold is not None:
+                vad_parameters["threshold"] = float(vad_threshold)
+            if vad_min_silence_ms is not None:
+                vad_parameters["min_silence_duration_ms"] = int(vad_min_silence_ms)
 
         start_time = time.time()
 
@@ -129,6 +142,7 @@ class BuiltinProvider(BaseProvider):
                     temperature=temperature,
                     initial_prompt=initial_prompt or None,
                     vad_filter=vad_filter,
+                    vad_parameters=vad_parameters,
                     beam_size=5,
                     word_timestamps=True,
                 )
@@ -146,6 +160,7 @@ class BuiltinProvider(BaseProvider):
                     "text": s.text.strip(),
                     "speaker": None,
                     "confidence": s.avg_logprob if hasattr(s, "avg_logprob") else None,
+                    "no_speech_prob": s.no_speech_prob if hasattr(s, "no_speech_prob") else None,
                 }
                 for s in segments
             ]

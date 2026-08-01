@@ -39,6 +39,7 @@ from services.transcription import TranscriptionService
 from services.diarization import DiarizationService
 from services.voice_id import voice_id_service
 from services.audio_prep import transcode_for_upload, AudioPrepError, chunk_audio, get_audio_duration, extract_clips_concat, has_video_stream, transcode_stereo_for_diarization
+from services.audio_cleanup import cleanup_audio, filter_hallucinations
 from services.queue import (
     create_chunk_jobs, retry_failed_chunks, queue_worker_loop, compute_queue_status,
     cancel_transcript_jobs, resume_cancelled_chunks, reset_stuck_transcription_jobs,
@@ -1130,6 +1131,16 @@ async def _run_transcription_pipeline(
         except AudioPrepError as e:
             raise HTTPException(status_code=500, detail=str(e))
 
+    # Audio cleanup stage (issue #270): opt-in loudnorm/denoise/highpass chain.
+    # Runs after transcode so the filters see the normalized 16kHz mono input.
+    # Non-fatal: any filter failure falls back to the unprocessed audio — the
+    # pipeline proceeds regardless.
+    try:
+        cleanup_result = await cleanup_audio(str(save_path), str(UPLOAD_DIR), user_settings)
+        save_path = Path(cleanup_result.audio_path)
+    except Exception as e:
+        print(f"[audio-cleanup] non-fatal failure: {e}")
+
     stereo_audio_path = stereo_audio_path_inherited
     if capture_source == "live_stereo":
         try:
@@ -1256,6 +1267,9 @@ async def _run_transcription_pipeline(
             model=model or provider_config.get("default_model"),
             temperature=temperature,
             video_path=video_path,
+            vad_filter=user_settings.get("cleanup_vad_enabled", True),
+            vad_threshold=user_settings.get("cleanup_vad_threshold", 0.5),
+            vad_min_silence_duration_ms=user_settings.get("cleanup_vad_min_silence_ms", 100),
         )
         transcript.processed_size_bytes = file_size
         transcript.source_transcript_id = source_transcript_id
@@ -1267,6 +1281,19 @@ async def _run_transcription_pipeline(
         transcript.stereo_audio_path = stereo_audio_path
         db.commit()
         stereo_persisted = True
+
+        # Post-hoc hallucination filter (issue #270): run after transcription
+        # but before diarization so hallucinated segments don't get speaker
+        # labels assigned. Builtin-only (requires faster-whisper confidence
+        # and no_speech_prob fields).
+        if user_settings.get("cleanup_hallu_enabled") and transcript.segments:
+            transcript.segments = filter_hallucinations(
+                transcript.segments,
+                rep_window=user_settings.get("cleanup_hallu_rep_window", 3),
+                logprob_cutoff=user_settings.get("cleanup_hallu_logprob_cutoff", -2.0),
+                no_speech_cutoff=user_settings.get("cleanup_hallu_no_speech_cutoff", 0.6),
+            )
+            transcript.full_text = " ".join(s["text"] for s in transcript.segments if s.get("text")).strip()
 
         # Run diarization if requested
         if diarize and transcript.segments:

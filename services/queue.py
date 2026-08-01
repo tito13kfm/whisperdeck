@@ -224,6 +224,7 @@ def merge_chunk_results(jobs: list) -> tuple:
                 "text": s.get("text", ""),
                 "speaker": s.get("speaker"),
                 "confidence": s.get("confidence"),
+                "no_speech_prob": s.get("no_speech_prob"),
             }
             for s in raw_segments
         ]
@@ -412,6 +413,21 @@ async def _run_chunk_job(db, job, provider_config: dict, provider_name: str, lan
     job.status = "running"
     job.attempts += 1
     db.commit()
+
+    # Fetch VAD settings for this transcript's owner (issue #270: mirror path
+    # to app.py's inline transcribe). Read-only, safe before the await.
+    from services.settings import get_user_settings
+    from database import Transcript
+    t = db.query(Transcript).filter(Transcript.id == job.transcript_id).first()
+    vad_settings = {}
+    hallu_enabled = False
+    if t is not None:
+        settings = get_user_settings(db, t.user_id)
+        vad_settings["vad_filter"] = settings.get("cleanup_vad_enabled", True)
+        vad_settings["vad_threshold"] = settings.get("cleanup_vad_threshold", 0.5)
+        vad_settings["vad_min_silence_duration_ms"] = settings.get("cleanup_vad_min_silence_ms", 100)
+        hallu_enabled = settings.get("cleanup_hallu_enabled", False)
+
     try:
         provider = get_provider(provider_name, provider_config)
         from backends import LOCAL_PROVIDERS
@@ -426,12 +442,24 @@ async def _run_chunk_job(db, job, provider_config: dict, provider_name: str, lan
             # "running" above, so a job parked on this lock is never
             # mistaken for "pending" and re-dispatched by a later tick.
             async with local_provider_lock:
-                result = await provider.transcribe(job.audio_path, language=language, temperature=0.0)
+                result = await provider.transcribe(job.audio_path, language=language, temperature=0.0, **vad_settings)
         else:
-            result = await provider.transcribe(job.audio_path, language=language, temperature=0.0)
+            result = await provider.transcribe(job.audio_path, language=language, temperature=0.0, **vad_settings)
+
+        if hallu_enabled and result.segments:
+            seg_dicts = [{"text": s.text, "confidence": s.confidence,
+                          "no_speech_prob": s.no_speech_prob} for s in result.segments]
+            from services.audio_cleanup import filter_hallucinations
+            filtered = filter_hallucinations(seg_dicts, rep_window=3, logprob_cutoff=-2.0,
+                                              no_speech_cutoff=0.6)
+            filtered_ids = {id(d) for d in filtered}
+            result.segments = [s for i, s in enumerate(result.segments)
+                               if id(seg_dicts[i]) in filtered_ids]
+
         job.result_json = {
             "segments": [
-                {"start": s.start, "end": s.end, "text": s.text, "speaker": s.speaker, "confidence": s.confidence}
+                {"start": s.start, "end": s.end, "text": s.text, "speaker": s.speaker,
+                 "confidence": s.confidence, "no_speech_prob": s.no_speech_prob}
                 for s in result.segments
             ],
             "full_text": result.full_text,
