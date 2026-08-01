@@ -96,3 +96,23 @@ def test_bearer_token_skips_csrf_but_not_honored_on_other_mutating_route(client,
         headers={"Authorization": f"Bearer {token}"},
     )
     assert resp.status_code == 401
+
+
+def test_device_token_upload_rate_limited(client, db_session):
+    from services.security import rate_limiter
+    user = db_session.query(User).filter(User.username == "testuser").first()
+    token = set_device_token(db_session, user)
+    rate_limiter._buckets.clear()
+    device_client = _device_client(db_session)
+    with patch("app.transcription_service.transcribe", AsyncMock(side_effect=_stub_transcribe)):
+        statuses = []
+        for _ in range(31):
+            resp = device_client.post(
+                "/api/transcribe",
+                files={"file": ("note.wav", io.BytesIO(b"fake wav bytes"), "audio/wav")},
+                data={"provider": "moonshine", "kind": "voice_note"},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            statuses.append(resp.status_code)
+    assert statuses[-1] == 429
+    assert statuses.count(200) == 30

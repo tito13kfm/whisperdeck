@@ -1351,6 +1351,7 @@ async def _run_transcription_pipeline(
 
 @app.post("/api/transcribe")
 async def transcribe_audio(
+    request: Request,
     file: UploadFile = File(...),
     title: Optional[str] = Form(None),
     provider: str = Form("moonshine"),
@@ -1369,6 +1370,9 @@ async def transcribe_audio(
     """Upload and transcribe an audio file."""
     if kind not in ("meeting", "dictation", "voice_note"):
         raise HTTPException(status_code=400, detail="kind must be 'meeting', 'dictation', or 'voice_note'")
+    is_device_call = (request.headers.get("authorization") or "").lower().startswith("bearer ")
+    if is_device_call and not rate_limiter.check(f"device-upload:{current_user.id}", max_requests=30, window_seconds=3600):
+        raise HTTPException(status_code=429, detail="Too many device uploads, try again later")
     # Save uploaded file
     file_ext = os.path.splitext(file.filename or "audio.mp3")[1] or ".mp3"
     safe_name = f"{utcnow_naive().strftime('%Y%m%d_%H%M%S')}_{hash(file.filename or 'audio')}{file_ext}"
