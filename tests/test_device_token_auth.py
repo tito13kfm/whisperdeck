@@ -118,14 +118,20 @@ def test_device_token_upload_rate_limited(client, db_session):
     assert statuses.count(200) == 30
 
 
-def test_session_authenticated_upload_not_subject_to_device_rate_limit(client):
+def test_session_authenticated_upload_not_subject_to_device_rate_limit(client, db_session):
     """The 30/hour device-upload bucket must key off the actual auth
     outcome (request.state.device_authenticated), not merely the presence
-    of a bearer header. A normal session-cookie upload with no bearer
-    header at all must never brush against that bucket -- prove it by
-    exceeding the device limit's count (31) on the session-authenticated
-    `client` and confirming every single one still succeeds."""
+    of a bearer header. The discriminating case is a request carrying
+    BOTH a session cookie and a bearer header: session resolution runs
+    first in get_current_user_or_device, so device_authenticated must
+    stay False and the request must never brush against the device
+    bucket, even though a bearer header is present. Prove it by exceeding
+    the device limit's count (31) on the session-authenticated `client`,
+    with a (irrelevant, session wins) bearer header attached, and
+    confirming every single one still succeeds."""
     from services.security import rate_limiter
+    user = db_session.query(User).filter(User.username == "testuser").first()
+    token = set_device_token(db_session, user)
     rate_limiter._buckets.clear()
     with patch("app.transcription_service.transcribe", AsyncMock(side_effect=_stub_transcribe)):
         statuses = []
@@ -134,18 +140,24 @@ def test_session_authenticated_upload_not_subject_to_device_rate_limit(client):
                 "/api/transcribe",
                 files={"file": ("note.wav", io.BytesIO(b"fake wav bytes"), "audio/wav")},
                 data={"provider": "moonshine", "kind": "voice_note"},
+                headers={"Authorization": f"Bearer {token}"},
             )
             statuses.append(resp.status_code)
     assert statuses.count(200) == 31
     assert 429 not in statuses
 
 
-def test_revoked_device_token_rejected_at_route_level(db_session):
+def test_revoked_device_token_rejected_at_route_level(client, db_session):
     """revoke_device_token is unit-tested at the service layer elsewhere,
     but nothing proves a revoked token is actually rejected by the real
     route. Generate a token, revoke it, then attempt an upload with the
     now-stale plaintext via the same headless client path used by the
-    valid-token test -- must 401, not 200."""
+    valid-token test -- must 401, not 200.
+
+    Takes the unused `client` fixture purely for its teardown: this test
+    is the only one in the file that would otherwise skip the fixture
+    entirely, leaving app.dependency_overrides[get_db] pointed at a
+    disposed engine for whichever test runs next."""
     user = create_user(db_session, "devicerevoke", "testpass123")
     token = set_device_token(db_session, user)
     revoke_device_token(db_session, user)
