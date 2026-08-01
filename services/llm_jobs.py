@@ -341,14 +341,22 @@ async def run_llm_job(SessionLocal, job_id: int, transcription_service, diarizat
                 job.result_json = {"corrected_text": transcript.corrected_text}
                 db.commit()
                 _finish(db, job, "completed")
-                # Classification needs the corrected text (design decision 2)
-                # — trigger it here, the one place both inline and chunked
-                # completion paths funnel through, so there's no separate
-                # call site to keep in lockstep and no risk of a duplicate
-                # enqueue (enqueue_pipeline_classify no-ops unless the
-                # transcript is actually awaiting classification).
-                from services.settings import get_user_settings
-                enqueue_pipeline_classify(db, transcript, get_user_settings(db, job.user_id))
+                # A cancel can race in between correct_transcript() returning
+                # and _finish() running — _finish() detects that and leaves
+                # the job 'cancelled' instead of 'completed'. Only trigger
+                # classification when correction actually completed; a
+                # cancelled correction must not be treated as if it
+                # succeeded.
+                if job.status == "completed":
+                    # Classification needs the corrected text (design
+                    # decision 2) — trigger it here, the one place both
+                    # inline and chunked completion paths funnel through, so
+                    # there's no separate call site to keep in lockstep and
+                    # no risk of a duplicate enqueue (enqueue_pipeline_classify
+                    # no-ops unless the transcript is actually awaiting
+                    # classification).
+                    from services.settings import get_user_settings
+                    enqueue_pipeline_classify(db, transcript, get_user_settings(db, job.user_id))
             elif result == "failed":
                 _finish(db, job, "failed", transcript.correction_error)
             # 'cancelled': status already set by cancel_llm_job — leave it.
@@ -415,6 +423,15 @@ async def run_llm_job(SessionLocal, job_id: int, transcription_service, diarizat
                     provider_config=provider_config, model=job.model,
                 )
             except Exception as e:
+                db.refresh(job)
+                if job.status != "cancelled":
+                    # A distinct 'failed' state, not left at 'pending' —
+                    # 'pending' would be indistinguishable from "never
+                    # attempted", but the job-level retry (AUTO_RETRY_KINDS)
+                    # will flip this forward again on a successful rerun.
+                    transcript.classification_status = "failed"
+                    transcript.updated_at = utcnow_naive()
+                    db.commit()
                 _finish(db, job, "failed", str(e))
                 return
             db.refresh(job)
