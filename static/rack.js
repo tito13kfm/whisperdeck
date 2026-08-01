@@ -4687,8 +4687,11 @@ function renderDetail() {
   if (cs === 'pending') classStatusText = 'Classifying…';
   else if (cs === 'failed') classStatusText = 'Failed';
   else if (cs === 'uncertain') classStatusText = (t.classification_confidence != null ? Math.round(t.classification_confidence * 100) + '% — uncertain' : 'Uncertain');
-  else if (cs === 'success') classStatusText = (t.classification_confidence != null ? Math.round(t.classification_confidence * 100) + '% confidence' : '');
-  else if (cs === 'override') classStatusText = 'Manual override';
+  else if (cs === 'success') {
+    classStatusText = (t.classification_confidence != null ? Math.round(t.classification_confidence * 100) + '% confidence' : '');
+    var prov = t.classification_provenance;
+    if (prov && prov.provider && prov.model) classStatusText += ' · ' + escapeHtml(prov.provider) + '/' + escapeHtml(prov.model);
+  } else if (cs === 'override') classStatusText = 'Manual override';
   const extraActs = [];
   if (t.status === 'partial')
     extraActs.push('<button class="btn" style="font-size:12px;padding:7px 14px;border-color:var(--inset-edge)" data-dact="retry">Retry failed sections</button>');

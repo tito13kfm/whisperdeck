@@ -3,7 +3,7 @@ set of keys for both meeting and dictation transcripts as it did before the
 batch-load refactor. Issue #147 acceptance criterion: 'No behavioral change
 in the API response'. This is a check the existing suite doesn't cover
 because it compares the FULL key set, not individual values."""
-from database import Transcript, User, ProviderConfig, utcnow_naive
+from database import Transcript, User, ProviderConfig, LlmJob, utcnow_naive
 from app import _serialize_transcript, _batch_latest_jobs
 
 
@@ -117,7 +117,6 @@ def test_pending_transcript_gets_meeting_shaped_job_fields(db_session):
     Uses a real LlmJob row (not just "is the field None") so the assertion
     actually discriminates between the dictation branch and the fallback
     branch -- both would show None here if no job existed at all."""
-    from database import LlmJob
     user = User(username="contract-pending", password_hash="x", password_salt="y")
     db_session.add(user)
     db_session.commit()
@@ -148,23 +147,32 @@ def test_include_relabel_adds_only_last_relabel_key(db_session):
 def test_auto_kind_pending_serialization(db_session):
     """An auto-classified transcript in pending state serializes with
     classification_status='pending' and the placeholder kind, not the
-    raw 'auto' value (which is never stored on the row)."""
+    raw 'auto' value (which is never stored on the row). Creates a real
+    classify_intent job row so the assertion that it surfaces as None
+    actually discriminates between the pending path (effective_kind None,
+    should not surface) and the dictation path (would surface it)."""
     user = User(username="contract-auto", password_hash="x", password_salt="y")
     db_session.add(user)
     db_session.commit()
     t = Transcript(
-        user_id=user.id, title="c", filename="c.mp3", kind="meeting",
+        user_id=user.id, title="c", filename="c.mp3", kind="dictation",
         classification_status="pending", status="processing",
         full_text="some text", segments=[],
     )
     db_session.add(t)
     db_session.commit()
+    db_session.add(LlmJob(user_id=user.id, transcript_id=t.id, kind="classify_intent", provider="local_llm", model="m", status="pending"))
+    db_session.commit()
     out = _serialize_transcript(db_session, t, jobs_map=_batch_latest_jobs(db_session, [t.id]))
-    assert out["kind"] == "meeting"
+    assert out["kind"] == "dictation"
     assert out["classification_status"] == "pending"
     assert out["classification_confidence"] is None
     assert out["classification_provenance"] is None
     # _dictation_job_fields with effective_kind()=None (pending) returns
-    # meeting-shaped job fields (all dictation/voice-note fields are None).
-    assert out["classify_intent_job"] is None
+    # meeting-shaped job fields — the classify_intent job that exists on
+    # the row is NOT surfaced because effective_kind is still None while
+    # classification is pending. This is the discriminating assertion:
+    # if effective_kind returned 'dictation', classify_intent_job would be
+    # the serialized job, not None.
+    assert out["classify_intent_job"] is None, "pending transcript must not surface classify_intent_job even though a real job row exists"
     assert out["voice_note_job"] is None
