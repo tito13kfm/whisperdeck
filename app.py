@@ -1060,11 +1060,22 @@ async def _run_transcription_pipeline(
     # its "pending" starting point. An explicit kind is a manual override,
     # recorded as such rather than left to the column default so callers of
     # this function never need to know the default happens to agree.
+    #
+    # This function is also the retranscribe entry point (source_transcript_id
+    # is set only there), which always passes an already-resolved kind, never
+    # "auto" — deliberately not stamping classification_status on that path:
+    # #271 owns deciding whether a retranscribed child re-runs classification
+    # (auto-classified parent) or carries an override forward unchanged
+    # (design decision 9), and stamping "override" here unconditionally would
+    # leave #271 fighting this line instead of a clean column default.
+    is_retranscribe = source_transcript_id is not None
     if kind == "auto":
         classification_status = "pending"
         kind = "meeting"
-    else:
+    elif not is_retranscribe:
         classification_status = "override"
+    else:
+        classification_status = None  # leave column default; #271's territory
     if kind in ("dictation", "voice_note"):
         diarize = False
     if capture_source not in (None, "live_stereo"):
@@ -1223,7 +1234,8 @@ async def _run_transcription_pipeline(
             transcript.duration_seconds = duration_seconds
             transcript.source_transcript_id = source_transcript_id
             transcript.batch_id = batch_id
-            transcript.classification_status = classification_status
+            if classification_status is not None:
+                transcript.classification_status = classification_status
             db.commit()
         except Exception:
             _discard_stereo_copy()
@@ -1249,7 +1261,8 @@ async def _run_transcription_pipeline(
         transcript.source_transcript_id = source_transcript_id
         transcript.batch_id = batch_id
         transcript.kind = kind
-        transcript.classification_status = classification_status
+        if classification_status is not None:
+            transcript.classification_status = classification_status
         transcript.num_speakers = num_speakers
         transcript.stereo_audio_path = stereo_audio_path
         db.commit()
