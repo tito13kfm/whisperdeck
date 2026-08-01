@@ -75,3 +75,24 @@ def test_device_token_not_honored_on_unscoped_route(client, db_session):
     device_client = _device_client(db_session)
     resp = device_client.get("/api/settings", headers={"Authorization": f"Bearer {token}"})
     assert resp.status_code == 401
+
+
+def test_bearer_token_skips_csrf_but_not_honored_on_other_mutating_route(client, db_session):
+    """enforce_csrf skips its CSRF check for ANY request bearing an
+    Authorization: Bearer header, not just /api/transcribe (app.py:189).
+    The safety net is that every other route still uses the unchanged
+    get_current_user, which never reads the bearer header. POST
+    /api/hotwords is a real mutating route on plain get_current_user,
+    unrelated to this feature: with a valid device token, no session
+    cookie, and no X-CSRF-Token header, it must 401 (not logged in) --
+    not 403 (would mean CSRF wasn't actually skipped) and not 200
+    (would mean the token leaked into a route it shouldn't affect)."""
+    user = db_session.query(User).filter(User.username == "testuser").first()
+    token = set_device_token(db_session, user)
+    device_client = _device_client(db_session)
+    resp = device_client.post(
+        "/api/hotwords",
+        json={"term": "example"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 401

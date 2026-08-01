@@ -291,8 +291,8 @@ def get_current_user_or_device(request: Request, db: Session = Depends(get_db)) 
     """Auth dependency for the one route that must also accept a device's
     bearer token. Session cookie is tried first so a logged-in browser tab
     is unaffected; the bearer token is the fallback for a headless caller
-    with no cookie jar. Deliberately not the default get_current_user —
-    every other route keeps session-only auth."""
+    with no cookie jar. Deliberately not the default get_current_user,
+    since every other route keeps session-only auth."""
     user = _resolve_session_user(request, db)
     if user:
         return user
