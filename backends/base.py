@@ -17,6 +17,7 @@ class Segment:
     text: str
     speaker: Optional[str] = None
     confidence: Optional[float] = None
+    no_speech_prob: Optional[float] = None
 
 
 @dataclass
@@ -69,6 +70,7 @@ class BaseProvider(ABC):
                 text=s.get("text", "").strip(),
                 speaker=s.get("speaker"),
                 confidence=s.get("confidence"),
+                no_speech_prob=s.get("no_speech_prob"),
             )
             for s in raw_segments
         ]

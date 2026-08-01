@@ -118,6 +118,7 @@ class TranscriptionService:
                     "text": s.text,
                     "speaker": s.speaker,
                     "confidence": s.confidence,
+                    "no_speech_prob": s.no_speech_prob,
                 }
                 for s in result.segments
             ]
