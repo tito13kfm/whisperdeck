@@ -27,6 +27,7 @@ def _svc(tmp_path):
 
 
 def test_embed_speechbrain_caches_classifier_across_calls(tmp_path, monkeypatch):
+    pytest.importorskip("torch")
     svc = _svc(tmp_path)
 
     calls = {"instantiated": 0}

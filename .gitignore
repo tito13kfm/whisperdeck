@@ -36,6 +36,10 @@ scripts/settings_payload.json
 # Local unsloth studio scratch/working dir (machine-local, unrelated to this project)
 unsloth_compiled_cache/
 
+# Local verification and audit scratch space
+.local/
+.audit-worktrees/
+
 # oh-my-openagent (OpenCode) runtime state: session-continuation blobs and
 # working plan docs, machine-local like .opencode/ above
 .omo/
@@ -47,4 +51,3 @@ skill-observations/last-scheduled-review-report.md
 skill-observations/last-scheduled-review-status.txt
 skill-observations/claudemd-backup.md
 skill-observations/claudemd-staged*.md
-

@@ -4,6 +4,7 @@
   "private": true,
   "description": "WhisperDeck frontend build step",
   "scripts": {
+    "test": "npm run test:js",
     "build": "npm run build:js && npm run build:css",
     "build:js": "esbuild static/rack.js --bundle --minify --outfile=static/rack.min.js",
     "build:css": "esbuild static/rack.css --minify --outfile=static/rack.min.css",

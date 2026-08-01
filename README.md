@@ -266,6 +266,20 @@ Or run pytest directly with the venv:
 .venv/bin/python -m pytest            # Linux/macOS
 ```
 
+Run the standard local verification gate, including Python tests, JavaScript
+tests, and whitespace checks:
+
+```bash
+# Windows PowerShell
+.\scripts\verify.ps1
+
+# Linux/macOS
+./scripts/verify.sh
+```
+
+The repository targets Python 3.13. Keep the project virtual environment at
+`.venv/`; the verification scripts use it automatically when present.
+
 Adding a transcription provider:
 
 1. Create `backends/newprovider.py` subclassing `BaseProvider`; implement `transcribe()`, `check_health()`, `list_models()`.
