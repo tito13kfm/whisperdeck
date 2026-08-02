@@ -277,6 +277,13 @@ def test_save_draft_404_other_users_transcript(client, db_session):
 
 def test_finalize_inserts_rows_and_filters_discarded(client, db_session):
     user, t = _make_voice_dump_transcript(db_session)
+    job = LlmJob(
+        user_id=user.id, transcript_id=t.id, kind="voice_dump",
+        provider="groq", model="llama3", status="completed",
+        result_json={"items": []},
+    )
+    db_session.add(job)
+    db_session.commit()
     items = [
         {"index": 0, "type": "bug", "title": "Bug one", "body": "desc", "structured": {}},
         {"index": 1, "type": "idea", "title": "Idea one", "body": "desc", "structured": {}, "discarded": True},
@@ -292,6 +299,7 @@ def test_finalize_inserts_rows_and_filters_discarded(client, db_session):
     assert result[0]["note_type"] == "bug"
     assert result[1]["note_type"] == "todo"
     assert all(it["id"] is not None for it in result)
+    assert all(it["source_job_id"] == job.id for it in result)
 
     # Verify DB rows
     rows = db_session.query(VoiceDumpItem).filter(
@@ -300,8 +308,10 @@ def test_finalize_inserts_rows_and_filters_discarded(client, db_session):
     assert len(rows) == 2
     assert rows[0].note_type == "bug"
     assert rows[0].sequence_index == 0
+    assert rows[0].source_job_id == job.id
     assert rows[1].note_type == "todo"
     assert rows[1].sequence_index == 1  # original index preserved
+    assert rows[1].source_job_id == job.id
 
 
 def test_finalize_all_discarded_returns_empty(client, db_session):

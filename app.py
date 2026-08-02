@@ -3002,11 +3002,17 @@ async def finalize_voice_dump(
 
     kept = [it for it in items if not it.get("discarded", False)]
 
+    source_job_id = None
+    source_job = latest_job(db, transcript_id, "voice_dump")
+    if source_job:
+        source_job_id = source_job.id
+
     created = []
     for idx, item in enumerate(kept):
         vdi = VoiceDumpItem(
             user_id=current_user.id,
             transcript_id=transcript_id,
+            source_job_id=source_job_id,
             sequence_index=idx,
             note_type=item.get("type", "general"),
             title=item.get("title", ""),
