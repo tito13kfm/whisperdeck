@@ -167,24 +167,22 @@ async def classify_voice_note(
     return label if label in NOTE_TYPES else "general"
 
 
-async def structure_voice_note(
-    transcript, note_type: str,
+async def _structure_from_text(
+    text: str, note_type: str,
     api_key: str = "", provider_name: str = "groq",
     provider_config: dict | None = None, model: str = "",
 ) -> dict:
-    """Run the per-type structure prompt. Returns
-    {"type", "title", "body", "structured"}. A bad parse falls back to a
-    minimal general-shaped body so a structure hiccup never strands the
-    user with a VoiceNote row that has only a type and nothing else."""
+    """Run the per-type structure prompt against an already-extracted text
+    string. Same contract as structure_voice_note but takes text directly
+    so the voice-dump path can call it per-span without a transcript object."""
     if note_type not in NOTE_TYPES:
         note_type = "general"
-    text = _transcript_text(transcript)
     prompt = _structure_prompt(note_type).replace("{text}", text)
     try:
         content = await _generate(prompt, api_key, provider_name, model, provider_config, json_mode=True)
         data = json.loads(content)
     except Exception:
-        # Fallback body: hand the user the raw transcript so they have
+        # Fallback body: hand the user the raw text so they have
         # SOMETHING useful, with a stub title. The classifier's result
         # is preserved (whatever it was) so the user can see what the
         # first call thought.
@@ -200,6 +198,74 @@ async def structure_voice_note(
         "body": (data.get("body") or "").strip(),
         "structured": data.get("structured") if isinstance(data.get("structured"), dict) else {},
     }
+
+
+async def structure_voice_note(
+    transcript, note_type: str,
+    api_key: str = "", provider_name: str = "groq",
+    provider_config: dict | None = None, model: str = "",
+) -> dict:
+    """Thin wrapper that extracts text from the transcript object and
+    delegates to _structure_from_text. Preserves the original signature
+    and behavior for existing callers."""
+    text = _transcript_text(transcript)
+    return await _structure_from_text(text, note_type, api_key, provider_name, provider_config, model)
+
+
+async def segment_voice_dump(
+    transcript,
+    api_key: str = "", provider_name: str = "groq",
+    provider_config: dict | None = None, model: str = "",
+) -> list[dict]:
+    """Split a long multi-topic voice-dump transcript into ordered spans.
+
+    One LLM call classifies the raw transcript into individual items each
+    with an exact text span and a tentative type. Returns
+    [{span_text, tentative_type}] — spans + labels only, no full bodies
+    (avoids context truncation when the transcript has many items).
+
+    Falls back to a single "general"-typed item wrapping the full
+    transcript on any parse error or empty result, so the caller's loop
+    always has something to iterate over."""
+    text = _transcript_text(transcript)
+    if not text.strip():
+        return [{"span_text": "", "tentative_type": "general"}]
+    prompt = (
+        "The following is a raw speech-to-text transcript of a continuous "
+        "voice capture session where the speaker dictated multiple separate "
+        "items one after another (bugs, ideas, todos, reminders, journal "
+        "entries, or general notes).\n\n"
+        "Split this transcript into individual items. For each item, include "
+        "the exact span of text belonging to that item and classify its type "
+        "into one of:\n"
+        '- "todo": a list of things to do, a task, a plan of action\n'
+        '- "idea": a concept, an observation, something to think about\n'
+        '- "reminder": something the speaker wants to be reminded of later\n'
+        '- "journal": a personal reflection, a moment being recorded\n'
+        '- "general": none of the above fit well\n\n'
+        "Respond with a JSON array: "
+        '[{"span_text": "the exact transcript text for this item", '
+        '"tentative_type": "todo"}, ...]\n\n'
+        f"TRANSCRIPT:\n{text}"
+    )
+    try:
+        content = await _generate(
+            prompt, api_key, provider_name, model,
+            provider_config, json_mode=True,
+        )
+        items = json.loads(content)
+        if isinstance(items, list) and len(items) > 0:
+            valid = [
+                {"span_text": (item.get("span_text") or "").strip(),
+                 "tentative_type": item.get("tentative_type", "general")}
+                for item in items
+                if isinstance(item, dict) and (item.get("span_text") or "").strip()
+            ]
+            if valid:
+                return valid
+    except Exception:
+        pass
+    return [{"span_text": text.strip(), "tentative_type": "general"}]
 
 
 async def run_voice_note_chain(
