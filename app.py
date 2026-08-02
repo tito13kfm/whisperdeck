@@ -1063,12 +1063,15 @@ async def _run_transcription_pipeline(
     # this function never need to know the default happens to agree.
     #
     # This function is also the retranscribe entry point (source_transcript_id
-    # is set only there), which always passes an already-resolved kind, never
-    # "auto" — deliberately not stamping classification_status on that path:
-    # #271 owns deciding whether a retranscribed child re-runs classification
-    # (auto-classified parent) or carries an override forward unchanged
-    # (design decision 9), and stamping "override" here unconditionally would
-    # leave #271 fighting this line instead of a clean column default.
+    # is set only there). Since #271, retranscribe may pass kind="auto" when
+    # the source transcript was auto-classified (success/uncertain/failed);
+    # that hits the if kind=="auto" branch above and gets
+    # classification_status="pending" for re-classification. When retranscribe
+    # passes an explicit kind (override/legacy source), it falls through to
+    # classification_status=None here — column default "override" — carrying
+    # the user's explicit choice forward unchanged (design decision 9).
+    # Non-retranscribe callers always pass an explicit kind and land
+    # classification_status="override" above.
     is_retranscribe = source_transcript_id is not None
     if kind == "auto":
         classification_status = "pending"
@@ -2095,6 +2098,23 @@ async def retranscribe_transcript(
     root_id = t.source_transcript_id or t.id
     user_settings = get_user_settings(db, current_user.id)
     retranscribe_auto_correct = user_settings.get("auto_correct", True)
+    # Design decision 9 (#271): auto-classified transcripts re-classify against
+    # new corrected text (may legitimately classify differently). Overrides
+    # (including legacy-migrated) carry forward unchanged — a user's explicit
+    # choice is never silently discarded by a re-run.
+    source_status = t.classification_status or "override"  # column default is "override"
+    if source_status in ("success", "uncertain", "failed"):
+        # Re-classify: pass "auto" so _run_transcription_pipeline sets
+        # classification_status="pending" and the correction-completion
+        # trigger enqueues classify_pipeline against the new text.
+        # Includes "failed" per Oracle review: a failed classification is
+        # an auto-intent transcript that should get a fresh attempt, not
+        # be silently converted to an override (acceptance: "failures are
+        # visible and retryable").
+        retranscribe_kind = "auto"
+    else:
+        # Override, pending, or unknown — carry the existing kind forward.
+        retranscribe_kind = t.kind or "meeting"
     return await _run_transcription_pipeline(
         db, current_user, Path(t.audio_path),
         filename=t.filename,
@@ -2106,7 +2126,7 @@ async def retranscribe_transcript(
         diarize=diarize if diarize is not None else bool(t.diarize_requested),
         num_speakers=num_speakers if num_speakers is not None else t.num_speakers,
         source_transcript_id=root_id,
-        kind=t.kind or "meeting",
+        kind=retranscribe_kind,
         auto_correct=retranscribe_auto_correct,
     )
 
