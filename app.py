@@ -434,6 +434,7 @@ def _dictation_job_fields(jobs_map: dict[tuple[int, str], LlmJob], t: Transcript
                 else None
             ),
             "voice_note_job": None,
+            "voice_dump_job": None,
             "tagging_job": serialize_llm_job(tagging_job) if tagging_job else None,
         }
     if kind == "voice_note":
@@ -442,12 +443,14 @@ def _dictation_job_fields(jobs_map: dict[tuple[int, str], LlmJob], t: Transcript
             "format_markdown_job": None, "format_email_job": None, "format_coding_prompt_job": None,
             "classify_intent_job": None, "classify_intent_hint": None,
             "voice_note_job": serialize_llm_job(vn_job) if vn_job else None,
+            "voice_dump_job": None,
             "tagging_job": serialize_llm_job(tagging_job) if tagging_job else None,
         }
     return {
         "format_markdown_job": None, "format_email_job": None, "format_coding_prompt_job": None,
         "classify_intent_job": None, "classify_intent_hint": None,
         "voice_note_job": None,
+        "voice_dump_job": None,
         "tagging_job": serialize_llm_job(tagging_job) if tagging_job else None,
     }
 
@@ -1147,7 +1150,7 @@ async def _run_transcription_pipeline(
         classification_status = "override"
     else:
         classification_status = None  # leave column default; #271's territory
-    if kind in ("dictation", "voice_note"):
+    if kind in ("dictation", "voice_note", "voice_dump"):
         diarize = False
     if capture_source not in (None, "live_stereo"):
         capture_source = None  # unknown values from stale clients are ignored, not errors
@@ -1441,8 +1444,8 @@ async def transcribe_audio(
     current_user: User = Depends(get_current_user_or_device),
 ):
     """Upload and transcribe an audio file."""
-    if kind not in ("meeting", "dictation", "voice_note", "auto"):
-        raise HTTPException(status_code=400, detail="kind must be 'meeting', 'dictation', 'voice_note', or 'auto'")
+    if kind not in ("meeting", "dictation", "voice_note", "voice_dump", "auto"):
+        raise HTTPException(status_code=400, detail="kind must be 'meeting', 'dictation', 'voice_note', 'voice_dump', or 'auto'")
     is_device_call = getattr(request.state, "device_authenticated", False)
     if is_device_call and not rate_limiter.check(f"device-upload:{current_user.id}", max_requests=30, window_seconds=3600):
         raise HTTPException(status_code=429, detail="Too many device uploads, try again later")
@@ -1521,10 +1524,10 @@ async def bulk_transcribe(
     for idx, override in enumerate(per_file_overrides):
         if not isinstance(override, dict):
             raise HTTPException(status_code=400, detail=f"file_settings[{idx}] must be an object")
-        if "kind" in override and override["kind"] not in ("meeting", "dictation", "voice_note", "auto"):
+        if "kind" in override and override["kind"] not in ("meeting", "dictation", "voice_note", "voice_dump", "auto"):
             raise HTTPException(
                 status_code=400,
-                detail=f"file_settings[{idx}].kind must be 'meeting', 'dictation', 'voice_note', or 'auto'",
+                detail=f"file_settings[{idx}].kind must be 'meeting', 'dictation', 'voice_note', 'voice_dump', or 'auto'",
             )
         if "provider" in override:
             try:
@@ -1537,8 +1540,8 @@ async def bulk_transcribe(
 
     # Validate kind
     kind = global_settings.get("kind", "meeting")
-    if kind not in ("meeting", "dictation", "voice_note", "auto"):
-        raise HTTPException(status_code=400, detail="kind must be 'meeting', 'dictation', 'voice_note', or 'auto'")
+    if kind not in ("meeting", "dictation", "voice_note", "voice_dump", "auto"):
+        raise HTTPException(status_code=400, detail="kind must be 'meeting', 'dictation', 'voice_note', 'voice_dump', or 'auto'")
 
     # Validate provider
     provider = global_settings.get("provider", "moonshine")
@@ -2071,8 +2074,8 @@ async def update_transcript(transcript_id: int, data: dict = Body(...), db: Sess
     if "full_text" in data:
         t.full_text = data["full_text"]
     if "kind" in data:
-        if data["kind"] not in ("meeting", "dictation", "voice_note", "auto"):
-            raise HTTPException(status_code=400, detail="kind must be 'meeting', 'dictation', 'voice_note', or 'auto'")
+        if data["kind"] not in ("meeting", "dictation", "voice_note", "voice_dump", "auto"):
+            raise HTTPException(status_code=400, detail="kind must be 'meeting', 'dictation', 'voice_note', 'voice_dump', or 'auto'")
         # The pipeline reads kind mid-job (dictation skips diarization), so a
         # flip during processing would diarize later chunks differently than
         # earlier ones. Only allow changing kind on settled transcripts.

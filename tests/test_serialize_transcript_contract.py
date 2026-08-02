@@ -36,7 +36,7 @@ EXPECTED_KEYS = {
     "correction_job", "summary_job", "voice_match_job", "classify_pipeline_job",
     "format_markdown_job", "format_email_job", "format_coding_prompt_job",
     "classify_intent_job", "classify_intent_hint",
-    "voice_note_job", "tagging_job",
+    "voice_note_job", "voice_dump_job", "tagging_job",
     "tags",
     "cost",
 }
@@ -60,6 +60,12 @@ def test_voice_note_transcript_key_set_matches_expected(db_session):
     assert set(out.keys()) == EXPECTED_KEYS
 
 
+def test_voice_dump_transcript_key_set_matches_expected(db_session):
+    user, t = _build_transcript(db_session, kind="voice_dump", username="contract-vd")
+    out = _serialize_transcript(db_session, t, jobs_map=_batch_latest_jobs(db_session, [t.id]))
+    assert set(out.keys()) == EXPECTED_KEYS
+
+
 def test_all_kinds_have_same_job_field_names(db_session):
     """The dictation-only / voice-note-only fields are always present
     (null for kinds that never have that job). The shape is uniform
@@ -68,32 +74,42 @@ def test_all_kinds_have_same_job_field_names(db_session):
     _, meeting = _build_transcript(db_session, kind="meeting", username="contract-meeting")
     _, dictation = _build_transcript(db_session, kind="dictation", username="contract-dictation")
     _, voice_note = _build_transcript(db_session, kind="voice_note", username="contract-vn2")
+    _, voice_dump = _build_transcript(db_session, kind="voice_dump", username="contract-vd2")
     m = _serialize_transcript(db_session, meeting, jobs_map=_batch_latest_jobs(db_session, [meeting.id]))
     d = _serialize_transcript(db_session, dictation, jobs_map=_batch_latest_jobs(db_session, [dictation.id]))
     v = _serialize_transcript(db_session, voice_note, jobs_map=_batch_latest_jobs(db_session, [voice_note.id]))
-    assert set(m.keys()) == set(d.keys()) == set(v.keys())
+    vd = _serialize_transcript(db_session, voice_dump, jobs_map=_batch_latest_jobs(db_session, [voice_dump.id]))
+    assert set(m.keys()) == set(d.keys()) == set(v.keys()) == set(vd.keys())
     for k in ("format_markdown_job", "format_email_job", "format_coding_prompt_job",
               "classify_intent_job", "classify_intent_hint", "voice_note_job"):
         assert m[k] is None, f"{k} should be None for meeting, got {m[k]!r}"
         assert d[k] is None, f"{k} should be None for dictation, got {d[k]!r}"
+        assert vd[k] is None, f"{k} should be None for voice_dump, got {vd[k]!r}"
     # voice_note has the format_* fields null (chain is separate) but
     # voice_note_job is the new active field; the meeting/dictation
     # rows have it null too.
     assert v["voice_note_job"] is None  # no job yet in this fixture
+    assert m["voice_dump_job"] is None
+    assert d["voice_dump_job"] is None
+    assert v["voice_dump_job"] is None
+    assert vd["voice_dump_job"] is None
     # tagging_job is uniform across all kinds (tagging runs on every
     # kind, not just one); null in this fixture because no job exists yet.
     assert m["tagging_job"] is None
     assert d["tagging_job"] is None
     assert v["tagging_job"] is None
+    assert vd["tagging_job"] is None
     # classify_pipeline_job is uniform too (issue #267) — null until a
     # classification job exists, regardless of kind.
     assert m["classify_pipeline_job"] is None
     assert d["classify_pipeline_job"] is None
     assert v["classify_pipeline_job"] is None
+    assert vd["classify_pipeline_job"] is None
     # tags list is also uniform, empty when no job has completed.
     assert m["tags"] == []
     assert d["tags"] == []
     assert v["tags"] == []
+    assert vd["tags"] == []
 
 
 def test_classification_state_defaults_to_override(db_session):

@@ -20,7 +20,7 @@ TERMINAL_LLM_STATUSES = ("completed", "failed", "cancelled")
 VALID_KINDS = (
     "correction", "summary", "rediarize", "voice_match",
     "format_markdown", "format_email", "format_coding_prompt", "classify_intent",
-    "voice_note", "tagging", "assistant", "classify_pipeline",
+    "voice_note", "voice_dump", "tagging", "assistant", "classify_pipeline",
 )
 # Auto-retry (issue #14) is scoped to network-dependent kinds only —
 # correction/summary/format_*/classify_intent call a provider API and can
@@ -39,7 +39,7 @@ AUTO_RETRY_KINDS = ("correction", "summary", "format_markdown", "format_email", 
 # embedding extraction) and stay small so they don't fight each other for
 # the same CPU. IO_KINDS/CPU_KINDS must partition VALID_KINDS exactly — see
 # test_io_cpu_pools_partition_valid_kinds.
-IO_KINDS = ("correction", "summary", "format_markdown", "format_email", "format_coding_prompt", "classify_intent", "voice_note", "tagging", "assistant", "classify_pipeline")
+IO_KINDS = ("correction", "summary", "format_markdown", "format_email", "format_coding_prompt", "classify_intent", "voice_note", "voice_dump", "tagging", "assistant", "classify_pipeline")
 CPU_KINDS = ("rediarize", "voice_match")
 _MAX_CONCURRENT_IO_JOBS = 2
 _MAX_CONCURRENT_CPU_JOBS = 1

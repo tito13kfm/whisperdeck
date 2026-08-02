@@ -219,6 +219,35 @@ class TranscriptionService:
             db.commit()
             return summary
 
+        if transcript.kind == "voice_dump":
+            # Voice-dump items are structured individually by the voice_dump
+            # LLM chain (issue #283). Re-running a meeting-style summary on
+            # top would be duplicate work. Return a stub.
+            existing = db.query(Summary).filter(Summary.transcript_id == transcript_id).first()
+            short = "Voice dump — see the Dump Review tab for extracted items."
+            if existing:
+                existing.short_summary = short
+                existing.key_points = []
+                existing.action_items = []
+                existing.decisions = []
+                existing.model = model
+                existing.provider = provider_name
+                existing.created_at = utcnow_naive()
+                summary = existing
+            else:
+                summary = Summary(
+                    transcript_id=transcript_id,
+                    short_summary=short,
+                    key_points=[],
+                    action_items=[],
+                    decisions=[],
+                    model=model,
+                    provider=provider_name,
+                )
+                db.add(summary)
+            db.commit()
+            return summary
+
         if transcript.kind == "dictation":
             prompt = f"""You are summarizing a single person's spoken dictation (not a meeting — there is no "discussion" between multiple people). Analyze the following transcript and produce a structured summary.
 

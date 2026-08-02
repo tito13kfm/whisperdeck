@@ -2760,10 +2760,11 @@ function renderBulk() {
               <option value="auto" ${S.bulkDefaults.kind === 'auto' ? 'selected' : ''}>Auto</option>
               <option value="meeting" ${S.bulkDefaults.kind === 'meeting' ? 'selected' : ''}>Meeting</option>
               <option value="dictation" ${S.bulkDefaults.kind === 'dictation' ? 'selected' : ''}>Dictation</option>
-              <option value="voice_note" ${S.bulkDefaults.kind === 'voice_note' ? 'selected' : ''}>Voice Note</option>
-            </select>
-          </div>
-          <div class="field">
+            <option value="voice_note" ${S.bulkDefaults.kind === 'voice_note' ? 'selected' : ''}>Voice Note</option>
+            <option value="voice_dump" ${S.bulkDefaults.kind === 'voice_dump' ? 'selected' : ''}>Audit / stream-of-consciousness dump</option>
+          </select>
+        </div>
+        <div class="field">
             <label class="t-label">&nbsp;</label>
             <label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer">
               <input type="checkbox" id="bulk-diarize" ${S.bulkDefaults.diarize ? 'checked' : ''}> Diarize
@@ -2822,6 +2823,7 @@ function renderBulkFileRow(bf, i) {
         <option value="meeting" ${(bf.kind || S.bulkDefaults.kind) === 'meeting' ? 'selected' : ''}>Meeting</option>
         <option value="dictation" ${(bf.kind || S.bulkDefaults.kind) === 'dictation' ? 'selected' : ''}>Dictation</option>
         <option value="voice_note" ${(bf.kind || S.bulkDefaults.kind) === 'voice_note' ? 'selected' : ''}>Voice Note</option>
+        <option value="voice_dump" ${(bf.kind || S.bulkDefaults.kind) === 'voice_dump' ? 'selected' : ''}>Audit / stream-of-consciousness dump</option>
       </select>
       <select class="inp bulk-field" data-bulk-idx="${i}" data-field="language" style="font-size:11px;width:100px">
         ${LANGUAGES.map(l => '<option value="' + l + '" ' + ((bf.language == null && l === 'Auto-detect') || bf.language === (l === 'Auto-detect' ? 'auto' : l.toLowerCase().slice(0, 2)) ? 'selected' : '') + '>' + escapeHtml(l) + '</option>').join('')}
