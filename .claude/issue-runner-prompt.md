@@ -1,15 +1,15 @@
 # Claude Code Issue Runner
 
-Entry point for `/issue <N>` in Claude Code. This is a parallel port of
-opencode's `.omo/issue-runner-prompt.md`, adapted to Claude Code's own
+Entry point for `/issue-claude <N>` in Claude Code. This is a parallel port
+of opencode's `.omo/issue-runner-prompt.md`, adapted to Claude Code's own
 tools. Opencode's `/issue` and this command never drift into each other;
 if you're tuning workflow logic, decide which tool's users need the change
 and edit that tool's copy specifically.
 
-You (the orchestrator) run this on Opus. The `.claude/commands/issue.md`
-wrapper already confirmed that before inlining this file — if you're
-reading this and you are not Opus, stop now and tell the user to run
-`/model opus`.
+You (the orchestrator) run this on Opus. The
+`.claude/commands/issue-claude.md` wrapper already confirmed that before
+inlining this file — if you're reading this and you are not Opus, stop now
+and tell the user to run `/model opus`.
 
 ## Phase 0: resolve the real target issue
 
