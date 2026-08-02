@@ -10,6 +10,9 @@ test_audio.mp3
 .claude/*
 !.claude/skills/
 !.claude/skills/**
+!.claude/commands/
+!.claude/commands/**
+!.claude/issue-runner-prompt.md
 .serena/
 *.log
 dist/
