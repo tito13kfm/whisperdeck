@@ -1,5 +1,5 @@
 ---
-description: "Run the full issue workflow end to end (resolve, investigate, fix, test, PR) using Claude Code's own tools. Works on a standalone issue or a tracking issue (auto-picks the next open item). Usage: /issue <issue-or-tracking-number>. Pass ONLY the number, nothing else on the line, anything past the first token gets treated as part of the number and breaks resolution. Send any override/special instructions as a separate follow-up message after this one. Requires an Opus session -- run /model opus first."
+description: "Run the full issue workflow end to end (resolve, investigate, fix, test, PR) using Claude Code's own tools. Works on a standalone issue or a tracking issue (auto-picks the next open item). Usage: /issue-claude <issue-or-tracking-number>. Pass ONLY the number, nothing else on the line, anything past the first token gets treated as part of the number and breaks resolution. Send any override/special instructions as a separate follow-up message after this one. Requires an Opus session -- run /model opus first."
 argument-hint: <issue-number-only-nothing-else>
 ---
 
@@ -9,7 +9,7 @@ Target issue number given: $ARGUMENTS
 **Model check, before anything else:** confirm you are running as Opus
 (check your own environment context for the active model name). If you are
 not Opus, stop here and tell the user to run `/model opus`, then re-invoke
-`/issue <N>`. Do not proceed to Phase 0 on any other model.
+`/issue-claude <N>`. Do not proceed to Phase 0 on any other model.
 
 If the text above contains anything beyond a single number (extra words,
 an override, a sentence), that's a misuse of this command, the caller put
