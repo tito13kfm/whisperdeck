@@ -580,6 +580,48 @@ async def run_llm_job(SessionLocal, job_id: int, transcription_service, diarizat
                 _finish(db, job, "completed")
             except Exception as e:
                 _finish(db, job, "failed", str(e))
+        elif job.kind == "voice_dump":
+            # Segment → structure per span → assemble items array.
+            # progress_total = N spans + 1; one tick per completed
+            # structure call. VoiceDumpItem rows are NOT created here
+            # (that is #285, called by the finalization endpoint).
+            job.progress_total = 1
+            db.commit()
+            try:
+                from services.voice_notes import segment_voice_dump, _structure_from_text
+                segments = await segment_voice_dump(
+                    transcript, api_key=api_key, provider_name=job.provider,
+                    provider_config=provider_config, model=job.model,
+                )
+                job.progress_total = len(segments) + 1
+                db.commit()
+                items = []
+                for i, seg in enumerate(segments):
+                    db.refresh(job)
+                    if job.status == "cancelled":
+                        return
+                    result = await _structure_from_text(
+                        seg["span_text"], seg.get("tentative_type", "general"),
+                        api_key=api_key, provider_name=job.provider,
+                        provider_config=provider_config, model=job.model,
+                        include_clarifying=True,
+                    )
+                    items.append({
+                        "index": i,
+                        "type": result.get("type", "general"),
+                        "title": result.get("title", ""),
+                        "body": result.get("body", ""),
+                        "structured": result.get("structured", {}),
+                        "clarifying_questions": result.get("clarifying_questions", []),
+                    })
+                    job.progress_done = i + 1
+                    db.commit()
+                job.result_json = {"items": items}
+                job.progress_done = len(segments) + 1
+                db.commit()
+                _finish(db, job, "completed")
+            except Exception as e:
+                _finish(db, job, "failed", str(e))
         elif job.kind == "rediarize":
             job.progress_total = 1
             db.commit()
