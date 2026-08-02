@@ -72,6 +72,7 @@ class Transcript(Base):
 
     summary = relationship("Summary", back_populates="transcript", uselist=False, cascade="all, delete-orphan")
     voice_note = relationship("VoiceNote", back_populates="transcript", uselist=False, cascade="all, delete-orphan")
+    voice_dump_items = relationship("VoiceDumpItem", back_populates="transcript", cascade="all, delete-orphan")
     jobs = relationship("TranscriptionJob", back_populates="transcript", cascade="all, delete-orphan")
     # ORM-level cascade is load-bearing: the FK's ondelete="CASCADE" never
     # fires because SQLite's foreign_keys pragma is off (never enabled by
@@ -187,6 +188,32 @@ class VoiceNote(Base):
     created_at = Column(DateTime, default=utcnow_naive, onupdate=utcnow_naive)
 
     transcript = relationship("Transcript", back_populates="voice_note")
+
+
+class VoiceDumpItem(Base):
+    """One item from a multi-item voice-dump capture (issue #283).
+    Many rows per transcript — no unique constraint on transcript_id.
+    Structured payload mirrors the VoiceNote shape (title/body/structured)
+    but each row is one discrete item (bug, idea, todo, reminder, etc.)
+    extracted from a single long dictation."""
+    __tablename__ = "voice_dump_items"
+
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    transcript_id = Column(
+        Integer, ForeignKey("transcripts.id", ondelete="CASCADE"), nullable=False,
+    )
+    source_job_id = Column(Integer, ForeignKey("llm_jobs.id"), nullable=True)  # LlmJob(kind="voice_dump")
+    sequence_index = Column(Integer, nullable=False, default=0)
+    note_type = Column(String(16), nullable=False)  # bug | idea | todo | reminder (TBD in #284)
+    title = Column(String(255), default="")
+    body = Column(Text, default="")
+    structured = Column(JSON, default=dict)
+    model = Column(String(128), default="")
+    provider = Column(String(64), default="")
+    created_at = Column(DateTime, default=utcnow_naive)
+
+    transcript = relationship("Transcript", back_populates="voice_dump_items")
 
 
 class TranscriptTag(Base):
