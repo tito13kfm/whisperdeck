@@ -69,3 +69,29 @@ def test_patch_kind_records_explicit_override(client, db_session):
     assert r.status_code == 200
     db_session.refresh(t)
     assert t.classification_status == "override"
+
+
+def test_patch_auto_sets_pending_placeholder(db_session, client):
+    """PATCH kind='auto' reverts to auto-classification: stores 'meeting'
+    placeholder with classification_status='pending' (same pattern as a
+    fresh 'auto' recording)."""
+    t = _make_transcript(db_session, kind="dictation", classification_status="override")
+    r = client.patch(f"/api/transcripts/{t.id}", json={"kind": "auto"})
+    assert r.status_code == 200
+    db_session.refresh(t)
+    assert t.kind == "meeting"
+    assert t.classification_status == "pending"
+    assert t.classification_confidence is None
+    assert t.classification_provenance is None
+
+
+def test_patch_auto_accepted_by_serializer(db_session, client):
+    """PATCH kind='auto' serializes with the placeholder kind but
+    classification_status='pending'."""
+    t = _make_transcript(db_session, kind="dictation", classification_status="override")
+    r = client.patch(f"/api/transcripts/{t.id}", json={"kind": "auto"})
+    assert r.status_code == 200
+    data = r.json()
+    assert data["kind"] == "meeting"
+    assert data["classification_status"] == "pending"
+    assert data["classification_confidence"] is None

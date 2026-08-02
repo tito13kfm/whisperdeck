@@ -82,15 +82,11 @@ def test_retranscribe_creates_new_row_and_keeps_original(client, db_session):
     assert old.full_text == "first pass"
 
 
-def test_retranscribe_child_classification_status_not_forced_by_268(client, db_session):
-    """Issue #268 introduces the 'auto' kind sentinel for fresh uploads, but
-    retranscribe (source_transcript_id set) never passes kind='auto' — its
-    child must land at the plain column default ('override'), not have
-    #268's upload-path logic silently stamp a value that would block #271's
-    real carry-forward/reclassify decision (design decision 9) later.
-    Regression guard for a real review finding, not yet observably different
-    from #268's actual (guarded) behavior -- exists to catch a future
-    accidental removal of the source_transcript_id guard."""
+def test_retranscribe_auto_classified_parent_reclassifies(client, db_session):
+    """Design decision 9 (#271): auto-classified (success/uncertain) parent
+    triggers re-classification on the child — classification_status is now
+    'pending', not the column default 'override', so the correction-completion
+    trigger enqueues classify_pipeline against the new corrected text."""
     client.put("/api/settings", json={"auto_correct": False})
     original = _upload(client, text="first pass").json()
     parent = db_session.query(Transcript).filter(Transcript.id == original["id"]).first()
@@ -105,7 +101,72 @@ def test_retranscribe_child_classification_status_not_forced_by_268(client, db_s
         )
     assert r.status_code == 200
     child = db_session.query(Transcript).filter(Transcript.id == r.json()["id"]).first()
+    assert child.classification_status == "pending"
+
+
+def test_retranscribe_override_parent_carries_kind_forward(client, db_session):
+    """Design decision 9 (#271): an override parent (including legacy-migrated)
+    carries its kind forward unchanged — a user's explicit choice is never
+    silently discarded by a re-run."""
+    client.put("/api/settings", json={"auto_correct": False})
+    original = _upload(client, text="first pass").json()
+    parent = db_session.query(Transcript).filter(Transcript.id == original["id"]).first()
+    parent.classification_status = "override"
+    parent.kind = "dictation"
+    db_session.commit()
+
+    p1, p2, p3 = _pipeline_patches(text="second pass")
+    with p1, p2, p3:
+        r = client.post(
+            f"/api/transcripts/{original['id']}/retranscribe",
+            data={"provider": "groq", "model": "whisper-large-v3"},
+        )
+    assert r.status_code == 200
+    child = db_session.query(Transcript).filter(Transcript.id == r.json()["id"]).first()
     assert child.classification_status == "override"
+    assert child.kind == "dictation"
+
+
+def test_retranscribe_uncertain_parent_also_reclassifies(client, db_session):
+    """Uncertain classification also triggers re-classification — same
+    treatment as success per design decision 9."""
+    client.put("/api/settings", json={"auto_correct": False})
+    original = _upload(client, text="first pass").json()
+    parent = db_session.query(Transcript).filter(Transcript.id == original["id"]).first()
+    parent.classification_status = "uncertain"
+    db_session.commit()
+
+    p1, p2, p3 = _pipeline_patches(text="second pass")
+    with p1, p2, p3:
+        r = client.post(
+            f"/api/transcripts/{original['id']}/retranscribe",
+            data={"provider": "groq", "model": "whisper-large-v3"},
+        )
+    assert r.status_code == 200
+    child = db_session.query(Transcript).filter(Transcript.id == r.json()["id"]).first()
+    assert child.classification_status == "pending"
+
+
+def test_retranscribe_failed_parent_reclassifies_not_overrides(client, db_session):
+    """Oracle review finding: a failed classification is an auto-intent
+    transcript that should get a fresh attempt on retranscribe, not be
+    silently converted to an override (acceptance: 'failures are visible
+    and retryable')."""
+    client.put("/api/settings", json={"auto_correct": False})
+    original = _upload(client, text="first pass").json()
+    parent = db_session.query(Transcript).filter(Transcript.id == original["id"]).first()
+    parent.classification_status = "failed"
+    db_session.commit()
+
+    p1, p2, p3 = _pipeline_patches(text="second pass")
+    with p1, p2, p3:
+        r = client.post(
+            f"/api/transcripts/{original['id']}/retranscribe",
+            data={"provider": "groq", "model": "whisper-large-v3"},
+        )
+    assert r.status_code == 200
+    child = db_session.query(Transcript).filter(Transcript.id == r.json()["id"]).first()
+    assert child.classification_status == "pending"
 
 
 def test_retranscribe_chain_sets_source_transcript_id_to_root(client, db_session):

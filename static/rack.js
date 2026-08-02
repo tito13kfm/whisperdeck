@@ -807,7 +807,7 @@ function resetDeckState() {
   S.autoCorrect = false;
   S.correctionPending = false;
   S.correctionStatus = null;
-  S.mode = 'meeting';
+  S.mode = 'auto';
   S.capturing = false;
   S.stereoLive = false;
   S.permPending = false;
@@ -1732,8 +1732,8 @@ function mfdCatDefs() {
     { key: 'language', label: 'Language', desc: 'Spoken language of the audio.',
       opts: LANGUAGES, idx: S.langIdx,
       locked: prov.id === 'moonshine', lockedMsg: 'Moonshine is English-only — switch provider to change language' },
-    { key: 'mode', label: 'Mode', desc: 'Meeting: multi-speaker minutes. Dictation: voice notes, no speakers, offers to reformat after.',
-      opts: ['Meeting', 'Dictation', 'Voice Note'], idx: S.mode === 'dictation' ? 1 : S.mode === 'voice_note' ? 2 : 0 },
+    { key: 'mode', label: 'Mode', desc: 'Meeting: multi-speaker minutes. Dictation: voice notes, no speakers, offers to reformat after. Auto: let the app decide.',
+      opts: ['Auto', 'Meeting', 'Dictation', 'Voice Note'], idx: S.mode === 'meeting' ? 1 : S.mode === 'dictation' ? 2 : S.mode === 'voice_note' ? 3 : 0 },
     { key: 'speakers', label: 'Speakers', desc: 'Identify who spoke when (diarization).',
       opts: ['On', 'Off'], idx: (single || !S.diarize) ? 1 : 0, binary: true,
       locked: single, displayOverride: single ? 'N/A' : null },
@@ -1816,7 +1816,7 @@ function mfdNav(dir) {
   const newIdx = ((c.idx + dir) % n + n) % n;
   if (c.key === 'model') S.modelIdx = newIdx;
   else if (c.key === 'language') S.langIdx = newIdx;
-  else if (c.key === 'mode') S.mode = ['meeting', 'dictation', 'voice_note'][newIdx];
+  else if (c.key === 'mode') S.mode = ['auto', 'meeting', 'dictation', 'voice_note'][newIdx];
   syncTranscribe();
 }
 
@@ -2690,7 +2690,7 @@ async function discardVoiceNote(id) {
 /* ══════════════════ bulk import page ══════════════════ */
 const DEFAULT_BULK_DEFAULTS = {
   provider: 'moonshine', model: '', language: 'auto',
-  diarize: false, auto_correct: true, kind: 'meeting', num_speakers: null,
+  diarize: false, auto_correct: true, kind: 'auto', num_speakers: null,
 };
 
 async function loadBulk() {
@@ -2757,6 +2757,7 @@ function renderBulk() {
           <div class="field" style="min-width:100px">
             <label class="t-label">Kind</label>
             <select id="bulk-kind" class="inp">
+              <option value="auto" ${S.bulkDefaults.kind === 'auto' ? 'selected' : ''}>Auto</option>
               <option value="meeting" ${S.bulkDefaults.kind === 'meeting' ? 'selected' : ''}>Meeting</option>
               <option value="dictation" ${S.bulkDefaults.kind === 'dictation' ? 'selected' : ''}>Dictation</option>
               <option value="voice_note" ${S.bulkDefaults.kind === 'voice_note' ? 'selected' : ''}>Voice Note</option>
@@ -2817,6 +2818,7 @@ function renderBulkFileRow(bf, i) {
       </div>
       <input type="text" class="inp bulk-title" data-bulk-idx="${i}" data-field="title" value="${escapeHtml(bf.title || '')}" placeholder="${escapeHtml(bf.file.name.replace(/\.[^.]+$/, '') || bf.file.name)}" style="width:150px;font-size:11px">
       <select class="inp bulk-field" data-bulk-idx="${i}" data-field="kind" style="font-size:11px;width:100px">
+        <option value="auto" ${(bf.kind || S.bulkDefaults.kind) === 'auto' ? 'selected' : ''}>Auto</option>
         <option value="meeting" ${(bf.kind || S.bulkDefaults.kind) === 'meeting' ? 'selected' : ''}>Meeting</option>
         <option value="dictation" ${(bf.kind || S.bulkDefaults.kind) === 'dictation' ? 'selected' : ''}>Dictation</option>
         <option value="voice_note" ${(bf.kind || S.bulkDefaults.kind) === 'voice_note' ? 'selected' : ''}>Voice Note</option>
@@ -4680,6 +4682,16 @@ function renderDetail() {
   // underscore reads poorly as a UI label — the user sees the VFD
   // value "VOICE NOTE" elsewhere, this is the matching title-case).
   const kindLabel = kind === 'voice_note' ? 'Voice note' : (kind.charAt(0).toUpperCase() + kind.slice(1));
+  const cs = t.classification_status || 'override';
+  let classStatusText = '';
+  if (cs === 'pending') classStatusText = 'Classifying…';
+  else if (cs === 'failed') classStatusText = 'Failed';
+  else if (cs === 'uncertain') classStatusText = (t.classification_confidence != null ? Math.round(t.classification_confidence * 100) + '% — uncertain' : 'Uncertain');
+  else if (cs === 'success') {
+    classStatusText = (t.classification_confidence != null ? Math.round(t.classification_confidence * 100) + '% confidence' : '');
+    var prov = t.classification_provenance;
+    if (prov && prov.provider && prov.model) classStatusText += ' · ' + escapeHtml(prov.provider) + '/' + escapeHtml(prov.model);
+  } else if (cs === 'override') classStatusText = 'Manual override';
   const extraActs = [];
   if (t.status === 'partial')
     extraActs.push('<button class="btn" style="font-size:12px;padding:7px 14px;border-color:var(--inset-edge)" data-dact="retry">Retry failed sections</button>');
@@ -4747,7 +4759,7 @@ function renderDetail() {
         <div style="font-size:12.5px"><div style="font-family:var(--f-mono);font-size:10px;text-transform:uppercase;letter-spacing:0.08em;color:var(--label-dim);margin-bottom:3px">Status</div><span id="detail-status-badge" class="status-badge status-badge--${escapeHtml(sv.word)}" data-word="${escapeHtml(sv.word)}">${escapeHtml(sv.word)}</span></div>
         <div style="font-size:12.5px"><div style="font-family:var(--f-mono);font-size:10px;text-transform:uppercase;letter-spacing:0.08em;color:var(--label-dim);margin-bottom:3px">Speakers</div>${t.speaker_count || '—'}${t.diarization_method ? ` <span style="font-size:10px;color:var(--label-dim)">${escapeHtml(t.diarization_method)}${t.num_speakers ? '' : ' (auto)'}</span>` : ''}${(() => { const u = (t.segments || []).filter(isLowConfidence).length; return u ? ` <span style="font-size:10px;color:var(--nixie)" title="Lines where the speaker assignment is uncertain">${u} uncertain</span>` : ''; })()}</div>
         <div style="font-size:12.5px"><div style="font-family:var(--f-mono);font-size:10px;text-transform:uppercase;letter-spacing:0.08em;color:var(--label-dim);margin-bottom:3px">Segments</div>${(t.segments || []).length}</div>
-        <div style="font-size:12.5px"><div style="font-family:var(--f-mono);font-size:10px;text-transform:uppercase;letter-spacing:0.08em;color:var(--label-dim);margin-bottom:3px">Mode</div><button class="btn" style="font-size:11px;padding:2px 10px;border-color:var(--inset-edge);cursor:pointer" title="Switch between meeting, dictation, and voice-note modes" data-dact="toggle-kind">${escapeHtml(kindLabel)}</button></div>
+        <div style="font-size:12.5px"><div style="font-family:var(--f-mono);font-size:10px;text-transform:uppercase;letter-spacing:0.08em;color:var(--label-dim);margin-bottom:3px">Mode</div><button class="btn" style="font-size:11px;padding:2px 10px;border-color:var(--inset-edge);cursor:pointer" title="Switch mode — explicit selection overrides auto-classification" data-dact="toggle-kind">${escapeHtml(kindLabel)}</button>${classStatusText ? ' <span style="font-size:10px;color:var(--label-dim)">' + escapeHtml(classStatusText) + '</span>' : ''}</div>
       </div>
       ${detailCostHtml(t)}
     </div>
