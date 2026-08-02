@@ -50,8 +50,8 @@ def test_voice_dump_is_in_io_pool_not_cpu():
     assert "voice_dump" not in CPU_KINDS
 
 
-def test_voice_dump_is_not_auto_retry():
-    assert "voice_dump" not in AUTO_RETRY_KINDS
+def test_voice_dump_is_auto_retry():
+    assert "voice_dump" in AUTO_RETRY_KINDS
 
 
 # ── _structure_from_text ───────────────────────────────────────────────────

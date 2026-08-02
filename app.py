@@ -27,7 +27,7 @@ from sqlalchemy import or_, func, case
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from database import init_db, backfill_user_id, Transcript, Summary, VoiceNote, VoiceProfile, VoiceClip, ProviderConfig, User, LlmJob, TranscriptionJob, TranscriptTag, utcnow_naive
+from database import init_db, backfill_user_id, Transcript, Summary, VoiceNote, VoiceDumpItem, VoiceProfile, VoiceClip, ProviderConfig, User, LlmJob, TranscriptionJob, TranscriptTag, utcnow_naive
 from services.auth import (
     get_or_create_fallback_user, create_user, authenticate_user, validate_password,
     password_min_length, get_user_by_reset_token,
@@ -50,9 +50,9 @@ from services.hotwords import list_hotwords, add_hotword, delete_hotword
 from services.correction import extract_hotwords_from_doc
 from services.model_catalog import get_correction_models
 from services.llm_jobs import (
-    enqueue_llm_job, enqueue_auto_correction, enqueue_auto_classify, enqueue_auto_voice_note, enqueue_auto_tagging,
+    enqueue_llm_job, enqueue_auto_correction, enqueue_auto_classify, enqueue_auto_voice_note, enqueue_auto_voice_dump, enqueue_auto_tagging,
     enqueue_pipeline_classify,
-    serialize_llm_job,
+    serialize_llm_job, latest_job,
     cancel_llm_job, rerun_llm_job, llm_worker_loop, reset_stuck_llm_jobs,
     dismiss_llm_job, clear_finished_llm_jobs,
 )
@@ -319,7 +319,7 @@ def get_current_user_or_device(request: Request, db: Session = Depends(get_db)) 
 _SERIALIZED_JOB_KINDS = (
     "correction", "summary", "voice_match",
     "format_markdown", "format_email", "format_coding_prompt", "classify_intent",
-    "voice_note", "tagging", "assistant", "classify_pipeline",
+    "voice_note", "voice_dump", "tagging", "assistant", "classify_pipeline",
 )
 
 
@@ -444,6 +444,15 @@ def _dictation_job_fields(jobs_map: dict[tuple[int, str], LlmJob], t: Transcript
             "classify_intent_job": None, "classify_intent_hint": None,
             "voice_note_job": serialize_llm_job(vn_job) if vn_job else None,
             "voice_dump_job": None,
+            "tagging_job": serialize_llm_job(tagging_job) if tagging_job else None,
+        }
+    if kind == "voice_dump":
+        vd_job = jobs_map.get((t.id, "voice_dump"))
+        return {
+            "format_markdown_job": None, "format_email_job": None, "format_coding_prompt_job": None,
+            "classify_intent_job": None, "classify_intent_hint": None,
+            "voice_note_job": None,
+            "voice_dump_job": serialize_llm_job(vd_job) if vd_job else None,
             "tagging_job": serialize_llm_job(tagging_job) if tagging_job else None,
         }
     return {
@@ -1411,6 +1420,8 @@ async def _run_transcription_pipeline(
         enqueue_auto_classify(db, transcript, user_settings)
         if effective_kind(transcript) == "voice_note":
             enqueue_auto_voice_note(db, transcript, user_settings)
+        if effective_kind(transcript) == "voice_dump":
+            enqueue_auto_voice_dump(db, transcript, user_settings)
         # Tagging fires for every kind — keep this site in lockstep
         # with services/queue.py:_finalize_if_done (issue #171).
         enqueue_auto_tagging(db, transcript, user_settings)
@@ -2756,7 +2767,7 @@ async def transcript_runs(
     including dismissed ones (dismiss only hides a job from the Queue
     screen — the row and its result_json snapshot persist). Powers the
     run-comparison picker on the detail page."""
-    if kind not in ("correction", "summary", "rediarize", "format_markdown", "format_email", "format_coding_prompt", "classify_intent", "voice_note"):
+    if kind not in ("correction", "summary", "rediarize", "format_markdown", "format_email", "format_coding_prompt", "classify_intent", "voice_note", "voice_dump"):
         raise HTTPException(status_code=400, detail=f"Unknown run kind '{kind}'")
     t = db.query(Transcript).filter(
         Transcript.id == transcript_id, Transcript.user_id == current_user.id
@@ -2792,6 +2803,24 @@ def _serialize_voice_note(n: VoiceNote) -> dict:
         "model": n.model or "",
         "provider": n.provider or "",
         "created_at": n.created_at.isoformat() if n.created_at else None,
+    }
+
+
+def _serialize_voice_dump_item(item) -> dict:
+    if not item:
+        return None
+    return {
+        "id": item.id,
+        "transcript_id": item.transcript_id,
+        "source_job_id": item.source_job_id,
+        "sequence_index": item.sequence_index,
+        "note_type": item.note_type,
+        "title": item.title or "",
+        "body": item.body or "",
+        "structured": item.structured or {},
+        "model": item.model or "",
+        "provider": item.provider or "",
+        "created_at": item.created_at.isoformat() if item.created_at else None,
     }
 
 
@@ -2897,6 +2926,160 @@ async def rerun_voice_note_chain(
         raise HTTPException(status_code=400, detail=f"No {provider} API key saved — add one in the service panel")
     job = enqueue_llm_job(db, current_user.id, transcript_id, "voice_note", provider, model)
     return {"job": serialize_llm_job(job)}
+
+
+@app.post("/api/transcripts/{transcript_id}/voice-dump/rerun")
+async def rerun_voice_dump_chain(
+    transcript_id: int,
+    provider: str = Form("groq"),
+    model: str = Form(""),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """(Re)run the voice-dump LLM chain against a completed voice-dump
+    transcript. Pre-fails with a clear message when no key is saved,
+    mirroring voice-note/rerun."""
+    t = db.query(Transcript).filter(
+        Transcript.id == transcript_id, Transcript.user_id == current_user.id
+    ).first()
+    if not t:
+        raise HTTPException(status_code=404, detail="Transcript not found")
+    if effective_kind(t) != "voice_dump":
+        raise HTTPException(status_code=400, detail="Voice-dump chain only applies to voice_dump transcripts")
+    if t.status not in ("completed", "partial"):
+        raise HTTPException(status_code=400, detail=f"Transcript {transcript_id} is not completed")
+    from services.settings import resolve_provider_key, KEYLESS_PROVIDERS
+    api_key, _ = resolve_provider_key(db, current_user.id, provider)
+    if provider not in KEYLESS_PROVIDERS and not api_key:
+        raise HTTPException(status_code=400, detail=f"No {provider} API key saved — add one in the service panel")
+    job = enqueue_llm_job(db, current_user.id, transcript_id, "voice_dump", provider, model)
+    return {"job": serialize_llm_job(job)}
+
+
+@app.post("/api/transcripts/{transcript_id}/voice-dump/save-draft")
+async def save_voice_dump_draft(
+    transcript_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Save an edited item list back into the voice_dump job's result_json.
+    The client sends the full (possibly edited) item list; we replace
+    result_json['items'] with it. Only touches the draft, does not create
+    VoiceDumpItem rows."""
+    items = await request.json()
+    t = db.query(Transcript).filter(
+        Transcript.id == transcript_id, Transcript.user_id == current_user.id
+    ).first()
+    if not t:
+        raise HTTPException(status_code=404, detail="Transcript not found")
+    job = latest_job(db, transcript_id, "voice_dump")
+    if not job:
+        raise HTTPException(status_code=404, detail="No voice_dump job found for this transcript")
+    if not job.result_json:
+        job.result_json = {}
+    job.result_json = {**job.result_json, "items": items}
+    db.commit()
+    return {"items": items}
+
+
+@app.post("/api/transcripts/{transcript_id}/voice-dump/finalize")
+async def finalize_voice_dump(
+    transcript_id: int,
+    request: Request,
+    items: list[dict] = Body(..., embed=False),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Finalize voice-dump items. Accepts the (possibly edited) item list,
+    discards any item with discarded=True, and inserts VoiceDumpItem rows
+    for the rest. Does not delete the job or its result_json."""
+    t = db.query(Transcript).filter(
+        Transcript.id == transcript_id, Transcript.user_id == current_user.id
+    ).first()
+    if not t:
+        raise HTTPException(status_code=404, detail="Transcript not found")
+
+    kept = [it for it in items if not it.get("discarded", False)]
+
+    source_job_id = None
+    source_job = latest_job(db, transcript_id, "voice_dump")
+    if source_job:
+        source_job_id = source_job.id
+
+    created = []
+    for idx, item in enumerate(kept):
+        vdi = VoiceDumpItem(
+            user_id=current_user.id,
+            transcript_id=transcript_id,
+            source_job_id=source_job_id,
+            sequence_index=idx,
+            note_type=item.get("type", "general"),
+            title=item.get("title", ""),
+            body=item.get("body", ""),
+            structured=item.get("structured", {}),
+            model=item.get("model", ""),
+            provider=item.get("provider", ""),
+        )
+        db.add(vdi)
+        created.append(vdi)
+    db.commit()
+
+    # Refresh to get assigned ids
+    for vdi in created:
+        db.refresh(vdi)
+
+    return {"items": [_serialize_voice_dump_item(vdi) for vdi in created]}
+
+
+@app.get("/api/transcripts/{transcript_id}/voice-dump-items")
+async def get_transcript_voice_dump_items(
+    transcript_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """All finalized VoiceDumpItem rows for one transcript."""
+    t = db.query(Transcript).filter(
+        Transcript.id == transcript_id, Transcript.user_id == current_user.id
+    ).first()
+    if not t:
+        raise HTTPException(status_code=404, detail="Transcript not found")
+
+    items = (
+        db.query(VoiceDumpItem)
+        .filter(VoiceDumpItem.transcript_id == transcript_id)
+        .order_by(VoiceDumpItem.sequence_index)
+        .all()
+    )
+    return {"items": [_serialize_voice_dump_item(it) for it in items]}
+
+
+@app.get("/api/voice-dump-items")
+async def list_voice_dump_items(
+    limit: int = 100,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """List this user's voice dump items across all transcripts, most
+    recent first. Each row includes the source transcript's title and
+    duration for card rendering."""
+    rows = (
+        db.query(VoiceDumpItem, Transcript)
+        .join(Transcript, VoiceDumpItem.transcript_id == Transcript.id)
+        .filter(VoiceDumpItem.user_id == current_user.id)
+        .order_by(VoiceDumpItem.created_at.desc(), VoiceDumpItem.id.desc())
+        .limit(limit)
+        .all()
+    )
+    return {"items": [
+        {
+            **_serialize_voice_dump_item(item),
+            "transcript_title": t.title or "",
+            "transcript_duration_seconds": t.duration_seconds or 0,
+            "transcript_status": t.status,
+        }
+        for item, t in rows
+    ]}
 
 
 @app.get("/api/transcripts/{transcript_id}/versions")

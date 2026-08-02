@@ -32,7 +32,7 @@ VALID_KINDS = (
 # "Open Design Questions" in
 # docs/superpowers/plans/2026-07-07-queue-audit-llmjob-auto-retry.md
 # if reconsidering.
-AUTO_RETRY_KINDS = ("correction", "summary", "format_markdown", "format_email", "format_coding_prompt", "classify_intent", "voice_note", "tagging", "assistant", "classify_pipeline")
+AUTO_RETRY_KINDS = ("correction", "summary", "format_markdown", "format_email", "format_coding_prompt", "classify_intent", "voice_note", "voice_dump", "tagging", "assistant", "classify_pipeline")
 # Two independent concurrency pools, capped separately (issue #14): I/O-bound
 # kinds are provider API calls (bounded by provider rate limits, not local
 # resources), CPU-bound kinds are local compute (diarization clustering /
@@ -222,6 +222,33 @@ def enqueue_auto_voice_note(db, transcript, user_settings: dict) -> LlmJob | Non
     if provider not in KEYLESS_PROVIDERS and not api_key:
         error = f"voice-note chain skipped: no {provider} API key saved (see service panel)"
     return enqueue_llm_job(db, transcript.user_id, transcript.id, "voice_note", provider, model, error=error)
+
+
+def enqueue_auto_voice_dump(db, transcript, user_settings: dict) -> LlmJob | None:
+    """Auto-voice-dump entry point for the inline and chunked-finalize paths
+    — voice_dump transcripts only. Reuses the user's `format_provider` /
+    `format_model` settings (the same LLM that powers the dictation
+    reformat flow, since both are LLM-only text-in/text-out). The chain
+    itself never raises (classify falls back to "general", structure
+    falls back to a stub body), so the only error path is the missing
+    API key skip — same shape as the other auto-enqueue helpers.
+
+    Gated on effective_kind(), not raw transcript.kind (design decision 11)
+    — this is also the retroactive-trigger call site, invoked once a
+    pending transcript's classification resolves to voice_dump (see
+    run_llm_job's classify_pipeline branch)."""
+    from services.classification import effective_kind
+    if effective_kind(transcript) != "voice_dump":
+        return None
+    from services.settings import resolve_provider_key, KEYLESS_PROVIDERS
+
+    provider = user_settings.get("format_provider", "groq")
+    model = user_settings.get("format_model", "llama-3.3-70b-versatile")
+    api_key, _ = resolve_provider_key(db, transcript.user_id, provider)
+    error = None
+    if provider not in KEYLESS_PROVIDERS and not api_key:
+        error = f"voice-dump chain skipped: no {provider} API key saved (see service panel)"
+    return enqueue_llm_job(db, transcript.user_id, transcript.id, "voice_dump", provider, model, error=error)
 
 
 def enqueue_auto_tagging(db, transcript, user_settings: dict) -> LlmJob:
@@ -483,6 +510,9 @@ async def run_llm_job(SessionLocal, job_id: int, transcription_service, diarizat
             if accepted and result["kind"] == "voice_note":
                 from services.settings import get_user_settings
                 enqueue_auto_voice_note(db, transcript, get_user_settings(db, job.user_id))
+            if accepted and result["kind"] == "voice_dump":
+                from services.settings import get_user_settings
+                enqueue_auto_voice_dump(db, transcript, get_user_settings(db, job.user_id))
             _finish(db, job, "completed")
         elif job.kind == "tagging":
             # Mirrors classify_intent: single LLM call, progress_total=1,

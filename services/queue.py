@@ -597,7 +597,7 @@ async def _finalize_if_done(db, transcript_id: int, diarization_service) -> None
         # effective_kind(), so calling them unconditionally is safe. A long
         # voice-note recording (above LOCAL_CHUNK_SECONDS) takes this path,
         # so the same voice-note-chain enqueue needs to fire here too.
-        from services.llm_jobs import enqueue_auto_correction, enqueue_auto_classify, enqueue_auto_voice_note, enqueue_pipeline_classify
+        from services.llm_jobs import enqueue_auto_correction, enqueue_auto_classify, enqueue_auto_voice_note, enqueue_auto_voice_dump, enqueue_pipeline_classify
         from services.classification import effective_kind
         if user_settings.get("auto_correct", True):
             # Queued as a background LlmJob — the LLM worker loop picks it
@@ -613,6 +613,8 @@ async def _finalize_if_done(db, transcript_id: int, diarization_service) -> None
         enqueue_auto_classify(db, transcript, user_settings)
         if effective_kind(transcript) == "voice_note":
             enqueue_auto_voice_note(db, transcript, user_settings)
+        if effective_kind(transcript) == "voice_dump":
+            enqueue_auto_voice_dump(db, transcript, user_settings)
         # Tagging fires for every kind — keep this site in lockstep
         # with app.py:_run_transcription_pipeline (issue #171).
         from services.llm_jobs import enqueue_auto_tagging
