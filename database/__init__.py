@@ -25,6 +25,8 @@ class User(Base):
     is_admin = Column(Boolean, default=False)
     reset_token = Column(String(128), nullable=True)
     reset_token_expires_at = Column(DateTime, nullable=True)
+    local_device_token_hash = Column(String(128), nullable=True)
+    local_device_token_created_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=utcnow_naive)
 
 
@@ -565,6 +567,7 @@ def init_db(db_path: str = "data/whisperdesk.db") -> tuple:
     ensure_nullable_llm_job_transcript_id(engine)
     ensure_columns(engine, "summaries", {"provider": "TEXT"})
     ensure_columns(engine, "users", {"is_admin": "BOOLEAN DEFAULT 0", "reset_token": "TEXT", "reset_token_expires_at": "TEXT"})
+    ensure_columns(engine, "users", {"local_device_token_hash": "TEXT", "local_device_token_created_at": "TEXT"})
     ensure_columns(engine, "voice_clips", {"embedding_model": "TEXT"})
     # Brand-new table for issue #171; create_all() above handles fresh DBs,
     # this idempotent CREATE handles DBs that pre-date the model.

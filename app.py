@@ -33,6 +33,7 @@ from services.auth import (
     password_min_length, get_user_by_reset_token,
     list_usernames, generate_reset_token, reset_password,
     set_admin_status, get_all_users,
+    set_device_token, revoke_device_token, get_user_by_device_token,
 )
 from services.settings import get_user_settings, update_user_settings
 from services.transcription import TranscriptionService
@@ -190,11 +191,26 @@ _CSRF_SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 
 async def enforce_csrf(request: Request, call_next):
     if request.method not in _CSRF_SAFE_METHODS and request.url.path.startswith("/api/"):
-        csrf = request.headers.get("x-csrf-token") or ""
-        if not validate_csrf_token(request.session, csrf):
-            # This literal string is matched by the client retry logic in rack.js api().
-            # Keep the two in sync.
-            return JSONResponse(status_code=403, content={"detail": "Invalid or missing CSRF token"})
+        # A request bearing a device's Authorization: Bearer token is not
+        # cookie/session-authenticated, so it isn't CSRF-exploitable -- a
+        # cross-origin page can't attach an Authorization header on the
+        # victim's behalf the way it can rely on an ambient cookie. Skip
+        # the CSRF check only for the one route that actually honors a
+        # bearer token for auth (/api/transcribe); every other /api/*
+        # route ignores the header entirely, so exempting them here would
+        # only widen the CSRF-skip surface for no reason. Whether the
+        # token is actually valid is decided downstream by whichever auth
+        # dependency the route uses (still 401s on a bad or unhonored token).
+        has_bearer = (
+            request.url.path == "/api/transcribe"
+            and (request.headers.get("authorization") or "").lower().startswith("bearer ")
+        )
+        if not has_bearer:
+            csrf = request.headers.get("x-csrf-token") or ""
+            if not validate_csrf_token(request.session, csrf):
+                # This literal string is matched by the client retry logic in rack.js api().
+                # Keep the two in sync.
+                return JSONResponse(status_code=403, content={"detail": "Invalid or missing CSRF token"})
     return await call_next(request)
 
 
@@ -266,6 +282,35 @@ def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
     if not user:
         raise HTTPException(status_code=401, detail="Not logged in")
     return user
+
+
+def _resolve_device_token_user(request: Request, db: Session) -> User | None:
+    """Look up the user for a device bearer token, if the request carries
+    one. Kept separate from _resolve_session_user because this path is
+    only trusted on routes that explicitly opt in via
+    get_current_user_or_device below, not on get_current_user itself."""
+    auth_header = request.headers.get("authorization") or ""
+    if not auth_header.lower().startswith("bearer "):
+        return None
+    token = auth_header[len("bearer "):].strip()
+    return get_user_by_device_token(db, token)
+
+
+def get_current_user_or_device(request: Request, db: Session = Depends(get_db)) -> User:
+    """Auth dependency for the one route that must also accept a device's
+    bearer token. Session cookie is tried first so a logged-in browser tab
+    is unaffected; the bearer token is the fallback for a headless caller
+    with no cookie jar. Deliberately not the default get_current_user,
+    since every other route keeps session-only auth."""
+    user = _resolve_session_user(request, db)
+    if user:
+        request.state.device_authenticated = False
+        return user
+    user = _resolve_device_token_user(request, db)
+    if user:
+        request.state.device_authenticated = True
+        return user
+    raise HTTPException(status_code=401, detail="Not logged in")
 
 
 # `rediarize` is in services.llm_jobs.VALID_KINDS but the serializer
@@ -844,6 +889,28 @@ async def put_settings(data: dict = Body(...), db: Session = Depends(get_db), cu
     return update_user_settings(db, current_user.id, data)
 
 
+@app.post("/api/settings/device-token")
+async def generate_device_token_route(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    """Generate (or regenerate) this user's device bearer token. Returns
+    the plaintext token once; only its hash is ever stored."""
+    token = set_device_token(db, current_user)
+    return {"token": token, "created_at": current_user.local_device_token_created_at.isoformat()}
+
+
+@app.get("/api/settings/device-token")
+async def device_token_status(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    return {
+        "has_token": bool(current_user.local_device_token_hash),
+        "created_at": current_user.local_device_token_created_at.isoformat() if current_user.local_device_token_created_at else None,
+    }
+
+
+@app.delete("/api/settings/device-token")
+async def revoke_device_token_route(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    revoke_device_token(db, current_user)
+    return {"ok": True}
+
+
 # ── Hotword Glossary ─────────────────────────────────────────────────────
 
 def _serialize_hotword(h) -> dict:
@@ -1357,6 +1424,7 @@ async def _run_transcription_pipeline(
 
 @app.post("/api/transcribe")
 async def transcribe_audio(
+    request: Request,
     file: UploadFile = File(...),
     title: Optional[str] = Form(None),
     provider: str = Form("moonshine"),
@@ -1370,11 +1438,14 @@ async def transcribe_audio(
     kind: str = Form("meeting"),
     capture_source: Optional[str] = Form(None),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user_or_device),
 ):
     """Upload and transcribe an audio file."""
     if kind not in ("meeting", "dictation", "voice_note", "auto"):
         raise HTTPException(status_code=400, detail="kind must be 'meeting', 'dictation', 'voice_note', or 'auto'")
+    is_device_call = getattr(request.state, "device_authenticated", False)
+    if is_device_call and not rate_limiter.check(f"device-upload:{current_user.id}", max_requests=30, window_seconds=3600):
+        raise HTTPException(status_code=429, detail="Too many device uploads, try again later")
     # Save uploaded file
     file_ext = os.path.splitext(file.filename or "audio.mp3")[1] or ".mp3"
     safe_name = f"{utcnow_naive().strftime('%Y%m%d_%H%M%S')}_{hash(file.filename or 'audio')}{file_ext}"
