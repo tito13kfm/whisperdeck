@@ -604,6 +604,7 @@ async def run_llm_job(SessionLocal, job_id: int, transcription_service, diarizat
                         seg["span_text"], seg.get("tentative_type", "general"),
                         api_key=api_key, provider_name=job.provider,
                         provider_config=provider_config, model=job.model,
+                        include_clarifying=True,
                     )
                     items.append({
                         "index": i,
@@ -611,12 +612,12 @@ async def run_llm_job(SessionLocal, job_id: int, transcription_service, diarizat
                         "title": result.get("title", ""),
                         "body": result.get("body", ""),
                         "structured": result.get("structured", {}),
-                        "clarifying_questions": [],
+                        "clarifying_questions": result.get("clarifying_questions", []),
                     })
                     job.progress_done = i + 1
                     db.commit()
                 job.result_json = {"items": items}
-                job.progress_done = len(segments)
+                job.progress_done = len(segments) + 1
                 db.commit()
                 _finish(db, job, "completed")
             except Exception as e:

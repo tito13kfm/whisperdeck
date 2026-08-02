@@ -121,6 +121,65 @@ def test_structure_from_text_clamps_invalid_note_type_to_general():
     assert result["type"] == "general"
 
 
+def test_structure_from_text_include_clarifying_parses_questions():
+    """include_clarifying=True — LLM returns clarifying_questions array,
+    result includes it."""
+    payload = json.dumps({
+        "title": "Task",
+        "body": "Get groceries.",
+        "structured": {"priority": "medium"},
+        "clarifying_questions": ["What store?", "By when?"],
+    })
+    fake_post = AsyncMock(return_value=_chat_response(payload))
+    with patch("httpx.AsyncClient.post", fake_post):
+        result = asyncio.run(_structure_from_text(
+            "get groceries", "todo",
+            api_key="", provider_name="local",
+            provider_config=None, model="test",
+            include_clarifying=True,
+        ))
+    assert result["type"] == "todo"
+    assert result["title"] == "Task"
+    assert result["clarifying_questions"] == ["What store?", "By when?"]
+
+
+def test_structure_from_text_include_clarifying_handles_missing_key():
+    """include_clarifying=True — LLM returns JSON without
+    clarifying_questions key, result has empty list."""
+    payload = json.dumps({
+        "title": "Task",
+        "body": "Get groceries.",
+        "structured": {},
+    })
+    fake_post = AsyncMock(return_value=_chat_response(payload))
+    with patch("httpx.AsyncClient.post", fake_post):
+        result = asyncio.run(_structure_from_text(
+            "get groceries", "todo",
+            api_key="", provider_name="local",
+            provider_config=None, model="test",
+            include_clarifying=True,
+        ))
+    assert result["clarifying_questions"] == []
+
+
+def test_structure_from_text_include_clarifying_falls_back_to_empty():
+    """include_clarifying=True — LLM raises Exception, fallback dict
+    includes clarifying_questions: []."""
+    fake_post = AsyncMock(side_effect=Exception("LLM timeout"))
+    with patch("httpx.AsyncClient.post", fake_post):
+        result = asyncio.run(_structure_from_text(
+            "get groceries", "todo",
+            api_key="", provider_name="local",
+            provider_config=None, model="test",
+            include_clarifying=True,
+        ))
+    assert result["type"] == "todo"
+    assert result["title"] == "get groceries"
+    assert result["body"] == "get groceries"
+    assert result["structured"] == {}
+    assert result["clarifying_questions"] == []
+
+
 # ── segment_voice_dump ─────────────────────────────────────────────────────
 
 
@@ -259,11 +318,13 @@ def test_voice_dump_job_writes_items_to_result_json(db_session):
         "title": "First item",
         "body": "Body of first.",
         "structured": {"priority": "high"},
+        "clarifying_questions": ["What is the deadline?"],
     })
     struct1_payload = json.dumps({
         "title": "Second item",
         "body": "Body of second.",
         "structured": {"summary": "An idea"},
+        "clarifying_questions": [],
     })
     fake_post = AsyncMock(side_effect=[
         _chat_response(segments_payload),
@@ -284,7 +345,7 @@ def test_voice_dump_job_writes_items_to_result_json(db_session):
     assert items[0]["title"] == "First item"
     assert items[0]["body"] == "Body of first."
     assert items[0]["structured"] == {"priority": "high"}
-    assert items[0]["clarifying_questions"] == []
+    assert items[0]["clarifying_questions"] == ["What is the deadline?"]
 
     assert items[1]["index"] == 1
     assert items[1]["type"] == "idea"

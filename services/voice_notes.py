@@ -171,33 +171,47 @@ async def _structure_from_text(
     text: str, note_type: str,
     api_key: str = "", provider_name: str = "groq",
     provider_config: dict | None = None, model: str = "",
+    include_clarifying: bool = False,
 ) -> dict:
     """Run the per-type structure prompt against an already-extracted text
     string. Same contract as structure_voice_note but takes text directly
-    so the voice-dump path can call it per-span without a transcript object."""
+    so the voice-dump path can call it per-span without a transcript object.
+
+    When include_clarifying is True, the prompt also requests a
+    'clarifying_questions' key (array of short follow-up questions) and
+    the result dict includes it."""
     if note_type not in NOTE_TYPES:
         note_type = "general"
     prompt = _structure_prompt(note_type).replace("{text}", text)
+    if include_clarifying:
+        prompt += (
+            '\nAlso include a "clarifying_questions" key: an array of 0-3 '
+            "short follow-up questions to ask the user if their note is "
+            "unclear or needs more context to structure well.\n"
+        )
     try:
         content = await _generate(prompt, api_key, provider_name, model, provider_config, json_mode=True)
         data = json.loads(content)
     except Exception:
-        # Fallback body: hand the user the raw text so they have
-        # SOMETHING useful, with a stub title. The classifier's result
-        # is preserved (whatever it was) so the user can see what the
-        # first call thought.
-        return {
+        fallback = {
             "type": note_type,
             "title": (text.strip().splitlines()[0] if text.strip() else "Voice note")[:80],
             "body": text,
             "structured": {},
         }
-    return {
+        if include_clarifying:
+            fallback["clarifying_questions"] = []
+        return fallback
+    result = {
         "type": note_type,
         "title": (data.get("title") or "").strip()[:255],
         "body": (data.get("body") or "").strip(),
         "structured": data.get("structured") if isinstance(data.get("structured"), dict) else {},
     }
+    if include_clarifying:
+        cq = data.get("clarifying_questions")
+        result["clarifying_questions"] = cq if isinstance(cq, list) else []
+    return result
 
 
 async def structure_voice_note(
