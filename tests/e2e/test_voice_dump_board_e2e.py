@@ -9,7 +9,12 @@ static/index.html):
 4. The existing Voice Notes board (loadVoiceNotes, refactored to share
    noteStructuredBits() with the new board) still renders correctly.
 5. Navigating to the dump-notes board raises no uncaught JS errors.
-6. The transcribe page's Mode wheel offers/renders "Voice Dump".
+6. The transcribe page's Mode wheel can be cycled to Voice Dump through real
+   clicks on the wheel controls (no state injection), and the rendered Mode
+   row reflects it.
+7. Starting a job while the wheel is on Voice Dump posts kind=voice_dump to
+   /api/transcribe -- the acceptance criterion from issue #286 ("Recording
+   with kind voice_dump starts live capture normally").
 
 All tests in this file share ONE registered user via a module-scoped
 fixture (the same pattern every other tests/e2e/*.py file uses) because
@@ -27,6 +32,7 @@ any other test seeds further voice-dump items.
 import datetime
 import http.cookiejar
 import json
+import re
 import urllib.error
 import urllib.request
 
@@ -282,10 +288,49 @@ def test_dumpnotes_navigation_has_no_console_errors(page, registered_user):
     assert errors == []
 
 
-# ── 6. Mode wheel offers Voice Dump ──────────────────────────────────────
+# ── 6/7. Mode wheel real-click cycling, and startJob() posts the kind ────
+#
+# The mode picker is a custom VFD "MFD" wheel (static/rack.js), not an HTML
+# <select>. Clicking the category button (data-cat='mode') enters wheel-edit
+# mode; Up/Down (#mfd-btn-up / #mfd-btn-down) call mfdNav(dir), which is the
+# only code path that ever assigns S.mode. OK (#mfd-btn-ok) exits edit mode
+# back to the row-list ("browse") view, where .mfd-row/.mfd-label/.mfd-value
+# are rendered again (while editing, the screen instead shows a single
+# prev/current/next wheel, with no .mfd-row for "Mode").
+
+_MODE_ORDER = ["auto", "meeting", "dictation", "voice_note", "voice_dump"]
 
 
-def test_transcribe_mode_wheel_offers_voice_dump(page, registered_user):
+def _cycle_mode_via_clicks(page, target):
+    """Drive the real Mode wheel to `target` using only real clicks on the
+    category button and the Up/Down nav buttons -- never by assigning
+    window.S.mode directly. window.S.mode is read back here only to decide
+    when to stop clicking (and by the caller, only to assert), never to set
+    it.
+    """
+    assert target in _MODE_ORDER
+    mode_btn = page.locator("#mfd-leftcol .mfd-btn[data-cat='mode']")
+    assert mode_btn.count() == 1, "expected exactly one Mode category button"
+    mode_btn.click()  # mfdOnCatClick('mode') -- enters wheel-edit mode
+
+    def current_mode():
+        return page.evaluate("() => window.S.mode")
+
+    # Don't assume a starting index -- read it and click Down until it
+    # lands, capped at one full cycle so a broken wrap can't hang the test.
+    for _ in range(len(_MODE_ORDER)):
+        if current_mode() == target:
+            break
+        page.locator("#mfd-btn-down").click()
+    assert current_mode() == target, (
+        f"real wheel clicks never reached {target!r} via mfdNav's Down button, "
+        f"stuck at {current_mode()!r}"
+    )
+
+    page.locator("#mfd-btn-ok").click()  # mfdOnOk -- confirm, exit edit mode
+
+
+def test_transcribe_mode_wheel_cycles_via_real_clicks(page, registered_user):
     username, password = registered_user
     _login(page, username, password)
 
@@ -293,14 +338,10 @@ def test_transcribe_mode_wheel_offers_voice_dump(page, registered_user):
     page.wait_for_selector("#page-transcribe.active", timeout=5000)
     page.wait_for_selector("#mfd-leftcol .mfd-btn", timeout=5000)
 
-    # window.S and window.syncTranscribe are exposed globals (see
-    # test_bundle_globals.py). Setting S.mode and calling the real
-    # syncTranscribe() re-renders the MFD screen through the real pipeline
-    # (syncTranscribe -> renderMfd -> renderMfdScreen), so this reads the
-    # actual rendered DOM (via .textContent, unaffected by the CSS
-    # text-transform on .mfd-label/.mfd-value), not internal state.
-    page.evaluate("() => { window.S.mode = 'voice_dump'; window.syncTranscribe(); }")
+    _cycle_mode_via_clicks(page, "voice_dump")
 
+    # Read the rendered DOM via .textContent (unaffected by the CSS
+    # text-transform on .mfd-label/.mfd-value), not internal state.
     rows = page.evaluate(
         """() => Array.from(document.querySelectorAll('#mfd-screen .mfd-row')).map(r => ({
             label: r.querySelector('.mfd-label')?.textContent,
@@ -310,3 +351,113 @@ def test_transcribe_mode_wheel_offers_voice_dump(page, registered_user):
     mode_rows = [r for r in rows if r["label"] == "Mode"]
     assert len(mode_rows) == 1, f"expected exactly one Mode row, got {rows}"
     assert mode_rows[0]["value"] == "Voice Dump"
+    # Assertion only -- S.mode was never assigned directly by this test.
+    assert page.evaluate("() => window.S.mode") == "voice_dump"
+
+
+def test_transcribe_start_posts_kind_voice_dump(browser, live_server, registered_user, tmp_path):
+    """The acceptance criterion from issue #286: recording with kind
+    voice_dump starts live capture (here, a file-based job) normally --
+    i.e. the wheel's selection actually reaches the /api/transcribe
+    request as `kind=voice_dump`, not just the rendered Mode row.
+
+    Uses its own browser context (service_workers='block') instead of the
+    shared `page` fixture: app.py's sw.js registers a service worker that
+    intercepts every /api/* fetch and reissues it from the *service
+    worker's* own scope (`e.respondWith(fetch(e.request)...)`), not the
+    page's. page.route() only patches requests the page itself makes, so
+    with the service worker active it never sees the /api/transcribe
+    call -- confirmed empirically (route handler simply never fired, while
+    the request still hit the real backend and came back with no doneId,
+    i.e. a real failed transcription of the fake wav bytes). Blocking
+    service workers for this context's requests is the fix.
+    """
+    ctx = browser.new_context(viewport={"width": 1440, "height": 900}, service_workers="block")
+    page = ctx.new_page()
+    page.goto(live_server + "/")
+    try:
+        username, password = registered_user
+        _login(page, username, password)
+
+        page.locator("button[data-nav='transcribe']").click()
+        page.wait_for_selector("#page-transcribe.active", timeout=5000)
+        page.wait_for_selector("#mfd-leftcol .mfd-btn", timeout=5000)
+
+        _cycle_mode_via_clicks(page, "voice_dump")
+
+        # Load a tiny real file through the real, visible-to-the-app file
+        # input (the same node wireTranscribeDrop()'s change-listener wires
+        # up) -- never write to S.tapeFile/S.tapeLoaded directly.
+        audio_path = tmp_path / "tiny.wav"
+        audio_path.write_bytes(b"RIFF" + b"\x00" * 256)
+        page.locator("#file-input").set_input_files(str(audio_path))
+        page.wait_for_function("() => window.S.tapeLoaded === true", timeout=5000)
+
+        # Intercept the upload: assert the real multipart body carries
+        # kind=voice_dump, record that fact in `intercepted_kinds`, and
+        # fulfill with a minimal stub so no real transcription pipeline
+        # runs. Also stub the immediately-following GET
+        # /api/transcripts/<id> poll as already "completed" so
+        # startJob()'s poll loop returns on its first iteration instead of
+        # hitting the real (nonexistent) transcript row.
+        intercepted_kinds = []
+
+        def handle_transcribe_post(route):
+            body = (route.request.post_data_buffer or b"").decode("utf-8", errors="replace")
+            match = re.search(r'name="kind"\r\n\r\n([^\r\n]*)\r\n', body)
+            intercepted_kinds.append(match.group(1) if match else None)
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps({"id": 999999, "status": "completed", "duration_seconds": 1}),
+            )
+
+        def handle_transcript_get(route):
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps({"id": 999999, "status": "completed", "duration_seconds": 1}),
+            )
+
+        page.route("**/api/transcribe", handle_transcribe_post)
+        page.route(re.compile(r".*/api/transcripts/\d+$"), handle_transcript_get)
+
+        # curProv().ready gates BOTH the real START button (#key-play-a is
+        # disabled otherwise -- see rack.js's `playKey.disabled = !canStart`)
+        # and startJob()'s own early-return guard. Investigate rather than
+        # assume. In this environment moonshine's check_health() actually
+        # passes (it's installed) even though neither faster-whisper nor
+        # any hosted-provider API key is configured for this fresh test
+        # user, so curProv() (whichever provider ensureProviders() picked
+        # as firstReady) reports ready=True and the real button is not
+        # disabled -- confirmed below rather than assumed.
+        ready = page.evaluate("() => window.curProv().ready")
+        with page.expect_request("**/api/transcribe", timeout=5000):
+            if ready:
+                page.locator("#key-play-a").click()
+            else:
+                # BLOCKED-VERIFICATION: no provider is ready in this test
+                # environment, so the real START button stays disabled and
+                # a real click could never reach startJob(). Confirm
+                # that's really why (not a UI/guard mismatch), then fall
+                # back to calling the real startJob() directly -- exposed
+                # on window in rack.js's existing test-hook Object.assign
+                # block for exactly this -- after marking the current
+                # provider ready so startJob()'s *other* guard doesn't
+                # also block it. tapeLoaded and tapeFile were still set
+                # through the real file input above, not this evaluate
+                # call, and S.mode was still set through real wheel clicks
+                # above, not this evaluate call.
+                assert page.locator("#key-play-a").is_disabled(), (
+                    "curProv().ready is False but #key-play-a isn't disabled -- "
+                    "guard/UI mismatch, not the expected no-ready-provider case"
+                )
+                page.evaluate("() => { window.S.providers[window.S.providerIdx].ready = true; }")
+                page.evaluate("() => window.startJob()")
+
+        assert intercepted_kinds == ["voice_dump"], (
+            f"expected exactly one intercepted /api/transcribe request carrying "
+            f"kind=voice_dump, got {intercepted_kinds}"
+        )
+    finally:
+        ctx.close()

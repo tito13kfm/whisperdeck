@@ -1,8 +1,14 @@
 /* WhisperDeck Service Worker — static asset caching + offline shell
    Served from /sw.js (root scope), NOT /static/sw.js.
-   Bump CACHE_VERSION on deploy to invalidate. */
 
-const CACHE_VERSION = 'v2';
+   CACHE_VERSION below is only the human-readable half. The /sw.js route in
+   app.py appends a content fingerprint of the precached first-party assets
+   (rack.min.js, rack.min.css, index.html) before serving this file, so the
+   cache name changes whenever the bundle changes even if nobody bumps the
+   literal. Bump it by hand only to force invalidation for a reason the asset
+   bytes do not capture (a change to this file's own caching strategy). */
+
+const CACHE_VERSION = 'v3';
 const CACHE_NAME = 'whisperdeck-static-' + CACHE_VERSION;
 
 // Static assets precached on install. Root '/' is the SPA shell (index.html).

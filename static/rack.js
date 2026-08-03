@@ -38,7 +38,7 @@ const S = {
   autoCorrect: false,
   correctionPending: false,   // true while a non-blocking post-completion auto-correct poll is watching this run
   correctionStatus: null,     // pending | running | completed | failed — mirrors the run's correction_job.status
-  mode: 'meeting',            // meeting | dictation | voice_note | voice_dump — all three single-speaker kinds skip diarization, unlock their own post-pipeline sets
+  mode: 'meeting',            // auto | meeting | dictation | voice_note | voice_dump — the last three are single-speaker: they skip diarization and unlock their own post-pipeline sets
   advSpeakerCount: null,      // null = auto-detect, else integer 1-12
   advTitle: '',
   advTemperature: 0,          // 0-10 wheel steps; sent to backend as /10 (0.0-1.0)
@@ -6131,5 +6131,5 @@ document.addEventListener('DOMContentLoaded', () => {
    works identically in both, survives future build-config changes, and
    makes the supported test-hook surface self-documenting. */
 if (typeof window !== 'undefined') {
-  Object.assign(window, { navigate, S, syncTranscribe, renderDetail, curProv, logout, api, loadCostsPage, _jobFingerprint });
+  Object.assign(window, { navigate, S, syncTranscribe, renderDetail, curProv, logout, api, loadCostsPage, _jobFingerprint, startJob });
 }
