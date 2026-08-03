@@ -826,6 +826,9 @@ function resetDeckState() {
   S.bulkDefaults = null;
   S.bulkSubmitting = false;
   detailData = null;
+  // Holds user-authored, not-yet-saved dump-review edits — per-account
+  // client state, cleared here for the same reason detailData is (#54).
+  dumpReview = null;
   bankListCache = [];
   seedClips = {};
   expandedVoice = null;
@@ -3680,6 +3683,21 @@ async function loadCostsPage() {
 }
 
 /* ══════════════════ transcript detail ══════════════════ */
+
+// Pure draft-item helpers live in ./dump_review.js -- kept dependency-free
+// (no DOM/global references) so they can be unit-tested directly in Node
+// without loading this whole browser script. esbuild inlines it into the
+// bundle at build time, same as batch_aggregate.js above.
+const { DUMP_NOTE_TYPES, normalizeDumpItems, materializeDumpItems } = require('./dump_review.js');
+
+// The one registry for kind-gated detail tabs. detailTabsHtml (the chrome
+// that offers the tab), renderDetailBody (the renderer that fulfills it)
+// and loadTranscriptDetail's sticky-tab reset all derive from this, so a
+// tab can never be offered by one and refused by another, and a new kind
+// can't be added to the button row while the reset logic forgets it
+// (AGENTS.md Complement Rule 3 and 4).
+const KIND_TABS = { dictation: 'format', voice_note: 'notes', voice_dump: 'review' };
+
 let detailData = null;
 let detailLoadGen = 0; // generation counter to prevent race conditions on rapid clicks
 
@@ -3733,11 +3751,12 @@ async function loadTranscriptDetail(id, opts = {}) {
   }
   // S.detailTab is a global that survives navigation between transcripts —
   // if it's pointed at a kind-specific tab (format for dictation, notes
-  // for voice_note) and the newly-opened transcript is the wrong kind,
-  // fall back rather than leave a stale tab selection that
-  // renderDetailBody would otherwise still act on.
-  if (S.detailTab === 'format' && detailData.kind !== 'dictation') S.detailTab = 'transcript';
-  if (S.detailTab === 'notes' && detailData.kind !== 'voice_note') S.detailTab = 'transcript';
+  // for voice_note, review for voice_dump) and the newly-opened transcript
+  // is the wrong kind, fall back rather than leave a stale tab selection
+  // that renderDetailBody would otherwise still act on. Driven off
+  // KIND_TABS so a new kind-gated tab is reset without a second edit here.
+  const kindTab = KIND_TABS[detailData.kind] || null;
+  if (S.detailTab !== kindTab && Object.values(KIND_TABS).indexOf(S.detailTab) !== -1) S.detailTab = 'transcript';
   renderDetail();
   scheduleDetailPoll();
 }
@@ -3746,7 +3765,7 @@ function _jobFingerprint(t) {
   const f = (j) => j ? j.status + ':' + (j.progress ? j.progress.done : 0) : '-';
   return f(t.correction_job) + '|' + f(t.summary_job) + '|' + f(t.voice_match_job) + '|' +
     f(t.format_markdown_job) + '|' + f(t.format_email_job) + '|' + f(t.format_coding_prompt_job) + '|' +
-    f(t.classify_intent_job) + '|' + f(t.tagging_job);
+    f(t.classify_intent_job) + '|' + f(t.tagging_job) + '|' + f(t.voice_dump_job);
 }
 
 // While an LLM job is active for the open transcript, refresh quietly and
@@ -3756,7 +3775,8 @@ function scheduleDetailPoll() {
   const t = detailData;
   if (!t || !(llmJobActive(t.correction_job) || llmJobActive(t.summary_job) || llmJobActive(t.voice_match_job) ||
     llmJobActive(t.format_markdown_job) || llmJobActive(t.format_email_job) || llmJobActive(t.format_coding_prompt_job) ||
-    llmJobActive(t.classify_intent_job) || llmJobActive(t.tagging_job))) return;
+    llmJobActive(t.classify_intent_job) || llmJobActive(t.tagging_job) ||
+    llmJobActive(t.voice_dump_job))) return;
   const fp = _jobFingerprint(t), id = t.id, prevActive = jobActiveSnapshot(t);
   detailPollTimer = setTimeout(async () => {
     if (S.page !== 'detail' || !detailData || detailData.id !== id) return;
@@ -3772,8 +3792,8 @@ function scheduleDetailPoll() {
 
 function detailTabsHtml() {
   const tabs = ['transcript', 'corrected', 'summary'];
-  if (detailData && detailData.kind === 'dictation') tabs.push('format');
-  if (detailData && detailData.kind === 'voice_note') tabs.push('notes');
+  const kindTab = detailData ? KIND_TABS[detailData.kind] : null;
+  if (kindTab) tabs.push(kindTab);
   return tabs.map(tb => {
     const on = S.detailTab === tb;
     return `
@@ -4211,6 +4231,7 @@ function jobActiveSnapshot(t) {
     format_coding_prompt: llmJobActive(t.format_coding_prompt_job),
     classify_intent: llmJobActive(t.classify_intent_job),
     tagging: llmJobActive(t.tagging_job),
+    voice_dump: llmJobActive(t.voice_dump_job),
   };
 }
 
@@ -4251,6 +4272,7 @@ async function updateDetailJobStatus(t, prevActive) {
     { id: 'job-format-email', job: t.format_email_job, label: 'Email draft' },
     { id: 'job-format-coding_prompt', job: t.format_coding_prompt_job, label: 'Claude Code prompt' },
     { id: 'job-tagging', job: t.tagging_job, label: 'Tagging' },
+    { id: 'job-voice-dump', job: t.voice_dump_job, label: 'Voice dump' },
   ];
   for (const { id: containerId, job, label } of runningContainers) {
     if (!llmJobActive(job)) continue;
@@ -4636,6 +4658,173 @@ async function voiceNoteHtml(t) {
   '</div>';
 }
 
+/* ── Dump Review tab (voice_dump) ── */
+
+// The edited draft lives here rather than on detailData because it is user
+// state, and it has to survive the one renderDetailBody() the poll tick
+// fires when the voice_dump job crosses out of "active". `key` pins it to a
+// single transcript + job + job status, so a rerun (new job id) or a status
+// change re-fetches instead of reusing a stale draft, while a tab switch or
+// a save re-render reuses the in-progress edits.
+let dumpReview = null;
+
+function dumpReviewKey(t) {
+  const j = t.voice_dump_job;
+  return t.id + ':' + (j ? j.id : 0) + ':' + (j ? j.status : 'none');
+}
+
+// Only ever called for a completed job (see dumpReviewHtml) — a cancelled
+// run can carry a committed items payload too, and presenting that as a
+// finished draft would be wrong.
+async function loadDumpReview(t) {
+  const key = dumpReviewKey(t);
+  if (dumpReview && dumpReview.key === key) return dumpReview;
+  const job = t.voice_dump_job;
+  // Draft items live on the job's result_json, which the transcript
+  // serializer does NOT expose (serialize_llm_job in services/llm_jobs.py
+  // has no result_json key) — /runs/<kind> is the only route that returns
+  // it, so read it the same way formatHtml does.
+  const runs = (await api('/api/transcripts/' + t.id + '/runs/voice_dump')).runs || [];
+  const run = runs.find(r => job && r.id === job.id) || runs.find(r => r.status === 'completed');
+  const raw = (run && run.result && run.result.items) || [];
+  // There is no "finalized" flag on the job, so the only way to tell an
+  // already-committed draft from a pending one is whether VoiceDumpItem
+  // rows point back at this specific job.
+  let finalized = [];
+  if (raw.length) {
+    try {
+      const rows = (await api('/api/transcripts/' + t.id + '/voice-dump-items')).items || [];
+      finalized = rows.filter(r => job && r.source_job_id === job.id);
+    } catch { /* cross-check is advisory — fall through to the draft UI */ }
+  }
+  dumpReview = {
+    key,
+    state: !raw.length ? 'empty' : (finalized.length ? 'finalized' : 'draft'),
+    items: normalizeDumpItems(raw),
+    finalizedCount: finalized.length,
+  };
+  return dumpReview;
+}
+
+function dumpDeadEndUnit(caption, message, captionColor) {
+  return '<div class="unit" style="padding:32px">' +
+    '<div class="t-cap" style="font-size:11px;letter-spacing:0.16em;margin-bottom:12px' + (captionColor ? ';color:' + captionColor : '') + '">' + escapeHtml(caption) + '</div>' +
+    '<div style="font-family:var(--f-mono);font-size:11.5px;color:var(--label-dim)">' + escapeHtml(message) + '</div>' +
+    '<div style="margin-top:14px"><button class="btn" data-dact="rerun-voice-dump" style="font-size:12px;padding:7px 14px;border-color:var(--inset-edge)">Rerun chain</button></div>' +
+  '</div>';
+}
+
+async function dumpReviewHtml(t) {
+  const job = t.voice_dump_job;
+  if (!job) {
+    return '<div class="empty-unit">No voice-dump chain yet. It runs automatically after transcription completes.</div>';
+  }
+  if (llmJobActive(job)) {
+    // Container id matches updateDetailJobStatus's runningContainers entry
+    // so the progress line advances in place on every poll tick instead of
+    // freezing at whatever it said when the tab was opened.
+    return '<div id="job-voice-dump">' + jobRunningUnit(job, 'Voice dump') + '</div>';
+  }
+  if (job.status === 'failed') {
+    return dumpDeadEndUnit('Voice-dump chain failed', humanizeJobError(job.error), 'var(--red)');
+  }
+  if (job.status === 'cancelled') {
+    // A cancelled run can still have written a partial items payload, so
+    // gate on status, not on whether items exist — a half-segmented dump
+    // is not something to hand the user as a finished draft.
+    return dumpDeadEndUnit('Voice-dump chain cancelled', 'The run was cancelled, so its item list may be incomplete. Rerun the chain to get a full draft.');
+  }
+  let review;
+  try { review = await loadDumpReview(t); }
+  catch (e) { return '<div class="empty-unit">Could not load dump items: ' + escapeHtml(e.message) + '</div>'; }
+  if (review.state === 'empty') {
+    return dumpDeadEndUnit('No items found', 'The chain finished but did not split this transcript into any items.');
+  }
+  if (review.state === 'finalized') {
+    const n = review.finalizedCount;
+    return '<div class="unit" style="padding:32px">' +
+      '<div class="t-cap" style="font-size:11px;letter-spacing:0.16em;margin-bottom:12px">Finalized · ' + n + ' note' + (n !== 1 ? 's' : '') + '</div>' +
+      '<div style="font-family:var(--f-mono);font-size:11.5px;color:var(--label-dim)">This dump was already finalized. Reviewing, editing and discarding happen before finalize; the notes now live on the Dump notes board.</div>' +
+      '<div style="margin-top:14px"><button class="btn" data-dact="open-dumpnotes" style="font-size:12px;padding:7px 14px;border-color:var(--inset-edge)">Open Dump notes →</button></div>' +
+    '</div>';
+  }
+
+  const items = review.items;
+  const keptCount = items.filter(it => !it.discarded).length;
+  const cards = items.map((it, i) => {
+    const typeColor = NOTE_TYPE_COLORS[it.type] || NOTE_TYPE_COLORS.general;
+    // An unknown type (the finalize route does not validate against
+    // NOTE_TYPES) is offered as an extra option so it round-trips instead
+    // of the select falling back to the first entry and the next save
+    // silently rewriting it.
+    const typeValues = DUMP_NOTE_TYPES.indexOf(it.type) === -1 ? DUMP_NOTE_TYPES.concat([it.type]) : DUMP_NOTE_TYPES;
+    const typeOpts = typeValues.map(v =>
+      '<option value="' + escapeHtml(v) + '"' + (v === it.type ? ' selected' : '') + '>' + escapeHtml(NOTE_TYPE_LABELS[v] || v) + '</option>').join('');
+    const questions = it.clarifying_questions.length
+      ? '<div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--seg-edge)">' +
+        '<div style="font-family:var(--f-mono);font-size:10px;text-transform:uppercase;letter-spacing:0.08em;color:var(--label-dim);margin-bottom:8px">Clarifying questions — answers are appended to the body</div>' +
+        it.clarifying_questions.map((q, qi) =>
+          '<div style="margin-bottom:8px">' +
+            '<div style="font-size:12.5px;line-height:1.45;color:var(--body);margin-bottom:4px">' + escapeHtml(q) + '</div>' +
+            '<input class="inp" type="text" data-dfield="answer" data-di="' + i + '" data-dq="' + qi + '" value="' + escapeHtml(it.answers[qi] || '') + '" placeholder="Answer (optional)" style="font-size:12px;width:100%;padding:6px 9px">' +
+          '</div>').join('') +
+      '</div>'
+      : '';
+    return '<div class="unit" data-dump-item="' + i + '" style="padding:16px 22px;margin-bottom:10px' + (it.discarded ? ';opacity:0.45' : '') + '">' +
+      '<div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">' +
+        '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:' + typeColor + ';box-shadow:0 0 5px ' + typeColor + ';flex-shrink:0"></span>' +
+        '<span style="font-family:var(--f-mono);font-size:10px;color:var(--label-dim)">#' + (i + 1) + '</span>' +
+        '<select class="inp" data-dfield="type" data-di="' + i + '" style="font-size:11px;padding:5px 8px;width:130px">' + typeOpts + '</select>' +
+        '<label style="display:flex;align-items:center;gap:6px;margin-left:auto;font-family:var(--f-mono);font-size:10px;text-transform:uppercase;letter-spacing:0.06em;color:var(--label-dim);cursor:pointer">' +
+          '<input type="checkbox" data-dfield="discarded" data-di="' + i + '"' + (it.discarded ? ' checked' : '') + '>Discard' +
+        '</label>' +
+      '</div>' +
+      '<input class="inp" type="text" data-dfield="title" data-di="' + i + '" value="' + escapeHtml(it.title) + '" placeholder="Title" style="font-size:14px;width:100%;padding:7px 10px;margin-bottom:8px">' +
+      '<textarea class="inp" data-dfield="body" data-di="' + i + '" rows="5" placeholder="Body" style="font-size:13px;width:100%;padding:8px 10px;line-height:1.55;resize:vertical">' + escapeHtml(it.body) + '</textarea>' +
+      questions +
+    '</div>';
+  }).join('');
+
+  return '<div class="unit" style="padding:14px 22px;margin-bottom:10px;display:flex;align-items:center;gap:10px;flex-wrap:wrap">' +
+      '<div class="t-cap" style="font-size:11px;letter-spacing:0.16em">Dump review · ' + items.length + ' item' + (items.length !== 1 ? 's' : '') + '</div>' +
+      '<span id="dump-keep-count" style="font-family:var(--f-mono);font-size:10.5px;color:var(--label-dim)">' + keptCount + ' of ' + items.length + ' will be kept</span>' +
+      '<div style="display:flex;gap:8px;margin-left:auto">' +
+        '<button class="btn" data-dact="dump-save-draft" style="font-size:11px;padding:6px 12px;border-color:var(--inset-edge)">Save draft</button>' +
+        '<button class="btn" data-dact="dump-finalize" style="font-size:11px;padding:6px 12px">Finalize</button>' +
+      '</div>' +
+    '</div>' + cards;
+}
+
+// Two-way binding for the Dump Review inputs: every edit writes straight
+// back into dumpReview.items, so the draft survives a re-render and Save
+// draft / Finalize never have to scrape values back out of the DOM.
+function bindDumpReviewFields(root) {
+  if (!dumpReview || dumpReview.state !== 'draft') return;
+  root.querySelectorAll('[data-dfield]').forEach(el => {
+    const evt = (el.tagName === 'SELECT' || el.type === 'checkbox') ? 'change' : 'input';
+    el.addEventListener(evt, () => {
+      const item = dumpReview.items[Number(el.dataset.di)];
+      if (!item) return;
+      const field = el.dataset.dfield;
+      if (field === 'discarded') {
+        item.discarded = el.checked;
+        // Patch the card and the counter in place — a full re-render here
+        // would drop the user's caret out of whatever field they were in.
+        const card = el.closest('[data-dump-item]');
+        if (card) card.style.opacity = el.checked ? '0.45' : '';
+        const counter = $('dump-keep-count');
+        if (counter) {
+          const kept = dumpReview.items.filter(x => !x.discarded).length;
+          counter.textContent = kept + ' of ' + dumpReview.items.length + ' will be kept';
+        }
+        return;
+      }
+      if (field === 'answer') { item.answers[Number(el.dataset.dq)] = el.value; return; }
+      item[field] = el.value;
+    });
+  });
+}
+
 async function formatHtml(t) {
   const cards = await Promise.all(FORMAT_TARGETS.map(async (target) => {
     const job = t[target.kind + '_job'];
@@ -4917,6 +5106,16 @@ async function renderDetailBody() {
     body.innerHTML = await voiceNoteHtml(t);
   } else if (S.detailTab === 'notes') {
     body.innerHTML = '<div class="empty-unit">Not available for non-voice-note transcripts</div>';
+  } else if (S.detailTab === 'review' && t.kind === 'voice_dump') {
+    body.innerHTML = '<div class="empty-unit">Loading dump items…</div>';
+    body.innerHTML = await dumpReviewHtml(t);
+    // #detail-body's delegated click handler only dispatches export and
+    // segment buttons, so [data-dact] has to be bound here — renderDetail's
+    // own pass ran before this async branch filled the body.
+    body.querySelectorAll('[data-dact]').forEach(b => b.addEventListener('click', () => detailAction(b.dataset.dact, b)));
+    bindDumpReviewFields(body);
+  } else if (S.detailTab === 'review') {
+    body.innerHTML = '<div class="empty-unit">Not available for non-voice-dump transcripts</div>';
   } else {
     body.innerHTML = '<div class="empty-unit">Loading summary…</div>';
     body.innerHTML = (t.has_summary ? exportToolbarHtml('summary') : '') + await summaryHtml(t);
@@ -4976,6 +5175,61 @@ async function detailAction(act, btn) {
       await api('/api/transcripts/' + t.id + '/voice-note/rerun', { method: 'POST', body: form });
       toast('Voice-note chain re-queued', 'info');
       await loadTranscriptDetail(t.id);
+      return;
+    }
+    if (act === 'rerun-voice-dump') {
+      // Only offered from the dead-end states (failed, cancelled, zero
+      // items) — never from a completed draft or an already-finalized one.
+      // A rerun replaces the job's result_json wholesale, so offering it
+      // after finalize would orphan the notes the user already committed
+      // and let a second finalize insert duplicate rows.
+      const j = t.voice_dump_job;
+      const form = new FormData();
+      form.append('provider', (j && j.provider) || 'groq');
+      form.append('model', (j && j.model) || '');
+      await api('/api/transcripts/' + t.id + '/voice-dump/rerun', { method: 'POST', body: form });
+      dumpReview = null;
+      toast('Voice-dump chain re-queued', 'info');
+      await loadTranscriptDetail(t.id);
+      return;
+    }
+    if (act === 'dump-save-draft') {
+      if (!dumpReview || dumpReview.state !== 'draft') return;
+      const payload = materializeDumpItems(dumpReview.items, t.voice_dump_job);
+      // The route takes the bare item array as the body, not an {items:...}
+      // envelope, and echoes back what it stored.
+      const saved = await api('/api/transcripts/' + t.id + '/voice-dump/save-draft', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      // Re-seed from what was stored: the answered clarifying questions are
+      // now part of the body and gone from the question list, so saving
+      // again can't append the same answer a second time.
+      dumpReview.items = normalizeDumpItems(saved.items || payload);
+      toast('Draft saved', 'ok');
+      await renderDetailBody();
+      return;
+    }
+    if (act === 'dump-finalize') {
+      if (!dumpReview || dumpReview.state !== 'draft') return;
+      const payload = materializeDumpItems(dumpReview.items, t.voice_dump_job);
+      const keep = payload.filter(it => !it.discarded);
+      if (!keep.length) { toast('Every item is marked discard — nothing to finalize', 'info'); return; }
+      if (!(await styledConfirm('Finalize ' + keep.length + ' item' + (keep.length !== 1 ? 's' : '') + ' as notes? Items marked discard are dropped.'))) return;
+      const res = await api('/api/transcripts/' + t.id + '/voice-dump/finalize', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const made = (res.items || []).length;
+      dumpReview = null;
+      toast('Finalized ' + made + ' note' + (made !== 1 ? 's' : ''), 'ok');
+      navigate('dumpnotes');
+      return;
+    }
+    if (act === 'open-dumpnotes') {
+      navigate('dumpnotes');
       return;
     }
     if (act === 'delete-voice-note') {
