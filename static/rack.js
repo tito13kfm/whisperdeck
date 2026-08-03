@@ -3689,6 +3689,7 @@ async function loadCostsPage() {
 // without loading this whole browser script. esbuild inlines it into the
 // bundle at build time, same as batch_aggregate.js above.
 const { DUMP_NOTE_TYPES, normalizeDumpItems, materializeDumpItems } = require('./dump_review.js');
+const { nextTranscriptKind } = require('./kind_cycle.js');
 
 // The one registry for kind-gated detail tabs. detailTabsHtml (the chrome
 // that offers the tab), renderDetailBody (the renderer that fulfills it)
@@ -5136,13 +5137,34 @@ async function detailAction(act, btn) {
       return;
     }
     if (act === 'toggle-kind') {
-      // 3-state cycle: meeting → dictation → voice_note → meeting.
+      // 4-state cycle: meeting → dictation → voice_note → voice_dump → meeting.
       // The PATCH endpoint guards against a kind change while the
       // transcript is still processing (it reads kind mid-pipeline to
       // decide diarization), so a status==='processing' transcript
       // would 400 here — that's intentional, the user has to wait
       // for the current job to settle.
-      const newKind = t.kind === 'meeting' ? 'dictation' : t.kind === 'dictation' ? 'voice_note' : 'meeting';
+      //
+      // Rotation and the out-of-cycle guard live in ./kind_cycle.js so they
+      // are unit-testable without a DOM (#299). nextTranscriptKind returns
+      // null rather than a default for an unrecognised kind, which is the
+      // actual fix: the old ternary chain ended in `: 'meeting'`, so a
+      // voice_dump transcript matched no arm and one click rewrote it to
+      // meeting, hiding the Dump Review tab and its finalized items.
+      const newKind = nextTranscriptKind(t.kind);
+      if (newKind === null) {
+        toast('This transcript has no mode set yet — wait for classification to settle', 'info');
+        return;
+      }
+      // Leaving voice_dump hides the Dump Review tab and its finalized
+      // items. The VoiceDumpItem rows are NOT deleted (the PATCH only
+      // writes t.kind) and reappear on cycling back round to voice_dump,
+      // but nothing on screen tells the user that, so make it a choice
+      // rather than a side effect of one click.
+      if (t.kind === 'voice_dump') {
+        const ok = await styledConfirm(
+          'Switching mode hides this dump\'s finalized notes until you switch back to voice dump. Continue?');
+        if (!ok) return;
+      }
       try {
         await api('/api/transcripts/' + t.id, {
           method: 'PATCH',
@@ -5157,8 +5179,13 @@ async function detailAction(act, btn) {
         }
         return;
       }
-      toast('Switched to ' + (newKind === 'voice_note' ? 'voice note' : newKind) + ' mode', 'info');
-      S.detailTab = newKind === 'voice_note' ? 'notes' : 'transcript';
+      toast('Switched to ' + newKind.replace('_', ' ') + ' mode', 'info');
+      // Land on the new kind's own tab via the KIND_TABS registry rather than
+      // a second hardcoded ternary, so adding a kind-gated tab needs one edit
+      // (at KIND_TABS) instead of two. Pre-#299 this arm knew only about
+      // voice_note, so switching into voice_dump dropped you on the
+      // transcript tab instead of Dump Review.
+      S.detailTab = KIND_TABS[newKind] || 'transcript';
       await loadTranscriptDetail(t.id);
       return;
     }
