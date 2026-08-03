@@ -1393,9 +1393,13 @@ async def _run_transcription_pipeline(
                 transcript.diarization_method = diarization_method
                 db.commit()
             except Exception as e:
-                # Non-fatal: diarization enhancement failed. Transcript still
-                # succeeds without speaker labels, but log so it's visible.
-                print(f"[diarization] non-fatal failure for transcript {transcript.id}: {e}")
+                import traceback
+                traceback.print_exc()
+                transcript.error = f"Diarization failed: {e}"
+                transcript.diarization_method = "failed"
+                if transcript.status == "completed":
+                    transcript.status = "partial"
+                db.commit()
 
         # Post-hoc correction pass — queued as a background LlmJob (visible
         # on the Queue screen) instead of blocking this response. Runs

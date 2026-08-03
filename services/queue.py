@@ -526,6 +526,7 @@ async def _finalize_if_done(db, transcript_id: int, diarization_service) -> None
 
     speaker_count = None
     diarization_method = None
+    diarization_error = None
     if transcript.diarize_requested and segments and transcript.audio_path:
         # IMPORTANT: nothing above this point may leave a dirty write on
         # `transcript` — diarization result, segments, and the new status
@@ -556,7 +557,11 @@ async def _finalize_if_done(db, transcript_id: int, diarization_service) -> None
             )
             segments = merged
         except Exception as e:
-            print(f"[queue] non-fatal diarization failure for transcript {transcript_id}: {e}")
+            import traceback
+            traceback.print_exc()
+            diarization_error = f"Diarization failed: {e}"
+            if new_status == "completed":
+                new_status = "partial"
 
         # Diarization awaits above can take several seconds, during which a
         # /cancel request on another request-handling coroutine (separate
@@ -570,6 +575,9 @@ async def _finalize_if_done(db, transcript_id: int, diarization_service) -> None
         transcript = db.query(Transcript).filter(Transcript.id == transcript_id).first()
         if not transcript or transcript.status == "cancelled":
             return
+        if diarization_error:
+            transcript.error = diarization_error
+            transcript.diarization_method = "failed"
 
     # Finalize replaces segments wholesale. Normally there is no relabel
     # history yet (first completion), but on a resume/retry re-finalize any
