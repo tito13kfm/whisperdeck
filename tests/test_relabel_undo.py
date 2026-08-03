@@ -4,7 +4,7 @@ from unittest.mock import patch
 
 import pytest
 
-from database import RelabelHistory, Transcript, User, VoiceProfile
+from database import LlmJob, RelabelHistory, Transcript, TranscriptTag, User, VoiceProfile
 from services.llm_jobs import enqueue_llm_job, run_llm_job
 from services.voice_id import voice_id_service
 
@@ -125,6 +125,47 @@ def test_delete_transcript_removes_relabel_history(client, db_session):
     db_session.expire_all()
     assert (db_session.query(RelabelHistory)
             .filter(RelabelHistory.transcript_id == tid).count()) == 0
+
+
+def test_delete_transcript_removes_llm_jobs_and_tags(client, db_session):
+    """Issue #300: llm_jobs and transcript_tags were relying on the FK's
+    ondelete=CASCADE alone, which never fires because the foreign_keys pragma
+    is off. Same hazard as relabel_history above: orphaned rows plus SQLite
+    rowid reuse means the next transcript created can inherit a dead
+    transcript's jobs and tags."""
+    t = _transcript(db_session)
+    tid = t.id
+    db_session.add(LlmJob(transcript_id=tid, kind="correction", status="completed",
+                          user_id=_test_user(db_session).id))
+    db_session.add(TranscriptTag(transcript_id=tid, tag="billing"))
+    db_session.add(TranscriptTag(transcript_id=tid, tag="migration"))
+    db_session.commit()
+    assert db_session.query(LlmJob).filter(LlmJob.transcript_id == tid).count() == 1
+    assert db_session.query(TranscriptTag).filter(TranscriptTag.transcript_id == tid).count() == 2
+
+    assert client.delete(f"/api/transcripts/{tid}").status_code == 200
+    db_session.expire_all()
+    assert db_session.query(LlmJob).filter(LlmJob.transcript_id == tid).count() == 0
+    assert db_session.query(TranscriptTag).filter(TranscriptTag.transcript_id == tid).count() == 0
+
+
+def test_transcriptless_llm_job_survives_unrelated_transcript_delete(client, db_session):
+    """Guards the choice of cascade="all, delete" over "all, delete-orphan"
+    for llm_jobs. transcript_id is nullable because assistant jobs have no
+    transcript (#175); delete-orphan would refuse to flush those at all, and
+    a plain delete must not sweep them up when some other transcript goes."""
+    user = _test_user(db_session)
+    standalone = LlmJob(transcript_id=None, kind="assistant", status="completed",
+                        user_id=user.id)
+    db_session.add(standalone)
+    db_session.commit()  # would raise under delete-orphan
+    standalone_id = standalone.id
+
+    t = _transcript(db_session)
+    db_session.delete(t)
+    db_session.commit()
+
+    assert db_session.query(LlmJob).filter(LlmJob.id == standalone_id).count() == 1
 
 
 def test_two_undos_walk_back_two_actions(client, db_session):

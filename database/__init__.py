@@ -80,6 +80,18 @@ class Transcript(Base):
     # then SQLite's rowid reuse can hand the next transcript the dead one's
     # id, resurrecting a foreign undo entry onto the wrong transcript.
     relabel_history = relationship("RelabelHistory", cascade="all, delete-orphan")
+    # Same reasoning as relabel_history above, for the two tables that were
+    # relying on the inert FK cascade alone (issue #300). Verified: before
+    # this, deleting a transcript left its llm_jobs and transcript_tags rows
+    # behind, and the next transcript created reused the freed rowid and
+    # inherited them.
+    #
+    # "delete" not "delete-orphan" for llm_jobs, deliberately: transcript_id
+    # is nullable because assistant jobs legitimately have no transcript
+    # (issue #175). delete-orphan would treat every such standalone job as an
+    # orphan and refuse to flush it.
+    llm_jobs = relationship("LlmJob", cascade="all, delete")
+    tags = relationship("TranscriptTag", cascade="all, delete-orphan")
 
 
 class TranscriptionJob(Base):
