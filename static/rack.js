@@ -826,6 +826,9 @@ function resetDeckState() {
   S.bulkDefaults = null;
   S.bulkSubmitting = false;
   detailData = null;
+  // Holds user-authored, not-yet-saved dump-review edits — per-account
+  // client state, cleared here for the same reason detailData is (#54).
+  dumpReview = null;
   bankListCache = [];
   seedClips = {};
   expandedVoice = null;

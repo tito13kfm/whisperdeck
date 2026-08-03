@@ -37,7 +37,9 @@ and asserted values compound across the sequence:
     exactly once.
   - test 5 finalizes: item 1 (discarded in test 3) must be absent from the
     board, item 0 (kept) must be present.
-Because the fixture is module-scoped rather than a bare shared dict,
+This file therefore requires in-order execution: do NOT enable test
+shuffling (e.g. pytest-randomly) for it. Because the fixture is
+module-scoped rather than a bare shared dict,
 running one of tests 3-5 alone (`pytest ...::test_name`) still gets a real
 transcript_id -- it just fails the compounding-edit assertions with a
 clear diff instead of a bare KeyError, since those edits only exist if
