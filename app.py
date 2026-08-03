@@ -6,6 +6,7 @@ Transcribe · Diarize · Summarize · Identify
 """
 import os
 import re
+import hashlib
 import json
 import datetime
 import shutil
@@ -3484,15 +3485,66 @@ async def index():
     )
 
 
+# First-party precached assets whose content decides the service worker's
+# cache identity. The precached fonts are immutable, so they are excluded.
+SW_FINGERPRINT_ASSETS = ("rack.min.js", "rack.min.css", "index.html")
+
+# Matches the hand-maintained `const CACHE_VERSION = 'vN';` line in static/sw.js.
+SW_CACHE_VERSION_RE = re.compile(r"(const CACHE_VERSION = ')([^']*)(')")
+
+
+def sw_build_fingerprint() -> str:
+    """Short content hash of the first-party assets the service worker
+    precaches.
+
+    The worker's fetch handler is cache-first for static assets, and its
+    `activate` step only deletes caches whose name differs from the current
+    CACHE_NAME. So the served bundle is pinned until CACHE_VERSION changes.
+    Relying on a human to bump that literal on every bundle change does not
+    work: 17 commits changed static/rack.min.js between the last bump and
+    the one in this change, each shipping a bundle existing clients could
+    not see. Deriving part of the version from asset content removes the
+    manual step instead of documenting it harder.
+    """
+    static_dir = BASE_DIR / "static"
+    digest = hashlib.sha256()
+    for name in SW_FINGERPRINT_ASSETS:
+        try:
+            digest.update((static_dir / name).read_bytes())
+        except OSError:
+            # A missing asset must still produce a stable, distinct hash
+            # rather than raising while serving the worker.
+            digest.update(b"\0missing:" + name.encode() + b"\0")
+        digest.update(b"\0")
+    return digest.hexdigest()[:12]
+
+
 @app.get("/sw.js")
 async def service_worker():
     """Serve the service worker from root path so its scope covers the entire
     origin.  Serving from /static/sw.js would limit scope to /static/ only,
-    making it impossible to intercept /api/* or /."""
+    making it impossible to intercept /api/* or /.
+
+    The CACHE_VERSION literal is suffixed with a build fingerprint on the way
+    out (see sw_build_fingerprint), so a changed bundle always yields a
+    changed worker script. The browser byte-compares the worker on each
+    no-cache fetch, so a changed script installs, re-precaches under the new
+    cache name, and purges the old one."""
     sw_path = BASE_DIR / "static" / "sw.js"
     if not sw_path.exists():
         return Response(status_code=404)
-    response = FileResponse(sw_path, media_type="application/javascript")
+    source = sw_path.read_text(encoding="utf-8")
+    body, substitutions = SW_CACHE_VERSION_RE.subn(
+        lambda m: m.group(1) + m.group(2) + "-" + sw_build_fingerprint() + m.group(3),
+        source,
+        count=1,
+    )
+    if substitutions != 1:
+        # sw.js's declaration was reformatted out of recognition. Serve it
+        # unmodified rather than mangled; tests/test_service_worker.py asserts
+        # the substitution happens, so this cannot pass CI unnoticed.
+        body = source
+    response = Response(content=body, media_type="application/javascript")
     response.headers["Service-Worker-Allowed"] = "/"
     return response
 
