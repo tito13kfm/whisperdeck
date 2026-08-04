@@ -8,6 +8,7 @@ import os
 import json
 import datetime
 import hashlib
+import threading
 import numpy as np
 from pathlib import Path
 from typing import Optional
@@ -27,9 +28,37 @@ class VoiceIdentificationService:
         self.voices_dir = voices_dir
         os.makedirs(voices_dir, exist_ok=True)
         self._backend = self._detect_backend()
+        # This service is a module-level singleton (voice_id_service) reached
+        # from two different threads: the event loop, via the /api/voices
+        # routes, and a ThreadPoolExecutor worker, via the voice_match job's
+        # run_in_executor call in services/llm_jobs.py. Every piece of mutable
+        # state below therefore needs an explicit thread story.
+        self._model_lock = threading.Lock()  # guards the two lazy model caches
         self._classifier = None  # cached speechbrain EncoderClassifier
         self._pyannote_inference = None  # cached pyannote Inference wrapper
-        self._last_backend_error = None
+        # Per-thread storage for _last_backend_error (see the property below).
+        # No initial value is set here: the getter defaults to None, and
+        # seeding it from the constructing thread would not be visible to any
+        # other thread anyway.
+        self._error_state = threading.local()
+
+    @property
+    def _last_backend_error(self) -> Optional[str]:
+        """Why the last embedding extraction on *this thread* failed.
+
+        A diagnostic channel, not shared state: enroll()/add_clip() read it
+        immediately after their own _extract_embedding() call to append a
+        reason to the ValueError they raise. It is stored per-thread and
+        cleared at the top of every _extract_embedding() call, so a failing
+        voice_match job on an executor thread can never be the reason an
+        enrollment request on the event loop reports, and a failure from one
+        call can never be reported as the reason for a later one.
+        """
+        return getattr(self._error_state, "message", None)
+
+    @_last_backend_error.setter
+    def _last_backend_error(self, message: Optional[str]) -> None:
+        self._error_state.message = message
 
     def _detect_backend(self) -> str:
         try:
@@ -297,6 +326,12 @@ class VoiceIdentificationService:
         return True
 
     def _extract_embedding(self, audio_path: str, hf_token: Optional[str] = None) -> Optional[tuple]:
+        # Start each extraction with a clean error slot. Without this, the
+        # "don't clobber the primary backend's error" guard in _embed_mfcc
+        # would also refuse to overwrite an error left behind by an earlier
+        # call on this thread, so enroll()/add_clip() would report a stale
+        # reason for a fresh failure.
+        self._last_backend_error = None
         if self._backend == "speechbrain":
             embedding = self._embed_speechbrain(audio_path)
             if embedding is not None:
@@ -317,14 +352,22 @@ class VoiceIdentificationService:
 
     def _get_classifier(self):
         """Build the SpeechBrain classifier once and cache it — loading it
-        from disk on every enroll/identify call is slow."""
+        from disk on every enroll/identify call is slow.
+
+        Double-checked under _model_lock: two threads (an /api/voices route on
+        the event loop and the voice_match job's executor thread) can reach
+        here at the same moment, and an unguarded check-then-act would let both
+        run from_hparams() against the same savedir, wasting the load at best
+        and racing on the same on-disk model directory at worst."""
         if self._classifier is None:
-            from speechbrain.inference.speaker import EncoderClassifier
-            self._classifier = EncoderClassifier.from_hparams(
-                source="speechbrain/spkrec-ecapa-voxceleb",
-                savedir=os.path.join(self.voices_dir, "_models", "ecapa"),
-                run_opts={"device": "cpu"},
-            )
+            with self._model_lock:
+                if self._classifier is None:
+                    from speechbrain.inference.speaker import EncoderClassifier
+                    self._classifier = EncoderClassifier.from_hparams(
+                        source="speechbrain/spkrec-ecapa-voxceleb",
+                        savedir=os.path.join(self.voices_dir, "_models", "ecapa"),
+                        run_opts={"device": "cpu"},
+                    )
         return self._classifier
 
     def _embed_speechbrain(self, audio_path: str) -> Optional[np.ndarray]:
@@ -348,13 +391,16 @@ class VoiceIdentificationService:
             return None
 
     def _get_pyannote_inference(self, hf_token: Optional[str] = None):
+        """Same lazy cache, same double-checked lock, as _get_classifier."""
         if self._pyannote_inference is None:
-            from pyannote.audio import Model, Inference
-            model = Model.from_pretrained(
-                "pyannote/wespeaker-voxceleb-resnet34-LM",
-                token=hf_token or os.environ.get("HUGGINGFACE_TOKEN", None),
-            )
-            self._pyannote_inference = Inference(model, window="whole")
+            with self._model_lock:
+                if self._pyannote_inference is None:
+                    from pyannote.audio import Model, Inference
+                    model = Model.from_pretrained(
+                        "pyannote/wespeaker-voxceleb-resnet34-LM",
+                        token=hf_token or os.environ.get("HUGGINGFACE_TOKEN", None),
+                    )
+                    self._pyannote_inference = Inference(model, window="whole")
         return self._pyannote_inference
 
     def _embed_pyannote(self, audio_path: str, hf_token: Optional[str] = None) -> Optional[np.ndarray]:
