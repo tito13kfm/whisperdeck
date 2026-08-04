@@ -5975,6 +5975,65 @@ function setJackLed(id, connected) {
   st.textContent = connected ? 'linked' : 'open';
 }
 
+// Audio-cleanup panel (issue #317). The backend for these keys shipped with
+// #270, but nothing in the UI ever sent them, so they were only reachable by
+// hand-writing a PUT /api/settings request. One ordered registry drives the
+// render, the toggle wiring, and the save payload, so those three can't drift
+// into parallel hand-maintained lists. Order follows the pipeline order, with
+// each numeric field directly under the toggle that switches it on.
+//
+// cleanup_demucs_enabled is deliberately absent: cleanup_demucs() in
+// services/audio_cleanup.py is written and unit-tested but called from
+// nowhere, so a toggle for it would persist and then do nothing. It belongs
+// with #239, which also owns the consent flow for its multi-GB model
+// download. tests/test_settings_ui_coverage.py enforces that exclusion, so
+// wiring Demucs up means updating that test too.
+//
+// [element id, settings key, label, kind, unit, min, max]
+// kind 'tog' is a boolean toggle; 'int'/'float' are numeric inputs clamped to
+// [min, max] on save.
+const CLEANUP_FIELDS = [
+  ['cleanup-loudnorm', 'cleanup_loudnorm_enabled', 'Loudness normalize', 'tog'],
+  ['cleanup-loudnorm-target', 'cleanup_loudnorm_target', 'Target loudness', 'float', 'LUFS', -70, -5],
+  ['cleanup-highpass', 'cleanup_highpass_enabled', 'High-pass filter (80Hz)', 'tog'],
+  ['cleanup-denoise', 'cleanup_denoise_enabled', 'Denoise', 'tog'],
+  ['cleanup-vad', 'cleanup_vad_enabled', 'Voice activity detection', 'tog'],
+  ['cleanup-vad-threshold', 'cleanup_vad_threshold', 'Speech probability', 'float', 'PROB', 0, 1],
+  ['cleanup-vad-silence', 'cleanup_vad_min_silence_ms', 'Min silence', 'int', 'MS', 0, 10000],
+  ['cleanup-hallu', 'cleanup_hallu_enabled', 'Hallucination filter', 'tog'],
+  // Floor of 2, not 0: filter_hallucinations() returns segments untouched
+  // when rep_window < 2 (services/audio_cleanup.py), so a lower value would
+  // silently disable the filter while its toggle still read as on.
+  ['cleanup-hallu-window', 'cleanup_hallu_rep_window', 'Repeat window', 'int', 'NGRAM', 2, 20],
+  ['cleanup-hallu-logprob', 'cleanup_hallu_logprob_cutoff', 'Logprob cutoff', 'float', 'AVG', -10, 0],
+  ['cleanup-hallu-nospeech', 'cleanup_hallu_no_speech_cutoff', 'No-speech cutoff', 'float', 'PROB', 0, 1],
+];
+
+// Toggles use the default .tog plate/track/paddle sizes so rack.css's
+// `.tog.on .tog-paddle { top: 1px }` rule positions the paddle on its own —
+// same as #tog-motion below. The audio-prep card's toggle overrides those
+// sizes inline and so has to maintain `top` from JS; nothing here needs that.
+function cleanupFieldRow([id, key, label, kind, unit], settings) {
+  if (kind === 'tog') {
+    return `
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:10px">
+            <label class="t-label">${label}</label>
+            <button id="${id}" class="tog ${settings[key] ? 'on' : ''}" style="background:none;border:none;cursor:pointer;padding:0">
+              <span class="tog-plate"><span class="tog-track"><span class="tog-paddle"></span></span></span>
+            </button>
+          </div>`;
+  }
+  // Indented so it reads as belonging to the toggle above it.
+  return `
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding-left:22px">
+            <label class="t-label" style="color:var(--label-dim)" for="${id}">${label}</label>
+            <div style="display:flex;align-items:center;gap:6px">
+              <input id="${id}" type="text" value="${escapeHtml(String(settings[key]))}" style="font-family:var(--f-mono);font-size:11.5px;background:var(--input);border:1px solid var(--input-edge);color:var(--label);padding:6px 8px;border-radius:2px;width:56px;text-align:right">
+              <span style="font-family:var(--f-mono);font-size:9.5px;color:var(--label-dim)">${unit}</span>
+            </div>
+          </div>`;
+}
+
 async function loadSettingsPage() {
   const root = $('page-settings');
   let provs, settings, health, status, localLlmCfg, deviceToken;
@@ -6041,6 +6100,15 @@ async function loadSettingsPage() {
           </div>
           <button id="audio-save" style="font-family:var(--f-cond);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:0.03em;background:var(--input);border:1px solid var(--input-edge);color:var(--label);padding:8px 14px;border-radius:2px;cursor:pointer;margin-top:auto">Save audio settings</button>
         </div>
+      </div>
+    </div>
+
+    <div style="margin-top:30px">
+      <div class="t-cap" style="font-size:10.5px;letter-spacing:0.14em;margin:0 0 8px 36px">Audio cleanup &mdash; opt-in filters</div>
+      <div class="unit unit--svc" style="border-radius:3px;padding:16px 34px;display:flex;flex-direction:column;gap:10px">
+        <div style="font-size:11.5px;color:var(--label-dim)">Loudness, high-pass and denoise run on the audio before transcription; the hallucination filter runs on the segments after it. Every step is off by default except voice activity detection. A step that fails falls back to the original audio rather than failing the job, and voice activity detection applies to local builtin transcription only.</div>
+        ${CLEANUP_FIELDS.map(f => cleanupFieldRow(f, settings)).join('')}
+        <button id="cleanup-save" style="font-family:var(--f-cond);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:0.03em;background:var(--input);border:1px solid var(--input-edge);color:var(--label);padding:8px 14px;border-radius:2px;cursor:pointer;align-self:flex-start;margin-top:4px">Save cleanup settings</button>
       </div>
     </div>
 
@@ -6238,6 +6306,38 @@ async function loadSettingsPage() {
       await api('/api/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
       S.autoCorrect = body.auto_correct;
       toast('Audio settings saved');
+    } catch (e) { toast(e.message, 'error'); }
+  }));
+
+  // audio cleanup (issue #317) — one loop over CLEANUP_FIELDS for the
+  // toggles, one PUT carrying every field in the registry.
+  for (const [id, , , kind] of CLEANUP_FIELDS) {
+    if (kind !== 'tog') continue;
+    $(id).addEventListener('click', () => $(id).classList.toggle('on'));
+  }
+  $('cleanup-save').addEventListener('click', (e) => withBusy(e.currentTarget, async () => {
+    const body = {};
+    for (const [id, key, , kind, , min, max] of CLEANUP_FIELDS) {
+      if (kind === 'tog') { body[key] = $(id).classList.contains('on'); continue; }
+      // Not `parseFloat(v) || default` like the audio-prep card above: 0 is a
+      // legitimate value for the probability and silence fields, and `||`
+      // would silently swap it for the default. Unparseable input leaves the
+      // setting at whatever was loaded rather than resetting it.
+      const n = kind === 'int' ? parseInt($(id).value, 10) : parseFloat($(id).value);
+      body[key] = Number.isFinite(n) ? Math.min(max, Math.max(min, n)) : settings[key];
+    }
+    try {
+      await api('/api/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      // Keep the closure in step with what's now stored. Without this, a
+      // second save in the same page session would fall back to the values
+      // this page loaded with rather than the ones just written.
+      Object.assign(settings, body);
+      // Show what was actually stored — a clamped entry would otherwise leave
+      // the box displaying a value the server never received.
+      for (const [id, key, , kind] of CLEANUP_FIELDS) {
+        if (kind !== 'tog') $(id).value = String(body[key]);
+      }
+      toast('Cleanup settings saved');
     } catch (e) { toast(e.message, 'error'); }
   }));
 

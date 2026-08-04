@@ -421,12 +421,24 @@ async def _run_chunk_job(db, job, provider_config: dict, provider_name: str, lan
     t = db.query(Transcript).filter(Transcript.id == job.transcript_id).first()
     vad_settings = {}
     hallu_enabled = False
+    # Same defaults app.py's inline path uses, so the two blocks read
+    # identically side by side when a transcript row is missing.
+    hallu_rep_window = 3
+    hallu_logprob_cutoff = -2.0
+    hallu_no_speech_cutoff = 0.6
     if t is not None:
         settings = get_user_settings(db, t.user_id)
         vad_settings["vad_filter"] = settings.get("cleanup_vad_enabled", True)
         vad_settings["vad_threshold"] = settings.get("cleanup_vad_threshold", 0.5)
         vad_settings["vad_min_silence_duration_ms"] = settings.get("cleanup_vad_min_silence_ms", 100)
         hallu_enabled = settings.get("cleanup_hallu_enabled", False)
+        # Issue #317: these three were hardcoded at the filter_hallucinations
+        # call below while app.py's inline path read them from settings, so a
+        # user tuning the dials saw them apply to small files and silently not
+        # to any file large enough to be chunked.
+        hallu_rep_window = settings.get("cleanup_hallu_rep_window", 3)
+        hallu_logprob_cutoff = settings.get("cleanup_hallu_logprob_cutoff", -2.0)
+        hallu_no_speech_cutoff = settings.get("cleanup_hallu_no_speech_cutoff", 0.6)
 
     try:
         provider = get_provider(provider_name, provider_config)
@@ -450,8 +462,9 @@ async def _run_chunk_job(db, job, provider_config: dict, provider_name: str, lan
             seg_dicts = [{"text": s.text, "confidence": s.confidence,
                           "no_speech_prob": s.no_speech_prob} for s in result.segments]
             from services.audio_cleanup import filter_hallucinations
-            filtered = filter_hallucinations(seg_dicts, rep_window=3, logprob_cutoff=-2.0,
-                                              no_speech_cutoff=0.6)
+            filtered = filter_hallucinations(seg_dicts, rep_window=hallu_rep_window,
+                                              logprob_cutoff=hallu_logprob_cutoff,
+                                              no_speech_cutoff=hallu_no_speech_cutoff)
             filtered_ids = {id(d) for d in filtered}
             result.segments = [s for i, s in enumerate(result.segments)
                                if id(seg_dicts[i]) in filtered_ids]
