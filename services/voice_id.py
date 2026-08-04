@@ -75,7 +75,7 @@ class VoiceIdentificationService:
     def backend_name(self) -> str:
         return _BACKEND_MODEL_IDS.get(self._backend, "unknown")
 
-    def compatible_embedding_models(self) -> set:
+    def compatible_embedding_models(self) -> set[str]:
         """Model ids whose stored embeddings identify() can still compare against.
 
         Wider than {backend_name} on purpose: _extract_embedding falls back to
