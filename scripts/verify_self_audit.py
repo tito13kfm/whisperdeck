@@ -92,6 +92,48 @@ def find_worktree_for_branch_dir(self_audit_path: Path):
     return None
 
 
+def node_bin_dirs(repo_root: Path):
+    """node_modules/.bin dirs to put on PATH, most-specific first.
+
+    A git worktree has no node_modules of its own (it's gitignored), so a run
+    against one would fail every build check with "'esbuild' is not
+    recognized" unless the main checkout's binaries are also offered. The main
+    checkout is the parent of the common git dir.
+    """
+    dirs = [repo_root / "node_modules" / ".bin"]
+    try:
+        proc = subprocess.run(
+            ["git", "rev-parse", "--git-common-dir"],
+            cwd=str(repo_root), capture_output=True, text=True, timeout=10,
+        )
+        if proc.returncode == 0:
+            common = Path(proc.stdout.strip())
+            if not common.is_absolute():
+                common = (repo_root / common).resolve()
+            dirs.append(common.parent / "node_modules" / ".bin")
+    except (OSError, subprocess.SubprocessError):
+        pass
+    seen, out = set(), []
+    for d in dirs:
+        r = str(d.resolve()) if d.exists() else None
+        if r and r not in seen:
+            seen.add(r)
+            out.append(r)
+    return out
+
+
+def rebuild_command(cmd: str, out: str, tmp_dir: str):
+    """Rewrite an esbuild script to build into tmp_dir, keeping out's basename.
+
+    Returns (full_cmd, tmp_path). The basename must survive: esbuild derives the
+    emitted `//# sourceMappingURL=` from the outfile name, so building
+    `rack.min.js` as `tmpXXXX.js` changes those bytes and makes every
+    --sourcemap bundle look stale regardless of whether it actually is.
+    """
+    tmp_path = str(Path(tmp_dir) / Path(out).name)
+    return cmd.replace(f"--outfile={out}", f"--outfile={tmp_path}"), tmp_path
+
+
 def check_build_freshness(repo_root: Path):
     findings = []
     for script_name, cmd, src, out in parse_build_pairs(repo_root):
@@ -103,14 +145,12 @@ def check_build_freshness(repo_root: Path):
         if not out_path.exists():
             findings.append(f"BUILD [{script_name}]: built artifact {out} does not exist")
             continue
-        rebuilt_cmd = cmd.replace(f"--outfile={out}", "--outfile={tmp}")
-        with tempfile.NamedTemporaryFile(suffix=Path(out).suffix, delete=False) as tf:
-            tmp_path = tf.name
-        try:
-            full_cmd = rebuilt_cmd.replace("{tmp}", tmp_path)
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            full_cmd, tmp_path = rebuild_command(cmd, out, tmp_dir)
             env = dict(os.environ)
-            bin_dir = str((repo_root / "node_modules" / ".bin").resolve())
-            env["PATH"] = bin_dir + os.pathsep + env.get("PATH", "")
+            bin_dirs = node_bin_dirs(repo_root)
+            if bin_dirs:
+                env["PATH"] = os.pathsep.join(bin_dirs) + os.pathsep + env.get("PATH", "")
             proc = subprocess.run(
                 full_cmd, shell=True, cwd=str(repo_root), env=env,
                 capture_output=True, text=True, timeout=60,
@@ -130,8 +170,6 @@ def check_build_freshness(repo_root: Path):
                     f"fresh={len(rebuilt_bytes)}b). Run `npm run {script_name}` "
                     f"(or the parent `build` script) and commit the result."
                 )
-        finally:
-            Path(tmp_path).unlink(missing_ok=True)
     return findings
 
 
