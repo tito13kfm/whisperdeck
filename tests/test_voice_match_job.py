@@ -4,8 +4,8 @@ import asyncio
 import numpy as np
 from unittest.mock import patch
 
-from database import Transcript, User, VoiceProfile
-from services.llm_jobs import enqueue_llm_job, run_llm_job
+from database import RelabelHistory, Transcript, User, VoiceProfile
+from services.llm_jobs import cancel_llm_job, enqueue_llm_job, run_llm_job
 from services.voice_id import voice_id_service
 
 
@@ -272,6 +272,134 @@ def test_voice_match_proceeds_for_legacy_profile_with_no_embedding_model(db_sess
     db_session.refresh(t)
     assert job.status == "completed"
     assert t.segments[0]["speaker"] == "Alice"
+
+
+def _relabel_rows(db_session, transcript):
+    return (db_session.query(RelabelHistory)
+            .filter(RelabelHistory.transcript_id == transcript.id).all())
+
+
+def test_voice_match_cancel_mid_loop_stops_and_leaves_transcript_unchanged(db_session, tmp_path):
+    """A cancel doesn't signal the worker, it just flips the row, so the loop
+    has to notice. Before issue #330 this branch had no cancellation check at
+    all: it ran every remaining segment, then committed the relabel history and
+    the speaker overwrite anyway, and only then did _finish see 'cancelled' and
+    leave the status alone. The user got a job the Queue called cancelled on a
+    transcript whose labels had all been rewritten.
+    """
+    user = _user(db_session)
+    _enrolled_profile(db_session, user)
+    segments = [
+        {"start": 0.0, "end": 1.0, "text": "hi", "speaker": "SPEAKER_00"},
+        {"start": 1.0, "end": 2.0, "text": "bye", "speaker": "SPEAKER_01"},
+        {"start": 2.0, "end": 3.0, "text": "again", "speaker": "SPEAKER_02"},
+    ]
+    t = _transcript_with_segments(db_session, user, tmp_path, segments)
+    job = enqueue_llm_job(db_session, user.id, t.id, "voice_match", "", "")
+    job.status = "running"
+    db_session.commit()
+
+    # Cancel lands while the first segment is being extracted, the same way a
+    # user clicking cancel in the Queue would land it: straight onto the row.
+    async def cancel_then_extract(audio_path, clips, output_dir):
+        cancel_then_extract.calls += 1
+        if cancel_then_extract.calls == 1:
+            cancel_llm_job(db_session, user.id, job.id)
+        return str(tmp_path / "clip.wav")
+    cancel_then_extract.calls = 0
+
+    factory = lambda: _NoCloseSession(db_session)
+    with patch("services.llm_jobs.extract_clips_concat", cancel_then_extract), \
+         patch("services.llm_jobs.voice_id_service.identify",
+               lambda db, user_id, audio_path, threshold=0.65, hf_token=None: [{"id": 1, "name": "Alice", "similarity": 0.9, "sample_count": 1}]):
+        asyncio.run(run_llm_job(factory, job.id, transcription_service=None))
+
+    db_session.refresh(job)
+    db_session.refresh(t)
+    assert job.status == "cancelled"
+    # Stopped early instead of grinding through the remaining segments.
+    assert cancel_then_extract.calls == 1
+    # The dependent writes must not have landed.
+    assert [s["speaker"] for s in t.segments] == ["SPEAKER_00", "SPEAKER_01", "SPEAKER_02"]
+    assert _relabel_rows(db_session, t) == []
+
+
+def test_voice_match_cancel_after_a_committed_segment_still_skips_the_writes(db_session, tmp_path):
+    """Stronger ordering than the test above, where the cancel lands during the
+    FIRST extraction and so fires before the loop body has committed anything.
+
+    Here the cancel lands during the second extraction, after segment 0 already
+    ran `job.progress_done = i + 1; db.commit()`. That commit flushes the whole
+    session, `transcript` included, so this pins down that the guard's return
+    leaves no partially-durable relabel behind: the matched speaker for segment
+    0 lives only in the local `new_segments` list until the post-loop write that
+    the guard skips.
+    """
+    user = _user(db_session)
+    _enrolled_profile(db_session, user)
+    segments = [
+        {"start": 0.0, "end": 1.0, "text": "hi", "speaker": "SPEAKER_00"},
+        {"start": 1.0, "end": 2.0, "text": "bye", "speaker": "SPEAKER_01"},
+        {"start": 2.0, "end": 3.0, "text": "again", "speaker": "SPEAKER_02"},
+    ]
+    t = _transcript_with_segments(db_session, user, tmp_path, segments)
+    job = enqueue_llm_job(db_session, user.id, t.id, "voice_match", "", "")
+    job.status = "running"
+    db_session.commit()
+
+    async def cancel_on_second(audio_path, clips, output_dir):
+        cancel_on_second.calls += 1
+        if cancel_on_second.calls == 2:
+            cancel_llm_job(db_session, user.id, job.id)
+        return str(tmp_path / "clip.wav")
+    cancel_on_second.calls = 0
+
+    factory = lambda: _NoCloseSession(db_session)
+    with patch("services.llm_jobs.extract_clips_concat", cancel_on_second), \
+         patch("services.llm_jobs.voice_id_service.identify",
+               lambda db, user_id, audio_path, threshold=0.65, hf_token=None: [{"id": 1, "name": "Alice", "similarity": 0.9, "sample_count": 1}]):
+        asyncio.run(run_llm_job(factory, job.id, transcription_service=None))
+
+    db_session.refresh(job)
+    db_session.refresh(t)
+    assert job.status == "cancelled"
+    # Segment 0 matched and segment 1 matched, but the third was never started.
+    assert cancel_on_second.calls == 2
+    # Nothing durable, even though segment 0's progress commit already flushed.
+    assert [s["speaker"] for s in t.segments] == ["SPEAKER_00", "SPEAKER_01", "SPEAKER_02"]
+    assert _relabel_rows(db_session, t) == []
+
+
+def test_voice_match_cancel_during_final_segment_still_skips_the_writes(db_session, tmp_path):
+    """The loop-top check isn't enough on its own: a cancel landing during the
+    LAST iteration has no further iteration to catch it, so the guard before the
+    dependent writes is what keeps this case from overwriting the transcript.
+    """
+    user = _user(db_session)
+    _enrolled_profile(db_session, user)
+    segments = [{"start": 0.0, "end": 1.0, "text": "hi", "speaker": "SPEAKER_00"}]
+    t = _transcript_with_segments(db_session, user, tmp_path, segments)
+    job = enqueue_llm_job(db_session, user.id, t.id, "voice_match", "", "")
+    job.status = "running"
+    db_session.commit()
+
+    async def fake_extract(audio_path, clips, output_dir):
+        return str(tmp_path / "clip.wav")
+
+    def cancel_then_match(db, user_id, audio_path, threshold=0.65, hf_token=None):
+        cancel_llm_job(db_session, user.id, job.id)
+        return [{"id": 1, "name": "Alice", "similarity": 0.9, "sample_count": 1}]
+
+    factory = lambda: _NoCloseSession(db_session)
+    with patch("services.llm_jobs.extract_clips_concat", fake_extract), \
+         patch("services.llm_jobs.voice_id_service.identify", cancel_then_match):
+        asyncio.run(run_llm_job(factory, job.id, transcription_service=None))
+
+    db_session.refresh(job)
+    db_session.refresh(t)
+    assert job.status == "cancelled"
+    assert t.segments[0]["speaker"] == "SPEAKER_00"
+    assert _relabel_rows(db_session, t) == []
 
 
 def test_voice_match_fails_when_audio_missing(db_session):

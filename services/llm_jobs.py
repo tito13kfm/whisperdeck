@@ -730,6 +730,16 @@ async def run_llm_job(SessionLocal, job_id: int, transcription_service, diarizat
             changed = []
             new_segments = list(segments)
             for i, seg in enumerate(segments):
+                # cancel_llm_job only flips the row, it can't signal this
+                # worker, so notice the cancel here the same way voice_dump and
+                # tagging do. Checked before the work rather than after, so a
+                # cancel stops paying for an ffmpeg extraction plus an embedding
+                # on every remaining segment. Outside the try below on purpose:
+                # its `except Exception` would otherwise swallow a refresh
+                # failure into the per-segment skip count.
+                db.refresh(job)
+                if job.status == "cancelled":
+                    return
                 try:
                     clip_path = await extract_clips_concat(
                         transcript.audio_path, [{"start": seg["start"], "end": seg["end"]}],
@@ -758,6 +768,15 @@ async def run_llm_job(SessionLocal, job_id: int, transcription_service, diarizat
                     skipped += 1
                 job.progress_done = i + 1
                 db.commit()
+            # The loop guard can't catch a cancel that lands during the final
+            # iteration, and these writes are the ones that actually matter:
+            # without this check a cancelled job still stamps every matched
+            # speaker onto the transcript and records an undo entry for it. Same
+            # promise the voice_note branch states outright, a cancelled job
+            # leaves the transcript unchanged and the user can re-run.
+            db.refresh(job)
+            if job.status == "cancelled":
+                return
             if changed:
                 from services.relabel import record_relabel
                 record_relabel(db, transcript, "voice_match", changed,
