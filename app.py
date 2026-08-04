@@ -58,7 +58,7 @@ from services.llm_jobs import (
     dismiss_llm_job, clear_finished_llm_jobs,
 )
 from services.classification import effective_kind
-from services.relabel import record_relabel, latest_relabel, clear_relabel_history
+from services.relabel import record_relabel, latest_relabel, clear_relabel_history, count_distinct_speakers
 from backends import list_providers, get_provider, LOCAL_PROVIDERS
 from services.security import (
     generate_csrf_token, rotate_csrf_token, validate_csrf_token,
@@ -2087,6 +2087,9 @@ async def update_transcript(transcript_id: int, data: dict = Body(...), db: Sess
     if "segments" in data:
         clear_relabel_history(db, t.id)
         t.segments = data["segments"]
+        # Client-supplied replacement: the labels it carries are now the only
+        # record of who speaks, so the cached count has to follow them.
+        t.speaker_count = count_distinct_speakers(t.segments)
     if "full_text" in data:
         t.full_text = data["full_text"]
     if "kind" in data:
@@ -2307,6 +2310,9 @@ async def rename_transcript_speaker(
         description=f"rename {old} to {new} ({renamed} lines)",
     )
     t.segments = new_segments
+    # Renaming A to a name already present elsewhere merges the two, so the
+    # distinct-label count can drop by one here.
+    t.speaker_count = count_distinct_speakers(new_segments)
 
     if t.corrected_text:
         # Line-anchored: only rewrite the 'Old Name: ' prefix at the start
@@ -2363,6 +2369,9 @@ async def retag_transcript_segments(
         for i, seg in enumerate(segments)
     ]
     t.segments = new_segments
+    # A by-index retag can fold lines into an existing label (count drops) or
+    # introduce a label the transcript did not have before (count rises).
+    t.speaker_count = count_distinct_speakers(new_segments)
     t.updated_at = utcnow_naive()
     db.commit()
     return {"retagged": len(index_set), "transcript": _serialize_transcript(db, t, jobs_map=_batch_latest_jobs(db, [t.id]), include_relabel=True)}
@@ -2392,6 +2401,9 @@ async def undo_last_relabel(
         if isinstance(i, int) and 0 <= i < len(segments):
             segments[i] = {**segments[i], "speaker": patch.get("speaker") or ""}
     t.segments = segments
+    # Restoring the old labels restores the old label set, so the count has to
+    # come back with them.
+    t.speaker_count = count_distinct_speakers(segments)
     if (
         entry.inverse.get("corrected_text") is not None
         and entry.inverse.get("corrected_text_after") == t.corrected_text

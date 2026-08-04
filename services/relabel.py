@@ -7,6 +7,33 @@ from database import RelabelHistory
 
 MAX_HISTORY = 20
 
+# combine_with_transcript() stamps this literal onto any transcript segment
+# that overlapped no diarization turn (services/diarization.py), so it is a
+# real value inside persisted segments. It means "nobody attributed", not a
+# participant, and the diarization services compute their own speaker_count
+# from the diarization turns BEFORE that fallback is applied. Counting it as
+# a speaker here would report a higher number than the diarize path ever
+# would for the same segment list.
+NON_SPEAKER_LABELS = frozenset({"unknown"})
+
+
+def count_distinct_speakers(segments) -> int:
+    """Distinct real speaker labels in a persisted transcript.segments list.
+
+    The single definition for every path that rewrites segments without
+    re-running diarization (voice match, speaker rename, segment retag,
+    relabel-undo, the segments PATCH). Those paths no longer hold the
+    diarization turns that services/diarization.py counts from, so they have
+    to recount from the stored labels; keeping that in one place is what
+    stops the five of them from answering the "Unknown" question differently.
+    """
+    return len({
+        name
+        for seg in (segments or [])
+        if (name := (seg.get("speaker") or "").strip())
+        and name.casefold() not in NON_SPEAKER_LABELS
+    })
+
 
 def record_relabel(db, transcript, kind: str, changed: list[tuple[int, str]],
                    corrected_text_before: str | None = None, description: str = "") -> RelabelHistory | None:

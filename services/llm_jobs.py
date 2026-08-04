@@ -745,7 +745,13 @@ async def run_llm_job(SessionLocal, job_id: int, transcription_service, diarizat
                 from services.relabel import record_relabel
                 record_relabel(db, transcript, "voice_match", changed,
                                description=f"voice match relabeled {len(changed)} lines")
+            from services.relabel import count_distinct_speakers
             transcript.segments = new_segments
+            # Matching is per segment, not per cluster, so it can merge several
+            # SPEAKER_XX labels onto one enrolled name (count drops) or split
+            # one cluster between a matched name and the unmatched original
+            # (count rises). Recount, never decrement.
+            transcript.speaker_count = count_distinct_speakers(new_segments)
             transcript.updated_at = utcnow_naive()
             db.commit()
             error = f"{skipped} segment(s) skipped (extraction/embedding failed)" if skipped else None
