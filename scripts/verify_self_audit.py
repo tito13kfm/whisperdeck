@@ -129,9 +129,14 @@ def rebuild_command(cmd: str, out: str, tmp_dir: str):
     emitted `//# sourceMappingURL=` from the outfile name, so building
     `rack.min.js` as `tmpXXXX.js` changes those bytes and makes every
     --sourcemap bundle look stale regardless of whether it actually is.
+
+    The path is quoted because it comes from the OS temp dir, which can contain
+    spaces (a Windows username with a space puts one in %TEMP%), and the command
+    runs through a shell. Double quotes rather than shlex.quote: this runs under
+    cmd.exe on Windows, which doesn't understand POSIX single-quoting.
     """
     tmp_path = str(Path(tmp_dir) / Path(out).name)
-    return cmd.replace(f"--outfile={out}", f"--outfile={tmp_path}"), tmp_path
+    return cmd.replace(f"--outfile={out}", f'--outfile="{tmp_path}"'), tmp_path
 
 
 def check_build_freshness(repo_root: Path):
