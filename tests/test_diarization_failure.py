@@ -72,6 +72,7 @@ async def test_diarization_failure_keeps_segments_undiarized(db_session):
         await _finalize_if_done(db_session, transcript.id, diar_service)
 
     db_session.refresh(transcript)
+    assert len(transcript.segments) > 0, "Segments must be non-empty after finalize"
     for seg in transcript.segments:
         # Pre-diarization segments have speaker=None from result_json
         assert seg.get("speaker") is None, (
