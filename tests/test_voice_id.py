@@ -389,6 +389,31 @@ def test_identify_skips_profiles_with_no_embedding(tmp_path, monkeypatch, db_ses
     assert results == []  # no crash, no match — the empty profile is skipped
 
 
+def test_compatible_embedding_models_covers_primary_and_mfcc_fallback(tmp_path):
+    """The set backs the voice_match job's pre-flight guard (issue #112). Every
+    live backend must include the MFCC id, because _extract_embedding degrades
+    to MFCC when the primary backend throws at runtime, so a set that omitted it
+    would refuse jobs whose profiles were enrolled during such a fallback.
+    """
+    svc = VoiceIdentificationService(voices_dir=str(tmp_path / "voices"))
+
+    svc._backend = "speechbrain"
+    assert svc.compatible_embedding_models() == {
+        "speechbrain/spkrec-ecapa-voxceleb", "MFCC fingerprint (librosa)"}
+
+    svc._backend = "pyannote"
+    assert svc.compatible_embedding_models() == {
+        "pyannote/wespeaker-voxceleb-resnet34-LM", "MFCC fingerprint (librosa)"}
+
+    svc._backend = "librosa_mfcc"
+    assert svc.compatible_embedding_models() == {"MFCC fingerprint (librosa)"}
+
+    # "none" maps to a display string in the registry, not a real model id, so
+    # it must not leak into the compatible set.
+    svc._backend = "none"
+    assert svc.compatible_embedding_models() == set()
+
+
 def test_identify_skips_profile_with_different_embedding_model(tmp_path, monkeypatch, db_session):
     svc = VoiceIdentificationService(voices_dir=str(tmp_path / "voices"))
     user = _test_user(db_session)
@@ -415,8 +440,18 @@ def test_identify_still_matches_legacy_profile_with_no_recorded_model(tmp_path, 
                             embedding_model=None, sample_count=1)
     db_session.add(profile)
     db_session.commit()
+    # embedding_model has a column default (database/__init__.py), so passing
+    # None to the constructor stores "speechbrain/spkrec-ecapa-voxceleb", not
+    # NULL. Force the real pre-migration state with an UPDATE, and probe with a
+    # DIFFERENT model id, otherwise this passes on the equality branch and
+    # proves nothing about the NULL wildcard it claims to test.
+    db_session.query(VoiceProfile).filter(VoiceProfile.id == profile.id).update(
+        {VoiceProfile.embedding_model: None}, synchronize_session=False)
+    db_session.commit()
+    db_session.expire(profile)
+    assert profile.embedding_model is None
 
-    monkeypatch.setattr(svc, "_extract_embedding", lambda path, hf_token=None: (np.array([1.0, 0.0]), "speechbrain/spkrec-ecapa-voxceleb"))
+    monkeypatch.setattr(svc, "_extract_embedding", lambda path, hf_token=None: (np.array([1.0, 0.0]), "pyannote/wespeaker-voxceleb-resnet34-LM"))
 
     probe = tmp_path / "probe.wav"
     probe.write_bytes(b"wav")

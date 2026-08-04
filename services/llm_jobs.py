@@ -694,14 +694,31 @@ async def run_llm_job(SessionLocal, job_id: int, transcription_service, diarizat
             if not (transcript.audio_path and os.path.exists(transcript.audio_path)):
                 _finish(db, job, "failed", "No stored audio for this transcript")
                 return
-            has_enrolled_voice = (
+            enrolled = (
                 db.query(VoiceProfile)
                 .filter(VoiceProfile.user_id == job.user_id, VoiceProfile.embedding.isnot(None))
-                .first()
-                is not None
+                .all()
             )
-            if not has_enrolled_voice:
+            if not enrolled:
                 _finish(db, job, "failed", "No enrolled voices with clips — add a clip to a roster profile first")
+                return
+            # Profiles existing isn't enough: identify() skips any profile whose
+            # embedding_model differs from the probe's (services/voice_id.py),
+            # so a roster built by a backend that's since been swapped out
+            # matches nothing while still paying for one ffmpeg extraction per
+            # segment. Mirror identify()'s condition here instead: any falsy
+            # embedding_model is a pre-migration wildcard (matching identify()'s
+            # own `if profile.embedding_model and ...` short-circuit), and
+            # compatible_embedding_models() is a deliberate superset (the
+            # backend can degrade to MFCC mid-run), so this only refuses rosters
+            # that provably cannot match.
+            compatible = voice_id_service.compatible_embedding_models()
+            if not any(not p.embedding_model or p.embedding_model in compatible for p in enrolled):
+                stale = ", ".join(sorted({p.embedding_model for p in enrolled if p.embedding_model}))
+                _finish(db, job, "failed",
+                        f"Enrolled voices were built with {stale}, which this server's voice "
+                        f"backend ({voice_id_service.backend_name}) cannot match against. "
+                        f"Re-add a clip to each roster profile to rebuild it with the current backend.")
                 return
             from services.settings import get_user_settings
             user_settings = get_user_settings(db, job.user_id)
