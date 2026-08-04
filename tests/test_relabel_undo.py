@@ -159,9 +159,12 @@ def _voice_match_user(db_session, name="matcher"):
 
 
 def _enrolled_profile(db_session, user, name="Alice"):
+    # embedding_model must be the running backend's own model id: the
+    # voice_match job refuses to run when no enrolled profile is compatible
+    # with the current backend (issue #112).
     profile = VoiceProfile(
         user_id=user.id, name=name, embedding=[0.1, 0.2, 0.3],
-        embedding_model="test", sample_count=1,
+        embedding_model=voice_id_service.backend_name, sample_count=1,
     )
     db_session.add(profile)
     db_session.commit()

@@ -26,13 +26,34 @@ def _user(db_session, name="matcher"):
     return user
 
 
-def _enrolled_profile(db_session, user, name="Alice"):
+_CURRENT_BACKEND = object()
+
+
+def _enrolled_profile(db_session, user, name="Alice", embedding_model=_CURRENT_BACKEND):
+    """embedding_model defaults to the running backend's own model id.
+
+    The job's pre-flight guard (issue #112) refuses to run when no enrolled
+    profile was built by a model the current backend can produce, so a
+    hardcoded literal here would fail every test that expects the job to run.
+    Pass an explicit value to exercise mismatch/legacy-NULL cases.
+    """
+    if embedding_model is _CURRENT_BACKEND:
+        embedding_model = voice_id_service.backend_name
     profile = VoiceProfile(
         user_id=user.id, name=name, embedding=[0.1, 0.2, 0.3],
-        embedding_model="test", sample_count=1,
+        embedding_model=embedding_model, sample_count=1,
     )
     db_session.add(profile)
     db_session.commit()
+    if embedding_model is None:
+        # embedding_model carries a column default (database/__init__.py), so
+        # the constructor arg above stored that default rather than NULL. An
+        # UPDATE is the only way to reach the real pre-migration state.
+        db_session.query(VoiceProfile).filter(VoiceProfile.id == profile.id).update(
+            {VoiceProfile.embedding_model: None}, synchronize_session=False)
+        db_session.commit()
+        db_session.expire(profile)
+        assert profile.embedding_model is None
     return profile
 
 
@@ -99,7 +120,10 @@ def test_voice_match_runs_real_identify_through_executor(db_session, tmp_path, m
     async def fake_extract(audio_path, clips, output_dir):
         return str(tmp_path / "clip.wav")
 
-    monkeypatch.setattr(voice_id_service, "_extract_embedding", lambda path, hf_token=None: (np.array([0.1, 0.2, 0.3]), "test"))
+    # Probe model must be the current backend's own id: identify() skips any
+    # profile whose embedding_model differs from the probe's (voice_id.py).
+    monkeypatch.setattr(voice_id_service, "_extract_embedding",
+                        lambda path, hf_token=None: (np.array([0.1, 0.2, 0.3]), voice_id_service.backend_name))
 
     factory = lambda: _NoCloseSession(db_session)
     with patch("services.llm_jobs.extract_clips_concat", fake_extract):
@@ -151,6 +175,103 @@ def test_voice_match_fails_fast_with_empty_roster(db_session, tmp_path):
     db_session.refresh(job)
     assert job.status == "failed"
     assert job.error == "No enrolled voices with clips — add a clip to a roster profile first"
+
+
+def test_voice_match_fails_fast_when_enrolled_voices_use_a_different_backend(db_session, tmp_path):
+    """Profiles exist with embeddings, but every one was built by a model the
+    running backend cannot produce, so identify() would skip all of them
+    (services/voice_id.py mismatch check). The job must refuse up front instead
+    of spawning one ffmpeg extraction per segment to match nothing (issue #112).
+
+    _backend is patched rather than inherited so the mismatch is unambiguous
+    regardless of which voice packages the test environment has installed.
+    """
+    user = _user(db_session)
+    _enrolled_profile(db_session, user, embedding_model="speechbrain/spkrec-ecapa-voxceleb")
+    segments = [
+        {"start": 0.0, "end": 1.0, "text": "hi", "speaker": "SPEAKER_00"},
+        {"start": 1.0, "end": 2.0, "text": "bye", "speaker": "SPEAKER_01"},
+    ]
+    t = _transcript_with_segments(db_session, user, tmp_path, segments)
+    job = enqueue_llm_job(db_session, user.id, t.id, "voice_match", "", "")
+    job.status = "running"
+    db_session.commit()
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("extract_clips_concat should not run when no profile matches the backend")
+
+    factory = lambda: _NoCloseSession(db_session)
+    with patch("services.llm_jobs.voice_id_service._backend", "librosa_mfcc"), \
+         patch("services.llm_jobs.extract_clips_concat", fail_if_called):
+        asyncio.run(run_llm_job(factory, job.id, transcription_service=None))
+
+    db_session.refresh(job)
+    db_session.refresh(t)
+    assert job.status == "failed"
+    # Both sides of the mismatch have to be named, otherwise the user has no
+    # way to tell which backend to reinstall or which clips to re-add.
+    assert "speechbrain/spkrec-ecapa-voxceleb" in job.error
+    assert "MFCC fingerprint (librosa)" in job.error
+    assert job.progress_done == 0
+    assert t.segments[0]["speaker"] == "SPEAKER_00"  # transcript untouched
+
+
+def test_voice_match_proceeds_when_enrolled_voice_matches_current_backend(db_session, tmp_path):
+    """Mutation-check partner of the mismatch test above: if
+    compatible_embedding_models() returned an empty set, the guard would reject
+    a profile the current backend can actually use and this job would fail.
+    """
+    user = _user(db_session)
+    _enrolled_profile(db_session, user, embedding_model="MFCC fingerprint (librosa)")
+    segments = [{"start": 0.0, "end": 1.0, "text": "hi", "speaker": "SPEAKER_00"}]
+    t = _transcript_with_segments(db_session, user, tmp_path, segments)
+    job = enqueue_llm_job(db_session, user.id, t.id, "voice_match", "", "")
+    job.status = "running"
+    db_session.commit()
+
+    async def fake_extract(audio_path, clips, output_dir):
+        return str(tmp_path / "clip.wav")
+
+    factory = lambda: _NoCloseSession(db_session)
+    with patch("services.llm_jobs.voice_id_service._backend", "librosa_mfcc"), \
+         patch("services.llm_jobs.extract_clips_concat", fake_extract), \
+         patch("services.llm_jobs.voice_id_service.identify",
+               lambda db, user_id, audio_path, threshold=0.65, hf_token=None: [{"id": 1, "name": "Alice", "similarity": 0.9, "sample_count": 1}]):
+        asyncio.run(run_llm_job(factory, job.id, transcription_service=None))
+
+    db_session.refresh(job)
+    db_session.refresh(t)
+    assert job.status == "completed"
+    assert t.segments[0]["speaker"] == "Alice"
+
+
+def test_voice_match_proceeds_for_legacy_profile_with_no_embedding_model(db_session, tmp_path):
+    """A NULL embedding_model is a pre-migration row, and identify() treats it
+    as compatible with any probe (services/voice_id.py). The pre-flight guard
+    must mirror that, or the fix would hard-fail jobs that would have matched.
+    """
+    user = _user(db_session)
+    _enrolled_profile(db_session, user, embedding_model=None)
+    segments = [{"start": 0.0, "end": 1.0, "text": "hi", "speaker": "SPEAKER_00"}]
+    t = _transcript_with_segments(db_session, user, tmp_path, segments)
+    job = enqueue_llm_job(db_session, user.id, t.id, "voice_match", "", "")
+    job.status = "running"
+    db_session.commit()
+
+    async def fake_extract(audio_path, clips, output_dir):
+        return str(tmp_path / "clip.wav")
+
+    factory = lambda: _NoCloseSession(db_session)
+    with patch("services.llm_jobs.voice_id_service._backend", "librosa_mfcc"), \
+         patch("services.llm_jobs.extract_clips_concat", fake_extract), \
+         patch("services.llm_jobs.voice_id_service.identify",
+               lambda db, user_id, audio_path, threshold=0.65, hf_token=None: [{"id": 1, "name": "Alice", "similarity": 0.9, "sample_count": 1}]):
+        asyncio.run(run_llm_job(factory, job.id, transcription_service=None))
+
+    db_session.refresh(job)
+    db_session.refresh(t)
+    assert job.status == "completed"
+    assert t.segments[0]["speaker"] == "Alice"
 
 
 def test_voice_match_fails_when_audio_missing(db_session):

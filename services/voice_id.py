@@ -19,6 +19,21 @@ from database import VoiceProfile, VoiceClip, utcnow_naive
 # to the same root without importing app.py (which would be circular).
 _DEFAULT_VOICES_DIR = str(Path(__file__).resolve().parent.parent / "data" / "voices")
 
+# Every backend can degrade to MFCC at runtime (see _extract_embedding), so this
+# id is reachable no matter which package is installed.
+_MFCC_MODEL_ID = "MFCC fingerprint (librosa)"
+
+# One registry for the model id each backend stamps onto the embeddings it
+# produces. Read by backend_name, _extract_embedding, and
+# compatible_embedding_models() so the three can't drift apart when a backend is
+# added. The "none" entry is a display string only, never a stored model id.
+_BACKEND_MODEL_IDS = {
+    "speechbrain": "speechbrain/spkrec-ecapa-voxceleb",
+    "pyannote": "pyannote/wespeaker-voxceleb-resnet34-LM",
+    "librosa_mfcc": _MFCC_MODEL_ID,
+    "none": "No backend available — install speechbrain",
+}
+
 
 class VoiceIdentificationService:
     """Enroll known speakers and identify speakers in audio."""
@@ -58,13 +73,22 @@ class VoiceIdentificationService:
 
     @property
     def backend_name(self) -> str:
-        names = {
-            "speechbrain": "speechbrain/spkrec-ecapa-voxceleb",
-            "pyannote": "pyannote/wespeaker-voxceleb-resnet34-LM",
-            "librosa_mfcc": "MFCC fingerprint (librosa)",
-            "none": "No backend available — install speechbrain",
-        }
-        return names.get(self._backend, "unknown")
+        return _BACKEND_MODEL_IDS.get(self._backend, "unknown")
+
+    def compatible_embedding_models(self) -> set[str]:
+        """Model ids whose stored embeddings identify() can still compare against.
+
+        Wider than {backend_name} on purpose: _extract_embedding falls back to
+        MFCC when the primary backend is installed but throws at runtime, so a
+        profile tagged with the MFCC id is matchable under any live backend.
+        Callers use this for pre-flight guards (services/llm_jobs.py's
+        voice_match branch), so it must never be narrower than what identify()
+        actually accepts, or a job that would have matched gets refused.
+        """
+        if self._backend == "none":
+            return set()
+        primary = _BACKEND_MODEL_IDS.get(self._backend)
+        return {m for m in (primary, _MFCC_MODEL_ID) if m}
 
     def enroll(
         self,
@@ -232,6 +256,11 @@ class VoiceIdentificationService:
         for profile in profiles:
             if profile.embedding is None:
                 continue
+            # A NULL embedding_model is a pre-migration row, treated as
+            # compatible with any probe. services/llm_jobs.py's voice_match
+            # branch pre-flights this same condition (via
+            # compatible_embedding_models()) so it can refuse a job before
+            # extracting a clip per segment. Keep the two in step.
             if profile.embedding_model and profile.embedding_model != probe_model:
                 continue
             stored = np.array(profile.embedding)
@@ -300,12 +329,12 @@ class VoiceIdentificationService:
         if self._backend == "speechbrain":
             embedding = self._embed_speechbrain(audio_path)
             if embedding is not None:
-                return embedding, "speechbrain/spkrec-ecapa-voxceleb"
+                return embedding, _BACKEND_MODEL_IDS["speechbrain"]
             return self._mfcc_fallback(audio_path)
         elif self._backend == "pyannote":
             embedding = self._embed_pyannote(audio_path, hf_token=hf_token)
             if embedding is not None:
-                return embedding, "pyannote/wespeaker-voxceleb-resnet34-LM"
+                return embedding, _BACKEND_MODEL_IDS["pyannote"]
             return self._mfcc_fallback(audio_path)
         elif self._backend == "librosa_mfcc":
             return self._mfcc_fallback(audio_path)
@@ -313,7 +342,7 @@ class VoiceIdentificationService:
 
     def _mfcc_fallback(self, audio_path: str) -> Optional[tuple]:
         embedding = self._embed_mfcc(audio_path)
-        return (embedding, "MFCC fingerprint (librosa)") if embedding is not None else None
+        return (embedding, _MFCC_MODEL_ID) if embedding is not None else None
 
     def _get_classifier(self):
         """Build the SpeechBrain classifier once and cache it — loading it
