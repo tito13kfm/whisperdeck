@@ -727,6 +727,13 @@ async def run_llm_job(SessionLocal, job_id: int, transcription_service, diarizat
             job.progress_done = 0
             db.commit()
             skipped = 0
+            # A segment whose probe embedding silently fell back to MFCC, and a
+            # segment where every enrolled profile was skipped for using a
+            # different embedding model, both produce zero matches without
+            # raising. Counted separately so "completed, nothing changed" can
+            # say which of the three it was (issue #109).
+            degraded = 0
+            unmatchable = 0
             changed = []
             new_segments = list(segments)
             for i, seg in enumerate(segments):
@@ -753,14 +760,19 @@ async def run_llm_job(SessionLocal, job_id: int, transcription_service, diarizat
                         # sqlite is opened with check_same_thread=False.
                         loop = asyncio.get_event_loop()
                         def _identify():
-                            return voice_id_service.identify(db, job.user_id, clip_path, threshold=0.65,
-                                                             hf_token=user_settings.get("hf_token"))
-                        matches = await loop.run_in_executor(None, _identify)
+                            return voice_id_service.identify_detailed(db, job.user_id, clip_path, threshold=0.65,
+                                                                      hf_token=user_settings.get("hf_token"))
+                        outcome = await loop.run_in_executor(None, _identify)
                     finally:
                         try:
                             os.remove(clip_path)
                         except OSError:
                             pass
+                    matches = outcome["matches"]
+                    if outcome["degraded"]:
+                        degraded += 1
+                    if outcome["skipped_model_mismatch"] and not outcome["compared"]:
+                        unmatchable += 1
                     if matches:
                         changed.append((i, seg.get("speaker") or ""))
                         new_segments[i] = {**seg, "speaker": matches[0]["name"]}
@@ -784,7 +796,20 @@ async def run_llm_job(SessionLocal, job_id: int, transcription_service, diarizat
             transcript.segments = new_segments
             transcript.updated_at = utcnow_naive()
             db.commit()
-            error = f"{skipped} segment(s) skipped (extraction/embedding failed)" if skipped else None
+            notes = []
+            if skipped:
+                notes.append(f"{skipped} segment(s) skipped (extraction/embedding failed)")
+            if degraded:
+                notes.append(
+                    f"{degraded} segment(s) fell back to a lower-accuracy MFCC fingerprint "
+                    f"instead of {voice_id_service.backend_name}"
+                )
+            if unmatchable:
+                notes.append(
+                    f"{unmatchable} segment(s) could not be compared: every enrolled profile "
+                    f"uses a different embedding model"
+                )
+            error = "; ".join(notes) if notes else None
             _finish(db, job, "completed", error)
         elif job.kind == "assistant":
             await run_assistant_job(db, job, api_key, job.provider, job.model, provider_config)
