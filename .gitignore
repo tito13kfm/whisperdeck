@@ -47,10 +47,5 @@ unsloth_compiled_cache/
 # working plan docs, machine-local like .opencode/ above
 .omo/
 
-# Scheduled-review runtime artifacts (machine-local; log.md, archive/ and
-# last-review-date.txt stay tracked, the wrapper script commits them)
-skill-observations/last-scheduled-review-output.txt
-skill-observations/last-scheduled-review-report.md
-skill-observations/last-scheduled-review-status.txt
-skill-observations/claudemd-backup.md
-skill-observations/claudemd-staged*.md
+# task-observer tool output, retiring, never produced a skill
+skill-observations/
