@@ -54,8 +54,8 @@ the new worktree for the rest of this run.
 **Two path roots exist for the rest of this run — never cross them:**
 - **Your worktree** (your session's cwd after `EnterWorktree`) — every
   Phase 2 `Edit`/`Write` code change goes here.
-- **The main repo checkout** (`C:/Claude/whisperdesk`, the absolute path,
-  not your cwd) — every run-artifact write (`investigation.md`,
+- **The main repo checkout** (`<MAIN>`, an absolute path, never your cwd)
+  — every run-artifact write (`investigation.md`,
   `self-audit.md`, `wrong-directions.md`, `token-usage.md`, and the
   `verify_self_audit.py` invocation) goes here, at
   `.omo/runs/issue-<N>/<your-branch-name>/`, not the bare
@@ -66,6 +66,25 @@ If you're ever unsure which root a path belongs to: code changes go where
 your cwd already is; report writes go to the absolute main-repo path
 above, regardless of cwd.
 
+**Resolving `<MAIN>`:** run this once, at the start, and reuse the value
+verbatim for the rest of the run. Substitute it everywhere this document
+writes `<MAIN>`, the same way you substitute `<N>` for the issue number.
+
+```bash
+dirname "$(git rev-parse --path-format=absolute --git-common-dir)"     # Bash
+```
+```powershell
+Split-Path (git rev-parse --path-format=absolute --git-common-dir)     # PowerShell
+```
+
+Do NOT hardcode a checkout path: the two machines spell the directory
+differently, so a literal path silently breaks on one of them. And do NOT
+substitute `git rev-parse --show-toplevel`: inside a worktree that returns
+the *worktree* root, which is the one root `<MAIN>` must never be. A
+worktree's `.git` is a file pointing into the main repo, and
+`--git-common-dir` resolves to the shared `.git` from either root, so the
+commands above are correct before and after `EnterWorktree`.
+
 **Infra notes:**
 - Never background a long-running process with a bare `&`. Use the `Bash`
   tool's own `run_in_background` parameter instead.
@@ -74,7 +93,7 @@ above, regardless of cwd.
   `npx esbuild ...` from the main repo path, or its `node_modules/.bin/`.
 - Fresh worktrees have no `.venv` (gitignored). Use the main checkout's
   interpreter pointed at worktree test paths:
-  `C:\Claude\whisperdesk\.venv\Scripts\python.exe -m pytest <worktree>\<test path> -q`.
+  `<MAIN>/.venv/Scripts/python.exe -m pytest <worktree>\<test path> -q`.
   Don't fall back to system Python silently; "venv not present" here is
   expected, not an error.
 
@@ -318,7 +337,7 @@ violation, worse than an honest `[ ]`.** Run the FULL test suite (not just
 the new test file you wrote) before checking any test-related box.
 
 **Before Phase 4, verify the main repo checkout is clean:**
-`git -C C:\Claude\whisperdesk diff --stat` must show only `.omo/runs/`
+`git -C <MAIN> diff --stat` must show only `.omo/runs/`
 files and (if present) `scheduled_tasks.lock`.
 
 **This workflow does not run an independent-model audit pass** (opencode's
