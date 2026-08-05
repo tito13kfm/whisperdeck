@@ -694,10 +694,26 @@ the exact env-var-reload mechanism this depends on). A transient error
 (429, 5xx, timeout) is worth one retry with a short backoff before falling
 back — don't treat a one-off network blip the same as a real outage.
 
+**Record the verdict as one literal line in `self-audit.md`**, written
+exactly like this, whichever way it came back:
+
+```
+Independent review: Oracle (Phase 3.75) - <APPROVE|BLOCK|NEEDS-DISCUSSION>, <one line>
+```
+
+and if the call failed and you fell back to a manual pass, say that on the
+same line, still starting with `Independent review:`. `verify_self_audit.py`
+blocks when the line is missing, because nothing could previously tell a
+skipped Oracle pass from a clean one: issue #285 shipped with no
+independent review of any kind and never disclosed it, and the fallback
+wording above only ever covered a call that failed, not one never
+attempted. The line must also appear in `token-usage.md` as an `oracle`
+row; the checker cross-checks the two files, since four runs recorded the
+verdict here while leaving the largest paid call out of the table.
+
 **If Oracle's response is BLOCK or NEEDS-DISCUSSION**, fix it before
 proceeding to Phase 4 (or resolve the discussion point), then re-run the
-fast-tier tests. Record the verdict in `self-audit.md` regardless of which
-way it came back. Don't skip this because you're confident the fix is
+fast-tier tests. Don't skip this because you're confident the fix is
 right — that confidence is exactly what both #132 variants had. This costs
 one model call (~$0.02-0.05 typical with full-file context), well under
 the cost of a follow-up fix commit or a silent regression reaching master.
@@ -731,7 +747,14 @@ in Setup, not the bare `.omo/runs/issue-<N>/` path:
   sub-session/agent this run spawned, including which model backed each
   one, cloud or local.** Name the model, not "an explore agent."
   Cross-checked against usage-panel cost data — a mismatch is a
-  transparency gap, not a rounding error.
+  transparency gap, not a rounding error. **Your own turns count too.**
+  Write one line for the orchestrator's consumption even if the number is
+  an estimate, and label it `Orchestrator`. This file reports what was
+  delegated and has treated the orchestrator as free, so runs that
+  implemented inline reported near-zero (two said outright that no model
+  calls were made, for work a model did). `verify_self_audit.py` reports a
+  missing orchestrator line as advisory, and a missing `oracle` row as
+  blocking when `self-audit.md` claims an Oracle pass.
 
 Report back to the human: which issue you actually targeted (Phase 0), the
 PR link, and pointers to the four `.omo/runs/issue-<N>/<your-branch-name>/*.md`

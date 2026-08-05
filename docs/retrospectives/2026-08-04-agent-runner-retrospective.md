@@ -747,19 +747,20 @@ Ranked by how many runs the problem hit, times what it cost, divided by how hard
 
 ### Tier 2, worth doing: real value, a bit more work
 
-> **STATUS, 2026-08-05.** Rows 9, 10, 12 (the naming rule half), 13, 15, 16,
-> 17 and 18 are implemented on branch `worktree-tier2-runner-tooling`. Rows 11,
-> 14 and 12's checker half are held for a second change, because each has a
-> prompt half and a checker half that guarantee each other: shipping the prompt
-> first would make it assert a check that does not exist yet, which is finding
-> 2.6b's exact shape, and shipping the checker first would meet the next run
-> with a blocking gate it was never told about. Row 19 is machine-local. **Row
-> 20 needs no work: `audit-pr-body.md:262` already emits `Reviewer slug:
-> <your-slug>`, picked up when Tier 1 row 7 rewrote the verdict template.**
-> **Row 16 is half of what it says:** Tier 1 row 4 already removed the
-> one-call `codegraph_explore` cap and every mention of a budget from
-> AGENTS.md, so only the truncation fallback remained to write, and it went to
-> AGENTS.md alone since neither runner prompt mentions the tool.
+> **STATUS: all 12 rows resolved 2026-08-05.** Rows 9, 10, 12 (naming half),
+> 13, 15, 16, 17 and 18 landed in PR #348. Rows 11, 14 and 12's checker half
+> landed in the follow-up PR, deliberately kept together with their prompt
+> halves: each has a prompt half and a checker half that guarantee each other,
+> so shipping the prompt first would assert a check that does not exist yet
+> (finding 2.6b's exact shape) and shipping the checker first would meet the
+> next run with a blocking gate it was never told about. Row 19 is
+> machine-local, applied in place. **Row 20 needed no work: `audit-pr-body.md`
+> already emits `Reviewer slug: <your-slug>`, picked up when Tier 1 row 7
+> rewrote the verdict template.** **Row 16 was half of what it says:** Tier 1
+> row 4 had already removed the one-call `codegraph_explore` cap and every
+> mention of a budget from AGENTS.md, so only the truncation fallback remained,
+> and it went to AGENTS.md alone since neither runner prompt names the tool.
+> See section 9 for the implementation log.
 
 | # | Change | Surface | Evidence |
 |---|---|---|---|
@@ -1031,3 +1032,176 @@ master.
   just applied.
 - Row 2's checker is strict by design and will fail old-format self-audits.
   That is the intent, but the first run after this merges will meet it.
+
+---
+
+## 9. Implementation log, Tier 2
+
+All twelve rows resolved on 2026-08-05, across two PRs. The split is by
+dependency, not by file type: rows 11, 14 and 12's checker half each pair a
+prompt instruction with the mechanical check that enforces it, so both halves
+shipped in the same change. Splitting them either way reproduces a defect this
+document already describes.
+
+| Row | Status | Where |
+|---|---|---|
+| 9 | Done, PR #348 | both runner prompts |
+| 10 | Done, PR #348 | both runner prompts |
+| 11 | Done, PR #349 | both prompts, `scripts/verify_self_audit.py`, `tests/test_verify_self_audit.py` |
+| 12 | Done, both halves | naming rule in both prompts (#348), warning-only resolver in the checker (#349) |
+| 13 | Done, PR #348 | both runner prompts, seven ports OC to CC, two CC to OC |
+| 14 | Done, PR #349 | both prompts, checker, tests |
+| 15 | Done, PR #348 | both runner prompts |
+| 16 | Done, PR #348 | `AGENTS.md` only, and half the row was already gone |
+| 17 | Done, PR #348 | `AGENTS.md` |
+| 18 | Done, PR #348 | both runner prompts |
+| 19 | Done, in place | `~/.config/opencode/prompts/audit-pr-body.md` |
+| 20 | No work needed | already satisfied by Tier 1 row 7 |
+
+### Per-row detail
+
+**Row 9, citations against the final head.** Both prompts now require every
+`file:line` in `self-audit.md` to be re-opened at the branch's final head, and
+the checker re-run, after any rebase, amend or force-push. The three-reviewer
+disagreement in 4.13 is cited as the reason: re-verifying removes the argument
+rather than settling it.
+
+**Row 10, six new item types.** Value-space exhaustiveness, boundary
+cardinality, delivery chain to what the browser executes, `done == total`,
+each deferral matched against the issue text, and a suite count tied to its
+invocation. Written as one bulleted block in both prompts, each bullet naming
+the run it came from. The framing is stated in the prompt itself: these are not
+honesty failures, so no amount of honesty enforcement reaches them.
+
+**Row 11, the independent-review gate.** `check_independent_review()` requires
+one literal `Independent review:` line in `self-audit.md`. It passes on an
+Oracle or Phase 3.75 pass, on a stated fallback after a failed Oracle call, and
+on the Claude runner's disclosure (`none in-run` plus `/audit-pr`), which is
+what lets a blocking check coexist with a runner that has no in-run independent
+pass by design. Anything else is blocking, including a line that neither claims
+a pass nor discloses its absence.
+
+The ordering here was the load-bearing decision. Both prompts were changed to
+mandate the literal line **before** the checker was written to match it, rather
+than the checker being written against a paraphrase of what a run might say.
+Writing the test for the disclosure branch immediately found the defect that
+ordering exists to catch: the sanctioned disclosure is two sentences, runs wrap
+it, and `/audit-pr` lands on the next line, so a single-line match rejected the
+exact text the prompt asks for. `independent_review_statement()` now reads the
+statement plus its wrapped continuation, stopping at a blank line or the next
+checklist box.
+
+**Row 14, token-usage cross-check.** `check_token_usage()` blocks when
+`self-audit.md` claims an Oracle pass and the sibling `token-usage.md` never
+names it, and reports a missing orchestrator line or a missing file as
+advisory. Matching is on the agent name `oracle`, not on the backing model: the
+config that maps `oracle` to a model is swapped often, so a model-name match
+would rot by design. Both prompts now state that the orchestrator's own turns
+count and require one labelled line for them, estimate included.
+
+Missing-file and missing-orchestrator-line are advisory rather than blocking on
+purpose. The checker runs before Phase 4 and the four-file gate is a separate
+later step, so blocking there would fire on the normal order of work.
+
+**Row 12, both halves.** The naming rule (report subdirectory name is the
+branch name exactly, worktree directory matches) went into both prompts in
+#348. The checker half is warning-only as this document specified:
+`find_worktree_for_branch_dir()` now returns the matched branch alongside the
+path and prefers an exact match, a substring hit still resolves, and `main()`
+reports `WORKTREE NAME MISMATCH` as advisory. Flipping to exact matching today
+would convert silent-wrong-worktree into a hard failure for most runs, since
+seven naming patterns are in the wild. Once the directories conform, the
+advisory becomes the tightening. `main()`'s advisory test moved from the single
+`WEAK CITATION` string to an `ADVISORY_PREFIXES` tuple.
+
+**Row 13, the mirror-pair ports.** OC to CC: the pre-written-plan block (which
+names `docs/plans/` as well, since Claude Code plan work lives there), the
+no-LSP note, the post-create `git worktree list` confirmation, the
+re-check-before-logging caveat, permission to ship an honest `[ ]`, the FTS5
+proxy-assertion trap, and the token-usage cost cross-check. CC to OC: "do not
+merge, stop after opening the PR", missing from the runner that produced 28 of
+36 runs, and the untrusted-text wrapping rule stated delegation-wide rather
+than only at the Oracle call site.
+
+**Rows 16 and 17, AGENTS.md.** The `codegraph_explore` truncation fallback
+(read the function directly rather than spending a second call that will
+truncate the same way), and a service-worker subsection under Testing tiers
+covering the two Playwright traps.
+
+**Row 18.** The stale-build escape hatch in both prompts now requires a
+one-line diagnosis before the out-of-scope label may be applied: which artifact
+is stale, why this diff could not have caused it, and whether it reproduces on
+a clean `origin/master`.
+
+**Row 19, machine-local.** `audit-pr-body.md` now defines what an `[x]` line is
+(first non-whitespace content is `[x]`, `- [x]` or `* [x]`) and what the
+denominator excludes (`[ ]` lines, `[decision]` lines, and prose assertions
+outside the checklist). A reviewer who verified fewer than all of them says so
+in Read scope rather than shrinking the denominator to match.
+
+### 9.1 Four defects found while mapping, not from the run reports
+
+1. The opencode prompt's preamble still described itself as gitignored and not
+   shipped to the repo, while a later paragraph in the same file said it was
+   tracked. Tier 1 row 6 tracked it and missed the self-description. Fixed.
+2. `audit-pr-body.md` said "keep the `<sha>` for step 3" after Tier 1's
+   renumber. The `<sha>` is consumed in step 2 and step 4. Fixed.
+3. `audit-pr-body.md`'s Phase 1c closed with an unqualified "Report every hit
+   with file:line, even ones you conclude are fine", which re-mandated exactly
+   the two known-safe classes Tier 1 row 8 had just added above it. The
+   known-safe list is now stated to override that sentence.
+4. `commands/audit-pr.md`'s frontmatter advertised "With `--post`, a BLOCK
+   verdict auto-dispatches a scoped fixer and re-audits once", while the
+   377-line body it inlines says twice that the command is read-only and never
+   fixes anything. No fixer dispatch exists in the body, and both texts reach
+   the model in one prompt. Resolved in favor of read-only.
+
+### 9.2 One change beyond the row list: `/audit-pr` posts by default
+
+Raised by the user while this work was in progress, and the evidence was
+already sitting in the prompt: "4 of the first 8 real `/audit-pr` runs on this
+repo were never posted, and their verdicts were unrecoverable except by
+incidental scraping of a raw session log." A review nobody can find did not
+happen, and 5.3's one open loop (a BLOCK with no recorded re-audit) is the same
+shape.
+
+Posting the verdict as a PR comment is now the default. `--no-post` opts out,
+`--post` is still accepted and means the default so old invocations keep
+working, and two cases never post: a pinned `<sha>` run, because a verdict
+about frozen historical code would misdescribe the PR's current state, and a
+bake-off candidate, because several models auditing one PR would otherwise
+leave several comments on it.
+
+### Verification
+
+- Full suite from the worktree: `910 passed, 22 deselected` (e2e deselected by
+  `pytest.ini`), against 895 after #348 and 848 at the end of Tier 1.
+- Advisory-versus-blocking is asserted through `main()`'s exit code, not just
+  through a finding's prefix. Nothing pinned the exit code before, and the
+  first version of the advisory test asserted a comprehension that filtered a
+  one-element list by the predicate the line above had already checked, which
+  is true by construction. It survived the mutation probe on the strength of
+  its sibling assertion. That is the vacuous-assertion class this document's
+  own 4.13 is about, caught in review of this change.
+- Both new checker functions mutation-tested under the repo's own rule.
+  `check_independent_review` body replaced with `return []`: `3 failed, 32
+  passed`. `check_token_usage` the same: `3 failed, 32 passed`. Restored by the
+  inverse edit, never a checkout, and confirmed byte-identical against a
+  snapshot taken before the probe.
+- The CLI was driven end to end against four fixtures rather than only through
+  its unit tests: an Oracle-recorded run (exit 0), the Claude disclosure (exit
+  0), a run with neither (exit 1, `INDEPENDENT REVIEW NOT RECORDED`), and an
+  Oracle pass missing from the agent table (exit 1, `TOKEN USAGE OMITS
+  ORACLE`).
+
+### Caveats, Tier 2
+
+- The Tier 1 row 2 caveat applies again: the independent-review gate is
+  blocking and old self-audits have no `Independent review:` line, so the first
+  run after this merges meets a new gate. That is the intent, and both prompts
+  were updated in the same change so no runner is asked for something it was
+  never told.
+- Row 19 and the `/audit-pr` default change live under `~/.config/opencode/`,
+  which is not a git repository at all. They have no history and no review.
+  This is the third batch of edits to land there, and the Tier 1 caveat asking
+  whether those files want row 6's treatment is still unanswered.
