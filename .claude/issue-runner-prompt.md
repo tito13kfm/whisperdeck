@@ -48,21 +48,37 @@ ended up targeting and why.
 **Then check whether the work already landed under a different issue
 number.** The tracking-issue walk above only looks for a merged PR that
 closes the target's own number, which misses work that shipped under some
-other number and was never ticked off. Before starting Phase 1:
+other number and was never ticked off. Prior work gets recorded in two
+places, so search both before starting Phase 1:
 
     git log --oneline -40
+    gh issue list --state closed --limit 30 --search "<key noun from the title>"
 
-Grep that for the issue's key identifiers (the function, field, endpoint, or
-setting it names). If a plausible commit appears, read it before
-investigating anything. If the work is already done, stop and report that
-rather than re-doing it.
+Grep the log for the issue's key identifiers (the function, field, endpoint,
+or setting it names), and search closed issues for the issue's *symptom
+phrasing*, not only its identifiers. Neither search subsumes the other: the
+commit grep only fires when the fix commit's subject happens to name the same
+symbol the issue does, which is luck, and a duplicate issue is often worded
+around the symptom with no identifier in common. If a plausible commit or a
+near-identical closed issue turns up, read it before investigating anything.
 
-Confirmed pattern, five runs in one week: one investigated two checklist
+**"Already done" is a per-claim verdict, not a per-issue verdict.** When the
+headline defect turns out to be fixed but the body also carries secondary
+notes, a complement-sweep instruction, or an "also noticed nearby" section,
+check each of those separately before closing anything. Report which claims
+are fixed and which are still live, and file the live ones rather than
+letting them close along with the duplicate.
+
+Confirmed pattern, six runs in one week: one investigated two checklist
 items already implemented in earlier commits and produced zero code
 changes; one found its spec item `already done`; one found both endpoints
 already converted by a prior issue; one nearly re-implemented a feature
-whose tracking checkbox was never ticked despite two merged PRs. This costs
-one command.
+whose tracking checkbox was never ticked despite two merged PRs; one was
+handed an issue whose headline defect had merged eight hours before that
+issue was even filed, under a different number, from an investigation branch
+cut before the fix landed. That last one was caught by the closed-issue
+search, not the commit grep, and two of the three claims in its body were
+still live after the headline was ruled a duplicate. This costs two commands.
 
 ## Setup: worktree + branch
 
