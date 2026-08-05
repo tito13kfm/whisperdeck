@@ -374,3 +374,191 @@ def test_missing_audit_directory_is_not_a_finding(tmp_path):
     """Other checks already report on a missing path; this one must stay silent
     rather than emit a confusing git error from an unusable cwd."""
     assert verify_self_audit.check_main_checkout(tmp_path / "nope" / "self-audit.md") == []
+
+
+# --- independent review ------------------------------------------------------
+# One PR shipped with no Oracle pass, no external verdict, and no disclosure of
+# either. The prompts' fallback language only ever covered a call that failed.
+# The two accepted shapes are the two runners' real situations: opencode runs
+# Oracle in Phase 3.75, Claude Code has no in-run independent pass at all.
+
+def test_recorded_oracle_pass_satisfies_the_gate(tmp_path):
+    findings = verify_self_audit.check_independent_review(_audit(tmp_path, """
+[x] tests pass
+Independent review: Oracle (Phase 3.75) - APPROVE, two non-blocking watch-outs deferred.
+"""))
+    assert findings == []
+
+
+def test_claude_runner_disclosure_satisfies_the_gate(tmp_path):
+    """The Claude runner has no Phase 3.75 by design, so demanding an Oracle
+    verdict would fire on every one of its runs. Its sanctioned disclosure has
+    to pass, and it is the reason this check can be blocking at all."""
+    findings = verify_self_audit.check_independent_review(_audit(tmp_path, """
+Independent review: none in-run. This workflow has no independent-model audit
+pass; independent review happens via /audit-pr after the PR is opened.
+"""))
+    assert findings == []
+
+
+def test_no_independent_review_line_at_all_is_blocking(tmp_path):
+    """issue-285: no Oracle in token-usage.md, no Phase 3.75 in self-audit.md,
+    no external verdict. Nothing distinguished it from a clean pass."""
+    findings = verify_self_audit.check_independent_review(_audit(tmp_path, """
+[x] `_finalize_if_done` guard - delivered, confirmed at services/queue.py:486
+[x] full suite - 848 passed
+"""))
+    assert len(findings) == 1
+    assert findings[0].startswith("INDEPENDENT REVIEW NOT RECORDED")
+
+
+def test_an_evasive_independent_review_line_is_blocking(tmp_path):
+    """A line that neither claims a pass nor discloses its absence is worth
+    less than no line, because it looks like the gate was honored."""
+    findings = verify_self_audit.check_independent_review(_audit(tmp_path, """
+Independent review: reviewed the diff carefully myself.
+"""))
+    assert len(findings) == 1
+    assert findings[0].startswith("INDEPENDENT REVIEW UNCLEAR")
+
+
+def test_none_in_run_without_naming_the_external_route_is_blocking(tmp_path):
+    """"None" alone is a skip. The disclosure only discharges the gate because
+    it also names where independent review actually happens."""
+    findings = verify_self_audit.check_independent_review(_audit(tmp_path, """
+Independent review: none in-run.
+"""))
+    assert len(findings) == 1
+    assert findings[0].startswith("INDEPENDENT REVIEW UNCLEAR")
+
+
+def test_a_checked_box_carrying_the_line_is_recognized(tmp_path):
+    """Runs write this either as prose or as a checklist item; both are fine."""
+    findings = verify_self_audit.check_independent_review(_audit(tmp_path, """
+- [x] Independent review: Oracle verdict APPROVE
+"""))
+    assert findings == []
+
+
+# --- token-usage cross-check -------------------------------------------------
+# The file reports what was DELEGATED and treats the orchestrator's own turns as
+# free, so runs that worked inline reported near-zero. Four more recorded an
+# Oracle verdict while leaving the largest paid call out of the table.
+
+def _audit_pair(tmp_path, audit_body, usage_body=None):
+    audit = _audit(tmp_path, audit_body)
+    if usage_body is not None:
+        (tmp_path / "token-usage.md").write_text(usage_body, encoding="utf-8")
+    return audit
+
+
+def test_oracle_claimed_but_absent_from_the_table_is_blocking(tmp_path):
+    audit = _audit_pair(
+        tmp_path,
+        "Independent review: Oracle (Phase 3.75) - APPROVE\n",
+        "| Agent | Model |\n|---|---|\n| deep | deepseek-v4-pro |\n"
+        "Orchestrator: ~40k tokens.\n",
+    )
+    findings = verify_self_audit.check_token_usage(audit)
+    assert len(findings) == 1
+    assert findings[0].startswith("TOKEN USAGE OMITS ORACLE")
+
+
+def test_oracle_in_the_table_passes(tmp_path):
+    """Matched on the agent name, not the backing model: the config that maps
+    `oracle` to a model is swapped often, so a model-name match would rot."""
+    audit = _audit_pair(
+        tmp_path,
+        "Independent review: Oracle (Phase 3.75) - APPROVE\n",
+        "| oracle | whatever-model-backs-it-today | Cloud |\n"
+        "Orchestrator (sisyphus): ~60k tokens.\n",
+    )
+    assert verify_self_audit.check_token_usage(audit) == []
+
+
+def test_a_run_with_no_oracle_pass_is_not_asked_for_an_oracle_row(tmp_path):
+    audit = _audit_pair(
+        tmp_path,
+        "Independent review: none in-run; via /audit-pr after the PR.\n",
+        "| Explore | Sonnet |\nOrchestrator (Opus): ~90k tokens.\n",
+    )
+    assert verify_self_audit.check_token_usage(audit) == []
+
+
+def test_missing_orchestrator_line_is_advisory(tmp_path):
+    """Two runs reported no model spend at all for work a model did inline."""
+    audit = _audit_pair(
+        tmp_path,
+        "Independent review: none in-run; via /audit-pr after the PR.\n",
+        "No model calls were made. All work used deterministic tools.\n",
+    )
+    findings = verify_self_audit.check_token_usage(audit)
+    assert len(findings) == 1
+    assert findings[0].startswith("TOKEN USAGE INCOMPLETE")
+    assert findings[0] in [
+        f for f in findings if f.startswith(verify_self_audit.ADVISORY_PREFIXES)
+    ]
+
+
+def test_missing_token_usage_file_is_advisory_not_blocking(tmp_path):
+    """It has shipped entirely missing on a real run, but the four-file gate is
+    a separate step and the checker runs before it."""
+    audit = _audit_pair(tmp_path, "Independent review: Oracle - APPROVE\n")
+    findings = verify_self_audit.check_token_usage(audit)
+    assert len(findings) == 1
+    assert findings[0].startswith("TOKEN USAGE INCOMPLETE")
+
+
+# --- worktree resolution -----------------------------------------------------
+# Substring matching in both directions can resolve the wrong checkout. Seven
+# naming patterns are in the wild, so this warns rather than failing: flipping
+# to exact matching today would hard-fail most runs.
+
+def _worktree_repo(tmp_path, branch, report_dir):
+    repo = tmp_path / "main"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "master", "."], cwd=str(repo), check=True)
+    (repo / "f.txt").write_text("x", encoding="utf-8")
+    subprocess.run(["git", "add", "f.txt"], cwd=str(repo), check=True)
+    subprocess.run(
+        ["git", "-c", "user.email=t@e", "-c", "user.name=t",
+         "commit", "-q", "-m", "init"],
+        cwd=str(repo), check=True)
+    wt = tmp_path / "wt"
+    subprocess.run(
+        ["git", "worktree", "add", "-q", "-b", branch, str(wt)],
+        cwd=str(repo), check=True)
+    audit_dir = repo / ".omo" / "runs" / "issue-1" / report_dir
+    audit_dir.mkdir(parents=True)
+    audit = audit_dir / "self-audit.md"
+    audit.write_text("[x] x\n", encoding="utf-8")
+    return repo, wt, audit
+
+
+def test_exact_branch_name_resolves_with_no_warning(tmp_path, monkeypatch):
+    repo, wt, audit = _worktree_repo(tmp_path, "issue-42-thing", "issue-42-thing")
+    monkeypatch.chdir(repo)
+    path, matched = verify_self_audit.find_worktree_for_branch_dir(audit)
+    assert path == wt.resolve() or Path(path).resolve() == wt.resolve()
+    assert matched == "issue-42-thing"
+
+
+def test_a_substring_report_directory_still_resolves_but_reports_the_branch(
+        tmp_path, monkeypatch):
+    """The real shape: a report directory named `sisyphus` substring-matches
+    every branch containing it, so the checker can verify the wrong code. It
+    still resolves, and main() turns the name difference into an advisory."""
+    repo, wt, audit = _worktree_repo(tmp_path, "issue-261-sisyphus", "sisyphus")
+    monkeypatch.chdir(repo)
+    path, matched = verify_self_audit.find_worktree_for_branch_dir(audit)
+    assert Path(path).resolve() == wt.resolve()
+    assert matched == "issue-261-sisyphus"
+    assert matched != audit.resolve().parent.name
+
+
+def test_no_matching_worktree_returns_a_pair_of_nones(tmp_path, monkeypatch):
+    """The caller unpacks two values unconditionally, so the miss path has to
+    keep the same shape."""
+    repo, _wt, audit = _worktree_repo(tmp_path, "issue-42-thing", "totally-unrelated")
+    monkeypatch.chdir(repo)
+    assert verify_self_audit.find_worktree_for_branch_dir(audit) == (None, None)

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Mechanically verify a self-audit.md before it's trusted.
 
-Four deterministic checks, no model calls:
+Five deterministic checks, no model calls:
 
 1. Build freshness: for every esbuild `<src> ... --outfile=<out>` script in
    package.json, rebuild <src> to a temp file and diff it byte-for-byte
@@ -32,6 +32,16 @@ Four deterministic checks, no model calls:
    half; the branch half is new, because a session ran `git checkout <branch>`
    in the main checkout twice, and run artifacts are written there, so a
    wrong-branch main checkout files reports against a tree nobody audited.
+
+5. Independent review disclosure: self-audit.md must carry one
+   `Independent review:` line saying either that an Oracle pass ran, or that
+   this runner has no in-run independent pass and review happens via
+   /audit-pr. One PR shipped with no independent review of any kind and never
+   disclosed it; the prompts' fallback language only ever covered a call that
+   failed, never one that was skipped. Where an Oracle pass IS claimed, the
+   sibling token-usage.md has to name it, because four runs recorded an Oracle
+   verdict in self-audit.md while omitting the single largest paid per-run
+   cost from their agent table.
 
 This does not replace a real review -- keyword overlap is a cheap smoke
 test, not a semantic check -- but it costs no tokens, is exact where it can
@@ -81,7 +91,20 @@ def find_worktree_for_branch_dir(self_audit_path: Path):
     the run is on. Resolve it to the actual worktree path via `git worktree
     list`, so citation/build checks run against the checkout that actually
     has the new files -- regardless of which directory the script itself was
-    invoked from. Returns None if no worktree's branch matches."""
+    invoked from.
+
+    Returns `(path, matched_branch)` for the first match, preferring an exact
+    one, or `(None, None)`.
+
+    The fallback is substring matching in both directions, which is loose
+    enough to resolve the wrong worktree: seven different naming patterns have
+    been used for this one workflow, and one report directory was the bare word
+    `sisyphus`, which is a substring of every sisyphus branch. Both prompts now
+    require the directory name to equal the branch name exactly. Until the
+    directories in the wild conform, a fuzzy hit still resolves (flipping to
+    exact matching today would turn silent-wrong-worktree into a hard failure
+    for most runs), but `main()` reports it, because verifying the wrong
+    checkout silently is the worse of the two outcomes."""
     branch_dir = self_audit_path.resolve().parent.name
     try:
         proc = subprocess.run(
@@ -89,20 +112,25 @@ def find_worktree_for_branch_dir(self_audit_path: Path):
             capture_output=True, text=True, timeout=15,
         )
     except (OSError, subprocess.SubprocessError):
-        return None
+        return None, None
     if proc.returncode != 0:
-        return None
+        return None, None
 
     worktree_path = None
+    fuzzy = None
     for line in proc.stdout.splitlines():
         if line.startswith("worktree "):
             worktree_path = line[len("worktree "):].strip()
         elif line.startswith("branch ") and worktree_path:
             branch = line[len("branch "):].strip()
             branch = branch.removeprefix("refs/heads/")
-            if branch == branch_dir or branch_dir in branch or branch in branch_dir:
-                return Path(worktree_path)
-    return None
+            if branch == branch_dir:
+                return Path(worktree_path), branch
+            if fuzzy is None and (branch_dir in branch or branch in branch_dir):
+                fuzzy = (Path(worktree_path), branch)
+    if fuzzy is not None:
+        return fuzzy
+    return None, None
 
 
 def node_bin_dirs(repo_root: Path):
@@ -455,6 +483,152 @@ def check_main_checkout(self_audit_path: Path):
     return findings
 
 
+INDEPENDENT_REVIEW_RE = re.compile(
+    r"^\s*(?:[-*]\s*)?(?:\[[ xX]\]\s*)?independent review:\s*(?P<rest>.+?)\s*$",
+    re.IGNORECASE,
+)
+ORACLE_RE = re.compile(r"\boracle\b|\bphase\s*3\.75\b", re.IGNORECASE)
+NO_ORACLE_RE = re.compile(r"\bnone in-run\b", re.IGNORECASE)
+AUDIT_PR_RE = re.compile(r"/audit-pr\b", re.IGNORECASE)
+
+
+def independent_review_statement(text: str):
+    """The `Independent review:` line plus its wrapped continuation.
+
+    The sanctioned disclosure is two sentences and runs wrap it, so the token
+    that discharges it (`/audit-pr`) routinely lands on the following line.
+    Reading only the matched line rejects the exact text the prompt asks for.
+    The statement ends at the first blank line or the next checklist box.
+    """
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
+        m = INDEPENDENT_REVIEW_RE.match(line)
+        if not m:
+            continue
+        parts = [m.group("rest")]
+        for nxt in lines[i + 1:]:
+            if not nxt.strip():
+                break
+            if re.match(r"^\s*(?:[-*]\s*)?\[[ xX]\]", nxt):
+                break
+            parts.append(nxt.strip())
+        return " ".join(parts)
+    return None
+
+
+def check_independent_review(self_audit_path: Path):
+    """Exactly one thing: did anything other than the author look at this, and
+    if not, does the file say so.
+
+    Both prompts already handle an Oracle call that FAILED. Neither could
+    detect one that was never attempted, and one PR shipped that way: no Oracle
+    entry in `token-usage.md`, no Phase 3.75 section in `self-audit.md`, and no
+    external verdict either. The skip was never disclosed, so nothing
+    downstream could tell it apart from a clean pass.
+
+    The Claude runner genuinely has no in-run independent pass, by design, so
+    this cannot simply demand an Oracle verdict. Both prompts now mandate one
+    literal `Independent review:` line, and this matches that line rather than
+    a paraphrase of it, because a paraphrase is exactly what an absent gate
+    looks like.
+    """
+    findings = []
+    text = self_audit_path.read_text(encoding="utf-8")
+    stated = independent_review_statement(text)
+
+    if stated is None:
+        findings.append(
+            "INDEPENDENT REVIEW NOT RECORDED: no `Independent review:` line in "
+            "self-audit.md. Write one, and make it true. Either "
+            "`Independent review: Oracle (Phase 3.75) - <verdict>, <one line>`, "
+            "or, on a runner with no in-run independent pass, "
+            "`Independent review: none in-run. <why>; independent review "
+            "happens via /audit-pr after the PR is opened.` A PR already "
+            "shipped with no second pair of eyes and no disclosure, which is "
+            "indistinguishable from a clean one after the fact."
+        )
+        return findings
+
+    if ORACLE_RE.search(stated):
+        return findings
+    if NO_ORACLE_RE.search(stated) and AUDIT_PR_RE.search(stated):
+        return findings
+
+    findings.append(
+        f"INDEPENDENT REVIEW UNCLEAR: the `Independent review:` line reads "
+        f"'{stated}', which names neither an Oracle/Phase 3.75 pass nor the "
+        f"sanctioned `none in-run ... /audit-pr` disclosure. Say which one "
+        f"actually happened; an ambiguous line here is worth less than no line."
+    )
+    return findings
+
+
+ORACLE_IN_USAGE_RE = re.compile(r"\boracle\b", re.IGNORECASE)
+ORCHESTRATOR_IN_USAGE_RE = re.compile(r"\borchestrator\b", re.IGNORECASE)
+
+
+def check_token_usage(self_audit_path: Path):
+    """`token-usage.md` under-reports in one direction, and not at random.
+
+    Its job is delegation transparency. In practice it reports what was
+    DELEGATED and treats the orchestrator's own turns as free, so a run whose
+    orchestrator did the work inline reports near-zero, which is backwards from
+    the cost reality. Two runs reported literally no model spend for work a
+    model did.
+
+    Separately, four runs recorded an Oracle verdict in `self-audit.md` while
+    leaving Oracle out of the agent table. Oracle is the single largest paid
+    per-run cost, so that omission is not random with respect to cost. If the
+    self-audit claims the pass, the table has to show it.
+
+    Matching is on the agent name, not the backing model: the config that maps
+    `oracle` to a model is swapped often, and a model-name match would rot by
+    design.
+    """
+    findings = []
+    usage_path = self_audit_path.resolve().parent / "token-usage.md"
+    if not usage_path.exists():
+        findings.append(
+            "TOKEN USAGE INCOMPLETE (advisory): no token-usage.md beside "
+            f"{self_audit_path.name}. It has shipped entirely missing on a real "
+            "run. An empty file is an honest nothing-to-report; an absent one "
+            "is not a report at all."
+        )
+        return findings
+
+    usage = usage_path.read_text(encoding="utf-8", errors="replace")
+    audit = self_audit_path.read_text(encoding="utf-8")
+
+    stated = independent_review_statement(audit)
+    claims_oracle = bool(stated and ORACLE_RE.search(stated))
+
+    if claims_oracle and not ORACLE_IN_USAGE_RE.search(usage):
+        findings.append(
+            "TOKEN USAGE OMITS ORACLE: self-audit.md records an Oracle pass, "
+            "and token-usage.md never mentions it. Oracle is the largest paid "
+            "per-run cost here, so leaving it out is the one omission that "
+            "matters most. Add its row."
+        )
+
+    if not ORCHESTRATOR_IN_USAGE_RE.search(usage):
+        findings.append(
+            "TOKEN USAGE INCOMPLETE (advisory): token-usage.md has no line for "
+            "the orchestrator's own consumption. The orchestrator is a model "
+            "and it did some of this work; a table of only the delegated calls "
+            "reports near-zero for a run that did everything inline. One line "
+            "with an estimate is enough."
+        )
+
+    return findings
+
+
+ADVISORY_PREFIXES = (
+    "WEAK CITATION",
+    "TOKEN USAGE INCOMPLETE",
+    "WORKTREE NAME MISMATCH",
+)
+
+
 def main():
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -469,30 +643,42 @@ def main():
     ap.add_argument("--skip-build-check", action="store_true")
     args = ap.parse_args()
 
+    findings = []
+    branch_dir = args.self_audit_path.resolve().parent.name
     if args.repo_root is None:
-        detected = find_worktree_for_branch_dir(args.self_audit_path)
+        detected, matched = find_worktree_for_branch_dir(args.self_audit_path)
         if detected is not None:
             print(f"Auto-detected repo root: {detected}")
             args.repo_root = detected
+            if matched != branch_dir:
+                findings.append(
+                    f"WORKTREE NAME MISMATCH (advisory): the report directory "
+                    f"'{branch_dir}' does not equal the branch it resolved to, "
+                    f"'{matched}'. It matched on a substring, which can resolve "
+                    f"to the wrong checkout and verify code this run never "
+                    f"touched. Name the report directory after the branch, "
+                    f"exactly."
+                )
         else:
             print(f"No matching worktree found, defaulting repo root to CWD: {Path.cwd()}")
             args.repo_root = Path.cwd()
 
-    findings = []
     if not args.skip_build_check:
         findings += check_build_freshness(args.repo_root)
     findings += check_citations(args.repo_root, args.self_audit_path)
     findings += check_mutation_transcripts(args.self_audit_path)
     findings += check_main_checkout(args.self_audit_path)
+    findings += check_independent_review(args.self_audit_path)
+    findings += check_token_usage(args.self_audit_path)
 
     if not findings:
         print("OK: no stale builds, no suspect line citations, "
               "every mutation check evidenced, main checkout on master "
-              "and clean.")
+              "and clean, independent review recorded.")
         return 0
 
-    blocking = [f for f in findings if not f.startswith("WEAK CITATION")]
-    advisory = [f for f in findings if f.startswith("WEAK CITATION")]
+    blocking = [f for f in findings if not f.startswith(ADVISORY_PREFIXES)]
+    advisory = [f for f in findings if f.startswith(ADVISORY_PREFIXES)]
 
     print(f"{len(blocking)} blocking finding(s), {len(advisory)} advisory:\n")
     for f in blocking + advisory:

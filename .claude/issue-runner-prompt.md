@@ -534,9 +534,20 @@ exists because a session twice moved the main checkout off master with a plain
 
 **This workflow does not run an independent-model audit pass** (opencode's
 `/issue` does, via Oracle in its own Phase 3.75). Self-audit here is
-necessarily self-review only. Write one explicit line in `self-audit.md`
-saying so, and that independent review happens via opencode's `/audit-pr`
-as a separate step after this PR is opened — don't let self-audit-only be
+necessarily self-review only, and `self-audit.md` has to say so in one
+line, written exactly like this:
+
+```
+Independent review: none in-run. This workflow has no independent-model
+audit pass; independent review happens via /audit-pr after the PR is opened.
+```
+
+`verify_self_audit.py` blocks when that line is absent, and blocks on a
+line that neither claims a real pass nor gives this disclosure. The wording
+matters because the checker matches it: `none in-run` plus `/audit-pr` is
+what discharges the gate. This exists because a run once shipped with no
+independent review of any kind and disclosed nothing, which after the fact
+is indistinguishable from a clean pass. Don't let self-audit-only be
 mistaken for a full review.
 
 **Before Phase 4, confirm all four self-report files exist**:
@@ -592,7 +603,13 @@ Use `.omo/runs/issue-<N>/<your-branch-name>/` (main repo absolute path):
 - `token-usage.md` — list every `Agent()` call this run made, and which
   model backed each one (Sonnet, Haiku, Fable) — name the model, not "an
   investigate agent." Cross-check the list against the session's own cost
-  data: a mismatch is a transparency gap, not a rounding error.
+  data: a mismatch is a transparency gap, not a rounding error. **Your own
+  turns count too.** Write one line for the orchestrator's consumption even
+  if the number is an estimate, and label it `Orchestrator`. The file
+  reports what was delegated and has treated the orchestrator as free, so
+  runs that did the work inline reported near-zero, which is backwards from
+  what they actually cost. `verify_self_audit.py` reports a missing
+  orchestrator line as advisory.
 
 Report back to the user: which issue you actually targeted (Phase 0), the
 PR link, and pointers to all four `.omo/runs/issue-<N>/<your-branch-name>/*.md`
