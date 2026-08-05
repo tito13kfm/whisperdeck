@@ -973,7 +973,20 @@ Five guards added in response:
 1. `.githooks/post-checkout` warns the instant the main checkout leaves master,
    naming the branch and printing the recovery commands. Git has no
    pre-checkout hook so it cannot block, but it turns two days into two
-   seconds. Installed with `git config core.hooksPath .githooks`.
+   seconds. Installed with `sh scripts/install-hooks.sh`.
+
+   The install method matters, and the first attempt was wrong. Setting
+   `core.hooksPath=.githooks` looks equivalent and is not: that path resolves
+   against the **working tree**, and a branch predating the hook has no
+   `.githooks/` directory, so the hook file is absent at exactly the moment it
+   is needed. Verified directly: with `core.hooksPath` set, checking out a
+   branch that lacks `.githooks/` produces no warning whatsoever. The guard was
+   therefore inert in the very scenario it was written for, and inert in this
+   repo for the ~20 minutes between shipping it and noticing. `.git/hooks/`
+   lives in the common git dir, shared by every worktree and independent of
+   what any of them has checked out, so that is where the install script puts
+   it. Confirmed live afterwards against a main checkout sitting on a branch
+   with no `.githooks/`.
 2. `check_main_checkout()` in `verify_self_audit.py` reports
    `MAIN CHECKOUT ON WRONG BRANCH` and `MAIN CHECKOUT DIRTY` as blocking
    findings.

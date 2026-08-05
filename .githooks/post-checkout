@@ -12,8 +12,15 @@
 # impossible to miss, which is the difference between noticing in seconds and
 # noticing in days.
 #
-# Install (once per clone, config is shared with every worktree):
-#     git config core.hooksPath .githooks
+# Install (once per clone):
+#     sh scripts/install-hooks.sh
+#
+# That copies this file into .git/hooks/. Do NOT install it by setting
+# core.hooksPath=.githooks: that path is resolved against the WORKING TREE, and
+# an old branch does not contain .githooks/, so the hook would be missing at
+# exactly the moment it is needed and the checkout would happen in silence.
+# .git/hooks lives in the common git dir, shared by every worktree and
+# independent of what any of them has checked out.
 #
 # Args: $1 = previous HEAD, $2 = new HEAD, $3 = 1 for a branch checkout.
 

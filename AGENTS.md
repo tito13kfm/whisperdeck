@@ -180,7 +180,7 @@ Why it matters more than it looks: run artifacts are written to `<main>/.omo/run
 
 Three guards now exist, in increasing order of how hard they are to ignore:
 
-1. `.githooks/post-checkout` prints a loud warning the moment the main checkout leaves master. Install once per clone with `git config core.hooksPath .githooks` (shared across all worktrees).
+1. `.githooks/post-checkout` prints a loud warning the moment the main checkout leaves master. Install once per clone with `sh scripts/install-hooks.sh`, which copies it into `.git/hooks/` (shared by every worktree, independent of what any of them has checked out). Do not use `core.hooksPath=.githooks`: that resolves against the working tree, so the hook is missing on any branch predating it, which is exactly when it is needed.
 2. `scripts/verify_self_audit.py` reports `MAIN CHECKOUT ON WRONG BRANCH` and `MAIN CHECKOUT DIRTY` as blocking findings.
 3. Phase 3.5 of the issue-runner prompt requires both checks before opening a PR.
 

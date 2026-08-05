@@ -15,10 +15,12 @@ Read `AGENTS.md` and follow **The Complement Rule** section — it exists becaus
 ## Hook setup (once per clone)
 
 ```
-git config core.hooksPath .githooks
+sh scripts/install-hooks.sh
 ```
 
-Shared across every worktree via `.git/config`. Currently provides the `post-checkout` warning above.
+Copies `.githooks/*` into `.git/hooks/`, which is shared by every worktree and independent of which branch any of them has checked out. Currently provides the `post-checkout` warning above.
+
+Do **not** install by setting `core.hooksPath=.githooks`. That path resolves against the working tree, and a branch that predates the hook does not contain `.githooks/`, so the hook goes missing at exactly the moment it is needed and the checkout happens in silence. This was verified, and it is why the install script exists.
 
 ## Writing style (commits, PRs, docs, comments)
 
