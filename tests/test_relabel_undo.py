@@ -147,6 +147,32 @@ def test_patch_segments_recomputes_speaker_count(client, db_session):
     assert t2.speaker_count == 3
 
 
+def test_patch_malformed_segments_does_not_500(client, db_session):
+    """The segments PATCH stores client JSON with no validation, so the
+    speaker_count recompute has to tolerate junk rather than raise. A
+    non-string speaker value used to crash it with AttributeError, which the
+    client would see as a 500.
+
+    Only object entries are covered here. A non-dict entry in the array is
+    rejected further down by the FTS triggers (json_extract over json_each,
+    database/__init__.py), which predates this and is not what this test is
+    about."""
+    t = _transcript(db_session)
+    t.speaker_count = 2
+    db_session.commit()
+    new_segments = [
+        {"start": 0.0, "end": 2.0, "text": "a", "speaker": "Alice"},
+        {"start": 2.0, "end": 4.0, "text": "b", "speaker": 123},
+        {"start": 4.0, "end": 6.0, "text": "c", "speaker": None},
+    ]
+    r = client.patch(f"/api/transcripts/{t.id}", json={"segments": new_segments})
+    assert r.status_code == 200
+    db_session.expire_all()
+    t2 = db_session.query(Transcript).filter(Transcript.id == t.id).first()
+    # Only "Alice" is a usable label; the other two contribute nothing.
+    assert t2.speaker_count == 1
+
+
 def test_undo_with_no_history_is_404(client, db_session):
     t = _transcript(db_session)
     assert client.post(f"/api/transcripts/{t.id}/relabel-undo").status_code == 404

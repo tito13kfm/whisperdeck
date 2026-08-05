@@ -26,11 +26,19 @@ def count_distinct_speakers(segments) -> int:
     diarization turns that services/diarization.py counts from, so they have
     to recount from the stored labels; keeping that in one place is what
     stops the five of them from answering the "Unknown" question differently.
+
+    Total over arbitrary input, never raises. One caller is the segments
+    PATCH, which stores whatever JSON the client sends with no validation, so
+    a non-dict entry or a non-string speaker value has to count as "no
+    speaker here" rather than 500 the request. Junk is not coerced into a
+    name: str(123) would invent a speaker the user never labeled.
     """
     return len({
         name
         for seg in (segments or [])
-        if (name := (seg.get("speaker") or "").strip())
+        if isinstance(seg, dict)
+        and isinstance(seg.get("speaker"), str)
+        and (name := seg["speaker"].strip())
         and name.casefold() not in NON_SPEAKER_LABELS
     })
 
