@@ -206,6 +206,15 @@ function toast(msg, type = 'ok') {
   setTimeout(() => el.remove(), 4200);
 }
 
+// A voice clip can be stored successfully yet on a degraded embedding model
+// (the MFCC fallback), which leaves it unmatchable by voice match. The voice
+// routes report that as a `warning` field on an otherwise-successful response
+// — surface it everywhere we store a clip, or the degradation stays invisible
+// (issue #109).
+function toastVoiceWarning(r) {
+  if (r && r.warning) toast(r.warning, 'info');
+}
+
 // Provider/parsing failures land in job.error as raw exception text (a
 // json.JSONDecodeError message glued to a repr'd content snippet, or a raw
 // HTTP error body) — see services/transcription.py and services/llm_client.py.
@@ -4163,6 +4172,7 @@ async function openEnrollMarkedModal() {
         body: JSON.stringify({ name, clips }),
       });
       toast('Voice profile "' + p.name + '" now has ' + p.sample_count + ' clip' + (p.sample_count !== 1 ? 's' : ''), 'info');
+      toastVoiceWarning(p);
       delete seedClips[sp];
       closeModal();
       renderDetailBody();
@@ -5731,8 +5741,9 @@ function openEnrollModal() {
     fd.append('name', name);
     fd.append('notes', $('enroll-notes').value.trim());
     try {
-      await api('/api/voices/enroll', { method: 'POST', body: fd });
+      const r = await api('/api/voices/enroll', { method: 'POST', body: fd });
       toast('Enrolled ' + name + ' to the roster');
+      toastVoiceWarning(r);
       closeModal();
       refreshRailChrome();
       loadVoices();
@@ -5769,8 +5780,9 @@ function openAddClipModal(profileId) {
     const fd = new FormData();
     fd.append('file', addClipFile);
     try {
-      await api('/api/voices/' + profileId + '/clips', { method: 'POST', body: fd });
+      const r = await api('/api/voices/' + profileId + '/clips', { method: 'POST', body: fd });
       toast('Clip added');
+      toastVoiceWarning(r);
       closeModal();
       loadVoices();
     } catch (e) { toast(e.message, 'error'); }
@@ -5838,6 +5850,13 @@ async function runIdentify() {
       box.style.borderColor = AMBER;
       box.innerHTML = '<span style="font-size:13px;color:' + AMBER + ';font-weight:600">No match above ' + identifyThreshold + '%</span>' +
         '<span style="font-family:var(--f-mono);font-size:11px;color:var(--label-dim)">' + (r.total_profiles || 0) + ' profiles checked</span>';
+    }
+    // "0 matches" alone can't say whether nobody matched or nothing could be
+    // compared at all — the server sends the distinction as `warning`.
+    if (r.warning) {
+      box.style.flexWrap = 'wrap';
+      box.style.borderColor = AMBER;
+      box.innerHTML += '<div style="flex-basis:100%;font-size:11.5px;line-height:1.4;color:var(--label-dim);margin-top:8px">' + escapeHtml(r.warning) + '</div>';
     }
   } catch (e) { toast(e.message, 'error'); }
 }

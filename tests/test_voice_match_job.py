@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 from database import RelabelHistory, Transcript, User, VoiceProfile
 from services.llm_jobs import cancel_llm_job, enqueue_llm_job, run_llm_job
-from services.voice_id import voice_id_service
+from services.voice_id import voice_id_service, _MFCC_MODEL_ID
 
 
 class _NoCloseSession:
@@ -67,6 +67,13 @@ def _transcript_with_segments(db_session, user, tmp_path, segments):
     return t
 
 
+def _outcome(matches=None, **overrides):
+    out = {"matches": matches or [], "probe_model": "test", "degraded": False,
+           "compared": 1, "skipped_model_mismatch": 0, "warning": None}
+    out.update(overrides)
+    return out
+
+
 def test_voice_match_relabels_confident_segments_only(db_session, tmp_path):
     user = _user(db_session)
     _enrolled_profile(db_session, user)
@@ -86,13 +93,13 @@ def test_voice_match_relabels_confident_segments_only(db_session, tmp_path):
         # first call (segment 0) matches confidently, second doesn't
         fake_identify.calls += 1
         if fake_identify.calls == 1:
-            return [{"id": 1, "name": "Alice", "similarity": 0.9, "sample_count": 2}]
-        return []
+            return _outcome([{"id": 1, "name": "Alice", "similarity": 0.9, "sample_count": 2}])
+        return _outcome()
     fake_identify.calls = 0
 
     factory = lambda: _NoCloseSession(db_session)
     with patch("services.llm_jobs.extract_clips_concat", fake_extract), \
-         patch("services.llm_jobs.voice_id_service.identify", fake_identify):
+         patch("services.llm_jobs.voice_id_service.identify_detailed", fake_identify):
         asyncio.run(run_llm_job(factory, job.id, transcription_service=None))
 
     db_session.refresh(job)
@@ -235,8 +242,8 @@ def test_voice_match_proceeds_when_enrolled_voice_matches_current_backend(db_ses
     factory = lambda: _NoCloseSession(db_session)
     with patch("services.llm_jobs.voice_id_service._backend", "librosa_mfcc"), \
          patch("services.llm_jobs.extract_clips_concat", fake_extract), \
-         patch("services.llm_jobs.voice_id_service.identify",
-               lambda db, user_id, audio_path, threshold=0.65, hf_token=None: [{"id": 1, "name": "Alice", "similarity": 0.9, "sample_count": 1}]):
+         patch("services.llm_jobs.voice_id_service.identify_detailed",
+               lambda db, user_id, audio_path, threshold=0.65, hf_token=None: _outcome([{"id": 1, "name": "Alice", "similarity": 0.9, "sample_count": 1}])):
         asyncio.run(run_llm_job(factory, job.id, transcription_service=None))
 
     db_session.refresh(job)
@@ -264,8 +271,8 @@ def test_voice_match_proceeds_for_legacy_profile_with_no_embedding_model(db_sess
     factory = lambda: _NoCloseSession(db_session)
     with patch("services.llm_jobs.voice_id_service._backend", "librosa_mfcc"), \
          patch("services.llm_jobs.extract_clips_concat", fake_extract), \
-         patch("services.llm_jobs.voice_id_service.identify",
-               lambda db, user_id, audio_path, threshold=0.65, hf_token=None: [{"id": 1, "name": "Alice", "similarity": 0.9, "sample_count": 1}]):
+         patch("services.llm_jobs.voice_id_service.identify_detailed",
+               lambda db, user_id, audio_path, threshold=0.65, hf_token=None: _outcome([{"id": 1, "name": "Alice", "similarity": 0.9, "sample_count": 1}])):
         asyncio.run(run_llm_job(factory, job.id, transcription_service=None))
 
     db_session.refresh(job)
@@ -310,8 +317,8 @@ def test_voice_match_cancel_mid_loop_stops_and_leaves_transcript_unchanged(db_se
 
     factory = lambda: _NoCloseSession(db_session)
     with patch("services.llm_jobs.extract_clips_concat", cancel_then_extract), \
-         patch("services.llm_jobs.voice_id_service.identify",
-               lambda db, user_id, audio_path, threshold=0.65, hf_token=None: [{"id": 1, "name": "Alice", "similarity": 0.9, "sample_count": 1}]):
+         patch("services.llm_jobs.voice_id_service.identify_detailed",
+               lambda db, user_id, audio_path, threshold=0.65, hf_token=None: _outcome([{"id": 1, "name": "Alice", "similarity": 0.9, "sample_count": 1}])):
         asyncio.run(run_llm_job(factory, job.id, transcription_service=None))
 
     db_session.refresh(job)
@@ -356,8 +363,8 @@ def test_voice_match_cancel_after_a_committed_segment_still_skips_the_writes(db_
 
     factory = lambda: _NoCloseSession(db_session)
     with patch("services.llm_jobs.extract_clips_concat", cancel_on_second), \
-         patch("services.llm_jobs.voice_id_service.identify",
-               lambda db, user_id, audio_path, threshold=0.65, hf_token=None: [{"id": 1, "name": "Alice", "similarity": 0.9, "sample_count": 1}]):
+         patch("services.llm_jobs.voice_id_service.identify_detailed",
+               lambda db, user_id, audio_path, threshold=0.65, hf_token=None: _outcome([{"id": 1, "name": "Alice", "similarity": 0.9, "sample_count": 1}])):
         asyncio.run(run_llm_job(factory, job.id, transcription_service=None))
 
     db_session.refresh(job)
@@ -388,11 +395,11 @@ def test_voice_match_cancel_during_final_segment_still_skips_the_writes(db_sessi
 
     def cancel_then_match(db, user_id, audio_path, threshold=0.65, hf_token=None):
         cancel_llm_job(db_session, user.id, job.id)
-        return [{"id": 1, "name": "Alice", "similarity": 0.9, "sample_count": 1}]
+        return _outcome([{"id": 1, "name": "Alice", "similarity": 0.9, "sample_count": 1}])
 
     factory = lambda: _NoCloseSession(db_session)
     with patch("services.llm_jobs.extract_clips_concat", fake_extract), \
-         patch("services.llm_jobs.voice_id_service.identify", cancel_then_match):
+         patch("services.llm_jobs.voice_id_service.identify_detailed", cancel_then_match):
         asyncio.run(run_llm_job(factory, job.id, transcription_service=None))
 
     db_session.refresh(job)
@@ -442,8 +449,8 @@ def test_voice_match_skips_segment_on_extraction_failure_without_failing_job(db_
 
     factory = lambda: _NoCloseSession(db_session)
     with patch("services.llm_jobs.extract_clips_concat", flaky_extract), \
-         patch("services.llm_jobs.voice_id_service.identify",
-               lambda db, user_id, audio_path, threshold=0.65, hf_token=None: [{"id": 1, "name": "Alice", "similarity": 0.9, "sample_count": 1}]):
+         patch("services.llm_jobs.voice_id_service.identify_detailed",
+               lambda db, user_id, audio_path, threshold=0.65, hf_token=None: _outcome([{"id": 1, "name": "Alice", "similarity": 0.9, "sample_count": 1}])):
         asyncio.run(run_llm_job(factory, job.id, transcription_service=None))
 
     db_session.refresh(job)
@@ -590,13 +597,76 @@ def test_voice_match_passes_hf_token_from_user_settings(db_session, tmp_path):
 
     def fake_identify(db, user_id, audio_path, threshold=0.65, hf_token=None):
         captured["hf_token"] = hf_token
-        return []
+        return _outcome()
 
     factory = lambda: _NoCloseSession(db_session)
     with patch("services.llm_jobs.extract_clips_concat", fake_extract), \
-         patch("services.llm_jobs.voice_id_service.identify", fake_identify):
+         patch("services.llm_jobs.voice_id_service.identify_detailed", fake_identify):
         asyncio.run(run_llm_job(factory, job.id, transcription_service=None))
 
     db_session.refresh(job)
     assert job.status == "completed"
     assert captured["hf_token"] == "job-token-7"
+
+
+def test_voice_match_reports_a_degraded_probe_in_job_error(db_session, tmp_path, monkeypatch):
+    """Issue #109. The probe embedding is identical to the enrolled one, so the
+    only reason nothing is relabeled is that the probe silently fell back to
+    MFCC while the roster is on another model. That used to finish as a clean
+    'completed' with error None, indistinguishable from an honest no-match."""
+    user = _user(db_session)
+    _enrolled_profile(db_session, user, embedding_model="speechbrain/spkrec-ecapa-voxceleb")
+    segments = [{"start": 0.0, "end": 1.0, "text": "hi", "speaker": "SPEAKER_00"}]
+    t = _transcript_with_segments(db_session, user, tmp_path, segments)
+    job = enqueue_llm_job(db_session, user.id, t.id, "voice_match", "", "")
+    job.status = "running"
+    db_session.commit()
+
+    async def fake_extract(audio_path, clips, output_dir):
+        return str(tmp_path / "clip.wav")
+
+    monkeypatch.setattr(voice_id_service, "_backend", "speechbrain")
+    monkeypatch.setattr(voice_id_service, "_extract_embedding",
+                        lambda path, hf_token=None: (np.array([0.1, 0.2, 0.3]), _MFCC_MODEL_ID))
+
+    factory = lambda: _NoCloseSession(db_session)
+    with patch("services.llm_jobs.extract_clips_concat", fake_extract):
+        asyncio.run(run_llm_job(factory, job.id, transcription_service=None))
+
+    db_session.refresh(job)
+    db_session.refresh(t)
+    assert job.status == "completed"
+    assert t.segments[0]["speaker"] == "SPEAKER_00"  # nothing relabeled
+    assert job.error is not None                    # and it no longer looks clean
+    assert "MFCC" in job.error
+    assert "could not be compared" in job.error
+
+
+def test_voice_match_stays_error_free_when_the_probe_model_matches(db_session, tmp_path, monkeypatch):
+    """Guards the degradation reporting against firing on every run: same setup
+    as above, only the probe's model_id agrees with the roster."""
+    user = _user(db_session)
+    _enrolled_profile(db_session, user, embedding_model="speechbrain/spkrec-ecapa-voxceleb")
+    segments = [{"start": 0.0, "end": 1.0, "text": "hi", "speaker": "SPEAKER_00"}]
+    t = _transcript_with_segments(db_session, user, tmp_path, segments)
+    job = enqueue_llm_job(db_session, user.id, t.id, "voice_match", "", "")
+    job.status = "running"
+    db_session.commit()
+
+    async def fake_extract(audio_path, clips, output_dir):
+        return str(tmp_path / "clip.wav")
+
+    monkeypatch.setattr(voice_id_service, "_backend", "speechbrain")
+    monkeypatch.setattr(voice_id_service, "_extract_embedding",
+                        lambda path, hf_token=None: (np.array([0.1, 0.2, 0.3]),
+                                                     "speechbrain/spkrec-ecapa-voxceleb"))
+
+    factory = lambda: _NoCloseSession(db_session)
+    with patch("services.llm_jobs.extract_clips_concat", fake_extract):
+        asyncio.run(run_llm_job(factory, job.id, transcription_service=None))
+
+    db_session.refresh(job)
+    db_session.refresh(t)
+    assert job.status == "completed"
+    assert t.segments[0]["speaker"] == "Alice"
+    assert job.error is None

@@ -2480,6 +2480,7 @@ async def enroll_speaker_from_transcript(
             "embedding_model": profile.embedding_model,
             "notes": profile.notes,
             "clip_id": clip.id,
+            "warning": voice_id_service.degraded_model_warning(clip.embedding_model),
         }
     except ValueError as e:
         if permanent_path is not None:
@@ -3367,6 +3368,9 @@ async def enroll_voice(
             "sample_count": profile.sample_count,
             "embedding_model": profile.embedding_model,
             "notes": profile.notes,
+            # Non-null when the clip silently landed on the MFCC fallback, so a
+            # degraded enrollment doesn't stay invisible (issue #109).
+            "warning": voice_id_service.degraded_model_warning(profile.embedding_model),
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -3390,12 +3394,19 @@ async def identify_speaker(
 
     try:
         user_settings = get_user_settings(db, current_user.id)
-        matches = voice_id_service.identify(db, current_user.id, str(save_path), threshold=threshold,
-                                             hf_token=user_settings.get("hf_token"))
+        outcome = voice_id_service.identify_detailed(db, current_user.id, str(save_path),
+                                                     threshold=threshold,
+                                                     hf_token=user_settings.get("hf_token"))
         return {
-            "matches": matches,
+            "matches": outcome["matches"],
             "total_profiles": len(voice_id_service.list_profiles(db, current_user.id)),
             "backend": voice_id_service._backend,
+            # An empty match list on its own can't say whether nobody matched or
+            # nothing could be compared at all (issue #109).
+            "probe_model": outcome["probe_model"],
+            "degraded": outcome["degraded"],
+            "skipped_model_mismatch": outcome["skipped_model_mismatch"],
+            "warning": outcome["warning"],
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -3429,7 +3440,8 @@ async def add_voice_clip(
         clip = voice_id_service.add_clip(db, profile_id, current_user.id, str(save_path),
                                           hf_token=user_settings.get("hf_token"))
         return {"id": clip.id, "voice_profile_id": clip.voice_profile_id,
-                "created_at": clip.created_at.isoformat() if clip.created_at else None}
+                "created_at": clip.created_at.isoformat() if clip.created_at else None,
+                "warning": voice_id_service.degraded_model_warning(clip.embedding_model)}
     except ValueError as e:
         try:
             os.remove(save_path)

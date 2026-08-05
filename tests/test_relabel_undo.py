@@ -293,17 +293,26 @@ def test_voice_match_records_relabel_history(db_session, tmp_path):
     async def fake_extract(audio_path, clips, output_dir):
         return str(tmp_path / "clip.wav")
 
-    def fake_identify(db, user_id, audio_path, threshold=0.65, hf_token=None):
+    def fake_identify_detailed(db, user_id, audio_path, threshold=0.65, hf_token=None):
         # first call (segment 0) matches confidently, second doesn't
-        fake_identify.calls += 1
-        if fake_identify.calls == 1:
-            return [{"id": 1, "name": "Alice", "similarity": 0.9, "sample_count": 2}]
-        return []
-    fake_identify.calls = 0
+        fake_identify_detailed.calls += 1
+        matches = (
+            [{"id": 1, "name": "Alice", "similarity": 0.9, "sample_count": 2}]
+            if fake_identify_detailed.calls == 1 else []
+        )
+        return {
+            "matches": matches,
+            "probe_model": "speechbrain/spkrec-ecapa-voxceleb",
+            "degraded": False,
+            "compared": 1,
+            "skipped_model_mismatch": 0,
+            "warning": None,
+        }
+    fake_identify_detailed.calls = 0
 
     factory = lambda: _NoCloseSession(db_session)
     with patch("services.llm_jobs.extract_clips_concat", fake_extract), \
-         patch("services.llm_jobs.voice_id_service.identify", fake_identify):
+         patch("services.llm_jobs.voice_id_service.identify_detailed", fake_identify_detailed):
         asyncio.run(run_llm_job(factory, job.id, transcription_service=None))
 
     rows = db_session.query(RelabelHistory).filter(RelabelHistory.kind == "voice_match").all()

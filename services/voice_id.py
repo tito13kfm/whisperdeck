@@ -35,6 +35,11 @@ _BACKEND_MODEL_IDS = {
     "none": "No backend available — install speechbrain",
 }
 
+# Backends whose embeddings live in a different vector space than MFCC's, so
+# falling back to MFCC under them produces a clip that cannot be compared
+# against anything they enrolled.
+_STRONG_BACKENDS = ("speechbrain", "pyannote")
+
 
 class VoiceIdentificationService:
     """Enroll known speakers and identify speakers in audio."""
@@ -119,6 +124,42 @@ class VoiceIdentificationService:
         primary = _BACKEND_MODEL_IDS.get(self._backend)
         return {m for m in (primary, _MFCC_MODEL_ID) if m}
 
+    def _is_degraded_model(self, model_id: Optional[str]) -> bool:
+        return model_id == _MFCC_MODEL_ID and self._backend in _STRONG_BACKENDS
+
+    def degraded_model_warning(self, model_id: Optional[str]) -> Optional[str]:
+        if not self._is_degraded_model(model_id):
+            return None
+        return (
+            f"This audio could not be processed by the {self.backend_name} backend, so a "
+            f"lower-accuracy MFCC fingerprint was stored instead. It can only be matched "
+            f"against other MFCC clips, so voice match may not find this speaker."
+        )
+
+    def _ensure_not_orphan_model(self, db, user_id: int, model_id: str) -> None:
+        if not self._is_degraded_model(model_id):
+            return
+        other = (
+            db.query(VoiceProfile)
+            .filter(
+                VoiceProfile.user_id == user_id,
+                VoiceProfile.embedding_model.isnot(None),
+                VoiceProfile.embedding_model != model_id,
+                VoiceProfile.sample_count > 0,
+            )
+            .first()
+        )
+        if other is None:
+            return
+        reason = f" ({self._last_backend_error})" if self._last_backend_error else ""
+        raise ValueError(
+            f"This audio could not be processed by the {self.backend_name} backend, so it fell "
+            f"back to an MFCC fingerprint. Profile '{other.name}' is enrolled under "
+            f"{other.embedding_model}, and the two can never be compared, so this clip would "
+            f"be stored as a speaker voice match can never find. Re-record or repair the audio, "
+            f"or check the backend's dependencies.{reason}"
+        )
+
     def enroll(
         self,
         db,
@@ -144,6 +185,7 @@ class VoiceIdentificationService:
                 f"dependencies (e.g. torch, torchaudio) are working correctly.{reason}"
             )
         embedding, model_id = result
+        self._ensure_not_orphan_model(db, user_id, model_id)
 
         profile = db.query(VoiceProfile).filter(
             VoiceProfile.user_id == user_id, VoiceProfile.name == name
@@ -187,6 +229,7 @@ class VoiceIdentificationService:
                 f"backend.{reason}"
             )
         embedding, model_id = result
+        self._ensure_not_orphan_model(db, user_id, model_id)
 
         self._ensure_clip_compatible(db, profile, embedding, model_id)
 
@@ -272,14 +315,39 @@ class VoiceIdentificationService:
         db.commit()
 
     def identify(self, db, user_id: int, audio_path: str, threshold: float = 0.65, hf_token: Optional[str] = None) -> list[dict]:
+        return self.identify_detailed(
+            db, user_id, audio_path, threshold=threshold, hf_token=hf_token
+        )["matches"]
+
+    def identify_detailed(
+        self,
+        db,
+        user_id: int,
+        audio_path: str,
+        threshold: float = 0.65,
+        hf_token: Optional[str] = None,
+    ) -> dict:
+        outcome = {
+            "matches": [],
+            "probe_model": None,
+            "degraded": False,
+            "compared": 0,
+            "skipped_model_mismatch": 0,
+            "warning": None,
+        }
         result = self._extract_embedding(audio_path, hf_token=hf_token)
         if result is None:
-            return []
+            reason = f" ({self._last_backend_error})" if self._last_backend_error else ""
+            outcome["warning"] = (
+                f"Voice embedding extraction failed using the {self.backend_name} "
+                f"backend, so this audio could not be matched.{reason}"
+            )
+            return outcome
         probe_embedding, probe_model = result
+        outcome["probe_model"] = probe_model
+        outcome["degraded"] = self._is_degraded_model(probe_model)
 
         profiles = db.query(VoiceProfile).filter(VoiceProfile.user_id == user_id).all()
-        if not profiles:
-            return []
 
         results = []
         for profile in profiles:
@@ -291,10 +359,12 @@ class VoiceIdentificationService:
             # compatible_embedding_models()) so it can refuse a job before
             # extracting a clip per segment. Keep the two in step.
             if profile.embedding_model and profile.embedding_model != probe_model:
+                outcome["skipped_model_mismatch"] += 1
                 continue
             stored = np.array(profile.embedding)
             if len(stored) != len(probe_embedding):
                 continue
+            outcome["compared"] += 1
             similarity = self._cosine_similarity(probe_embedding, stored)
             if similarity >= threshold:
                 results.append({
@@ -305,7 +375,10 @@ class VoiceIdentificationService:
                 })
 
         results.sort(key=lambda x: x["similarity"], reverse=True)
-        return results
+        outcome["matches"] = results
+        if outcome["degraded"]:
+            outcome["warning"] = self.degraded_model_warning(probe_model)
+        return outcome
 
     def list_profiles(self, db, user_id: int) -> list[dict]:
         profiles = (
