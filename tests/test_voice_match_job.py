@@ -497,6 +497,78 @@ def test_transcript_serialization_includes_voice_match_job(client, db_session, t
     assert r.json()["voice_match_job"]["kind"] == "voice_match"
 
 
+def test_voice_match_recomputes_speaker_count_on_merge(db_session, tmp_path):
+    """Issue #111: three distinct diarization labels all confidently match
+    the same enrolled name, merging into one speaker. speaker_count must be
+    rewritten to 1, not left at its stale pre-job value of 3."""
+    user = _user(db_session)
+    _enrolled_profile(db_session, user)
+    segments = [
+        {"start": 0.0, "end": 1.0, "text": "hi", "speaker": "SPEAKER_00"},
+        {"start": 1.0, "end": 2.0, "text": "there", "speaker": "SPEAKER_01"},
+        {"start": 2.0, "end": 3.0, "text": "bye", "speaker": "SPEAKER_02"},
+    ]
+    t = _transcript_with_segments(db_session, user, tmp_path, segments)
+    t.speaker_count = 3
+    db_session.commit()
+    job = enqueue_llm_job(db_session, user.id, t.id, "voice_match", "", "")
+    job.status = "running"
+    db_session.commit()
+
+    async def fake_extract(audio_path, clips, output_dir):
+        return str(tmp_path / "clip.wav")
+
+    def fake_identify(db, user_id, audio_path, threshold=0.65, hf_token=None):
+        # Every segment confidently matches the same enrolled profile.
+        return [{"id": 1, "name": "Alice", "similarity": 0.9, "sample_count": 3}]
+
+    factory = lambda: _NoCloseSession(db_session)
+    with patch("services.llm_jobs.extract_clips_concat", fake_extract), \
+         patch("services.llm_jobs.voice_id_service.identify", fake_identify):
+        asyncio.run(run_llm_job(factory, job.id, transcription_service=None))
+
+    db_session.refresh(job)
+    db_session.refresh(t)
+    assert job.status == "completed"
+    assert [s["speaker"] for s in t.segments] == ["Alice", "Alice", "Alice"]
+    assert t.speaker_count == 1
+
+
+def test_voice_match_no_match_leaves_speaker_count_matching_segments(db_session, tmp_path):
+    """No-op guard: when identify() matches nothing, speaker_count must still
+    equal the distinct labels actually present in the (unchanged) segments:
+    the recompute is not destructive on a run that relabels nothing."""
+    user = _user(db_session)
+    _enrolled_profile(db_session, user)
+    segments = [
+        {"start": 0.0, "end": 1.0, "text": "hi", "speaker": "SPEAKER_00"},
+        {"start": 1.0, "end": 2.0, "text": "there", "speaker": "SPEAKER_01"},
+    ]
+    t = _transcript_with_segments(db_session, user, tmp_path, segments)
+    t.speaker_count = 2
+    db_session.commit()
+    job = enqueue_llm_job(db_session, user.id, t.id, "voice_match", "", "")
+    job.status = "running"
+    db_session.commit()
+
+    async def fake_extract(audio_path, clips, output_dir):
+        return str(tmp_path / "clip.wav")
+
+    def fake_identify(db, user_id, audio_path, threshold=0.65, hf_token=None):
+        return []  # no confident match for any segment
+
+    factory = lambda: _NoCloseSession(db_session)
+    with patch("services.llm_jobs.extract_clips_concat", fake_extract), \
+         patch("services.llm_jobs.voice_id_service.identify", fake_identify):
+        asyncio.run(run_llm_job(factory, job.id, transcription_service=None))
+
+    db_session.refresh(job)
+    db_session.refresh(t)
+    assert job.status == "completed"
+    assert [s["speaker"] for s in t.segments] == ["SPEAKER_00", "SPEAKER_01"]  # untouched
+    assert t.speaker_count == 2
+
+
 def test_voice_match_passes_hf_token_from_user_settings(db_session, tmp_path):
     """The background job has no route to fetch settings for it — it must
     thread the user's hf_token into identify() itself, or a fresh process
