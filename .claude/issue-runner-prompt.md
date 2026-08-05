@@ -45,11 +45,52 @@ Decide what kind of issue this is:
 State explicitly, in your own first status update, which issue number you
 ended up targeting and why.
 
+**Then check whether the work already landed under a different issue
+number.** The tracking-issue walk above only looks for a merged PR that
+closes the target's own number, which misses work that shipped under some
+other number and was never ticked off. Before starting Phase 1:
+
+    git log --oneline -40
+
+Grep that for the issue's key identifiers (the function, field, endpoint, or
+setting it names). If a plausible commit appears, read it before
+investigating anything. If the work is already done, stop and report that
+rather than re-doing it.
+
+Confirmed pattern, five runs in one week: one investigated two checklist
+items already implemented in earlier commits and produced zero code
+changes; one found its spec item `already done`; one found both endpoints
+already converted by a prior issue; one nearly re-implemented a feature
+whose tracking checkbox was never ticked despite two merged PRs. This costs
+one command.
+
 ## Setup: worktree + branch
 
-Call `EnterWorktree` (no `path` argument — you want a new worktree, fresh
-off `origin/master`). This switches your session's working directory into
-the new worktree for the rest of this run.
+**Fetch first. `EnterWorktree` does not fetch for you.** It branches from a
+local ref, so if the local ref is stale your worktree is stale, and the
+prompt used to claim otherwise. Run this before creating the worktree:
+
+    git fetch origin && git log origin/master -1
+
+Then call `EnterWorktree` (no `path` argument — you want a new worktree).
+This switches your session's working directory into the new worktree for
+the rest of this run.
+
+**Verify the base, don't assume it.** After `EnterWorktree`, confirm your
+worktree actually sits on current `origin/master`:
+
+    git rev-parse HEAD && git rev-parse origin/master
+
+If they differ, rebase onto `origin/master` before writing any code, and
+say so in your first status update. Don't branch off a local branch you
+find already checked out either — it may be someone else's stale
+in-progress work, not a base for you.
+
+Confirmed failure mode: a run took `fresh off origin/master` at face value,
+got a worktree at `290e5f7` while `origin/master` was at `5207255`, and so
+was missing the merged PR its entire task depended on. A second run found
+the main checkout's local `master` four commits behind `origin/master` at
+start, and paid for a mid-run rebase plus a full re-run of the suite.
 
 **Two path roots exist for the rest of this run — never cross them:**
 - **Your worktree** (your session's cwd after `EnterWorktree`) — every
@@ -326,11 +367,36 @@ Narrowing scope silently is the same class of self-report failure as
 overclaiming. Add one line per such decision: `[decision] <what you
 excluded/added> — not specified by the issue, because <reason>`.
 
-**Every new or changed test gets its own mutation-check line:**
+**Every new or changed test gets a mutation-check transcript, not a
+mutation-check claim.** A predicted outcome is not evidence. Actually run
+the test, actually apply the mutation, run it again, and paste both observed
+results:
 
 ```
-[x] test_<name> — mutation check: fails with function body replaced by return (or None/False/True/0/[] of declared return type)? yes
+[x] test_<name> — mutation check:
+    ran: <MAIN>/.venv/Scripts/python.exe -m pytest tests/test_x.py::test_name -q  ->  1 passed
+    mutated: <function> body -> `return None`; reran  ->  1 failed
+    restored: reran  ->  1 passed
 ```
+
+Requirements, each of which `verify_self_audit.py` checks mechanically:
+
+- A real runner invocation appears (`pytest`, `node --test`, `npm test`).
+- An unmutated green result appears as a count, e.g. `1 passed`.
+- A mutated red result appears as a count, e.g. `1 failed`.
+
+**`mutation check: N/A` is not accepted, and neither is any other
+exemption.** If the test drives a browser and the function lives in
+`static/rack.js`, the mutation is still mechanical: remove the line, rebuild
+the bundle, re-run, restore, rebuild again. That exact sequence has been
+done on this repo. The one time a run wrote `mutation check: N/A (e2e
+browser test, not a unit test with replaceable function body)`, the test it
+exempted failed 100% of the time and had never been executed at all — only
+syntax-checked with `node -c`. The `N/A` was the last thing standing between
+that and the PR.
+
+Restore the mutation before moving on, and confirm with `git diff` that only
+your intended change remains.
 
 **A `[x]` that turns out false on review is a serious self-report
 violation, worse than an honest `[ ]`.** Run the FULL test suite (not just

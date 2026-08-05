@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Mechanically verify a self-audit.md before it's trusted.
 
-Two deterministic checks, no model calls:
+Three deterministic checks, no model calls:
 
 1. Build freshness: for every esbuild `<src> ... --outfile=<out>` script in
    package.json, rebuild <src> to a temp file and diff it byte-for-byte
@@ -19,6 +19,13 @@ Two deterministic checks, no model calls:
    line(s). Zero overlap means the citation almost certainly points at the
    wrong code (confirmed pattern on PR #256's self-audit: 5+ of 12 citations
    pointed at unrelated code after the file drifted).
+
+3. Mutation-check evidence: every `[x] ... mutation check` box must show a
+   runner invocation plus a pass count and a failure count, so the box
+   records what was observed instead of what was predicted. Four runs in one
+   week shipped a mutation claim that had never been applied, and a fifth
+   used `mutation check: N/A` on a test that failed unconditionally and had
+   only ever been syntax-checked. Exemptions are rejected outright.
 
 This does not replace a real review -- keyword overlap is a cheap smoke
 test, not a semantic check -- but it costs no tokens, is exact where it can
@@ -279,6 +286,89 @@ def check_citations(repo_root: Path, self_audit_path: Path, window: int = 15):
     return findings
 
 
+MUTATION_HEADER_RE = re.compile(
+    r"^(?:[-*]\s*)?\[x\]\s*(?P<name>.*?)\bmutation check\b", re.IGNORECASE
+)
+# An exemption is the failure mode this check exists for. Issue #246 wrote
+# `mutation check: N/A (e2e browser test, ...)` on a test that failed 100% of
+# the time and had never been run, only `node -c` syntax-checked.
+MUTATION_EXEMPTION_RE = re.compile(
+    r"\b(?:n/a|n\.a\.|not applicable|skipped|can'?t be mutated|"
+    r"cannot be mutated|no replaceable function body)\b",
+    re.IGNORECASE,
+)
+MUTATION_RUNNER_RE = re.compile(
+    r"\b(?:pytest|node\s+--test|npm\s+(?:run\s+)?test|vitest)\b", re.IGNORECASE
+)
+# Counts, not adjectives. "fails with the body replaced by return? yes" is a
+# prediction; "-> 1 failed" is an observation. Only the latter matches.
+MUTATION_GREEN_RE = re.compile(r"\b\d+\s+passed\b", re.IGNORECASE)
+MUTATION_RED_RE = re.compile(r"\b\d+\s+(?:failed|error|errors)\b", re.IGNORECASE)
+
+
+def check_mutation_transcripts(self_audit_path: Path):
+    """Every `[x] ... mutation check` box must carry observed output, not a
+    predicted outcome.
+
+    Both prompts have required a mutation-check line per new test for a while,
+    and the line was reliably written from reasoning rather than from running
+    anything. Four runs in one week shipped a box whose stated mutation had
+    never been applied: a test asserting inside a loop over a list that was
+    empty under the mutation, a fixture that never created the row the branch
+    needed, an `assert True` body, and one test that failed unconditionally.
+
+    A prediction and an observation are not distinguishable by reading the
+    claim, so this requires the shape of an observation: a runner invocation,
+    a pass count for the unmutated run, and a failure count for the mutated
+    one. Counts rather than words, because "fails if replaced by return" is
+    exactly the prediction being rejected.
+    """
+    findings = []
+    lines = self_audit_path.read_text(encoding="utf-8").splitlines()
+    i = 0
+    while i < len(lines):
+        m = MUTATION_HEADER_RE.match(lines[i].strip())
+        if not m:
+            i += 1
+            continue
+        label = (m.group("name") or "").strip(" -–—:") or lines[i].strip()
+        # The transcript lives on the indented continuation lines beneath the
+        # box, so the block is the header plus every indented non-blank line
+        # that follows it.
+        block = [lines[i]]
+        j = i + 1
+        while j < len(lines) and lines[j].strip() and lines[j][:1].isspace():
+            block.append(lines[j])
+            j += 1
+        text = "\n".join(block)
+
+        if MUTATION_EXEMPTION_RE.search(text):
+            findings.append(
+                f"MUTATION EXEMPTION: '{label}' claims the mutation check does "
+                f"not apply. There is no exemption. A browser test over a "
+                f"bundled function is still mutable: remove the line, rebuild, "
+                f"re-run, restore, rebuild. Replace this with an actual "
+                f"transcript (ran / mutated / restored, each with its result)."
+            )
+        else:
+            missing = []
+            if not MUTATION_RUNNER_RE.search(text):
+                missing.append("a runner invocation (pytest, node --test, npm test)")
+            if not MUTATION_GREEN_RE.search(text):
+                missing.append("an unmutated pass count (e.g. `1 passed`)")
+            if not MUTATION_RED_RE.search(text):
+                missing.append("a mutated failure count (e.g. `1 failed`)")
+            if missing:
+                findings.append(
+                    f"MUTATION CLAIM NOT EVIDENCED: '{label}' states an outcome "
+                    f"without showing one. Missing {', and '.join(missing)}. "
+                    f"Run the test, apply the mutation, run it again, and paste "
+                    f"both observed results under the box."
+                )
+        i = j
+    return findings
+
+
 def main():
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -306,9 +396,11 @@ def main():
     if not args.skip_build_check:
         findings += check_build_freshness(args.repo_root)
     findings += check_citations(args.repo_root, args.self_audit_path)
+    findings += check_mutation_transcripts(args.self_audit_path)
 
     if not findings:
-        print("OK: no stale builds, no suspect line citations.")
+        print("OK: no stale builds, no suspect line citations, "
+              "every mutation check evidenced.")
         return 0
 
     blocking = [f for f in findings if not f.startswith("WEAK CITATION")]
