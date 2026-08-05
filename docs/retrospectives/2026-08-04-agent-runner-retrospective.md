@@ -925,6 +925,74 @@ import-safe regardless of filename, but it means restructuring four working
 diagnostic scripts, and the rename plus the two guards already close the
 reported problem.
 
+### 8.2 Second incident, same night: the main checkout moved off master
+
+At 21:57:45, 39 minutes after Tier 1 merged, a session working issue #109 ran
+`git checkout worktree-issue-109-voiceid-fallback` inside the main checkout
+instead of creating a worktree. From `git reflog`:
+
+```
+21:06:37  merge origin/master: Fast-forward   -> 9ea9bcb  (#338)
+21:18:30  merge origin/master: Fast-forward   -> ba03268  (#339)
+21:57:45  checkout: moving from master to worktree-issue-109-voiceid-fallback
+```
+
+That branch forked from `9169f16` (#334), so it predates #332, #338 and #339.
+The working tree therefore showed a state with no `docs/retrospectives/`, and
+this report appeared to have been deleted hours after it was committed. Four
+files vanished from disk: this report, `tests/test_script_naming.py`,
+`tests/test_verify_self_audit.py`, and `.omo/issue-runner-prompt.md`.
+
+Nothing was lost. `master` was still `ba03268` and `origin/master` had moved to
+`85eb576`, both containing everything. Three of the four files return on
+switching back. The fourth was the real casualty and the cause is worth
+recording: `.omo/issue-runner-prompt.md` vanished *because* row 6 had just made
+it tracked. While untracked it was machine-local and no checkout could touch
+it; tracked, a checkout to any pre-#338 branch deletes it. It was restored from
+`master`, and a copy now sits outside the repo at
+`~/.config/opencode/prompts/whisperdesk-issue-runner-prompt.backup.md`. The
+hazard resolves itself once the open branches are rebased past #338.
+
+**This was the second occurrence.** The first corrupted the main checkout's
+working tree for two days without being noticed. A written rule had existed
+since then and did not hold, which is the whole argument for mechanical
+enforcement over another paragraph.
+
+Why nothing caught it:
+
+- Both runner prompts govern where file *writes* go, not where `git checkout`
+  may be run.
+- The Claude prompt mandates `EnterWorktree`, but only binds sessions that
+  invoked `/issue-claude`. This was an ad-hoc session.
+- Phase 3.5's existing gate checks the wrong property. It asserts the main
+  checkout is *clean*, which catches a stray edit, but says nothing about which
+  *branch* it is on.
+
+Five guards added in response:
+
+1. `.githooks/post-checkout` warns the instant the main checkout leaves master,
+   naming the branch and printing the recovery commands. Git has no
+   pre-checkout hook so it cannot block, but it turns two days into two
+   seconds. Installed with `git config core.hooksPath .githooks`.
+2. `check_main_checkout()` in `verify_self_audit.py` reports
+   `MAIN CHECKOUT ON WRONG BRANCH` and `MAIN CHECKOUT DIRTY` as blocking
+   findings.
+3. Phase 3.5 in both prompts now checks the branch as well as cleanliness.
+4. Both prompts forbid `git checkout` in `<MAIN>` outright, in the two-path-roots
+   section where the related rules already live.
+5. `CLAUDE.md` and `AGENTS.md` carry the rule, because those bind every session
+   in the repo rather than only runner ones. That is the layer that would have
+   caught this one.
+
+A sixth thing surfaced while fixing it, and it is the same finding as 2.6b from
+the other direction: `EnterWorktree` based the new worktree for this very work
+on `f908f3d`, the issue #109 branch that happened to be checked out in the main
+checkout, rather than on `origin/master`. The verify-the-base rule added in row
+1 caught it immediately. Worth noting that the rule earned its keep within
+hours of being written, and that `EnterWorktree`'s base is whatever the main
+checkout is showing, which is a second reason the main checkout must stay on
+master.
+
 ### Caveats
 
 - Rows 5, 7 and 8 changed files under `~/.config/opencode/`, which is outside

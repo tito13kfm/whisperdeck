@@ -1,0 +1,59 @@
+#!/bin/sh
+# Warn loudly when the MAIN checkout leaves master.
+#
+# Every branch in this repo is supposed to live in a worktree under
+# .claude/worktrees/, with the main checkout parked on master. Twice now a
+# session has run a plain `git checkout <branch>` in the main checkout instead.
+# The first time it went unnoticed for two days. The second time it made a
+# just-merged docs/ file and the tracked .omo/issue-runner-prompt.md vanish from
+# disk, which reads exactly like data loss even though nothing was lost.
+#
+# Git has no pre-checkout hook, so this cannot block the switch. It can make it
+# impossible to miss, which is the difference between noticing in seconds and
+# noticing in days.
+#
+# Install (once per clone, config is shared with every worktree):
+#     git config core.hooksPath .githooks
+#
+# Args: $1 = previous HEAD, $2 = new HEAD, $3 = 1 for a branch checkout.
+
+[ "$3" = "1" ] || exit 0
+
+git_dir=$(git rev-parse --absolute-git-dir 2>/dev/null) || exit 0
+common_dir=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || exit 0
+
+# A linked worktree's gitdir is <repo>/.git/worktrees/<name>; the main
+# checkout's is <repo>/.git, identical to the common dir. Worktrees are
+# SUPPOSED to sit on feature branches, so only the main checkout is checked.
+[ "$git_dir" = "$common_dir" ] || exit 0
+
+current=$(git symbolic-ref --quiet --short HEAD 2>/dev/null) || current="a detached HEAD"
+[ "$current" = "master" ] && exit 0
+
+main_root=$(dirname "$common_dir")
+
+cat >&2 <<BANNER
+
+  ##################################################################
+  #  STOP: you just moved the MAIN checkout off master.            #
+  ##################################################################
+
+  Main checkout : $main_root
+  Now on        : $current
+
+  Branch work belongs in a worktree, not here. While the main checkout
+  sits on another branch, every file that branch does not have looks
+  deleted, run artifacts under .omo/runs/ point at the wrong tree, and
+  any tracked file added after this branch forked disappears from disk.
+
+  Put it back, then work in a worktree:
+
+      git -C "$main_root" checkout master
+      git -C "$main_root" worktree add .claude/worktrees/<name> -b <name> origin/master
+
+  Nothing is lost either way. Your commits and branches are untouched;
+  this is only about which tree the main directory is showing.
+
+BANNER
+
+exit 0

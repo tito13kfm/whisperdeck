@@ -174,6 +174,18 @@ API key can be any non-empty string — Lemonade ignores it.
 
 ## Worktree hygiene
 
+**The main checkout `C:/Claude/whisperdesk` stays on `master`. Never run `git checkout`, `git switch`, or `git checkout -b` there.** Every branch lives in a worktree: `git worktree add .claude/worktrees/<name> -b <name> origin/master`. This binds every session, not only issue-runner runs.
+
+Why it matters more than it looks: run artifacts are written to `<main>/.omo/runs/`, so a feature branch checked out in the main checkout hides every file that branch predates and leaves reports describing a tree that is not checked out there. It has happened twice. The second time, a just-merged `docs/` file and the tracked `.omo/issue-runner-prompt.md` vanished from disk, which reads exactly like data loss; nothing was lost, but the first instance went unnoticed for two days.
+
+Three guards now exist, in increasing order of how hard they are to ignore:
+
+1. `.githooks/post-checkout` prints a loud warning the moment the main checkout leaves master. Install once per clone with `git config core.hooksPath .githooks` (shared across all worktrees).
+2. `scripts/verify_self_audit.py` reports `MAIN CHECKOUT ON WRONG BRANCH` and `MAIN CHECKOUT DIRTY` as blocking findings.
+3. Phase 3.5 of the issue-runner prompt requires both checks before opening a PR.
+
+If you find the main checkout already on another branch, do not switch it back blind. Another session may have uncommitted work there; run `git -C <main> status` first and report what you found.
+
 Remove merged or abandoned worktrees and their branches immediately, no exceptions. A worktree is stale once its branch is fully merged (PR state MERGED, or `git merge-base --is-ancestor <branch-sha> origin/<base>` succeeds) or the user says the work is abandoned. Do not leave it "just in case" — clean up in the same session you notice it:
 
 ```
