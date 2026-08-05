@@ -747,6 +747,7 @@ async def run_llm_job(SessionLocal, job_id: int, transcription_service, diarizat
                 db.refresh(job)
                 if job.status == "cancelled":
                     return
+                outcome = None
                 try:
                     clip_path = await extract_clips_concat(
                         transcript.audio_path, [{"start": seg["start"], "end": seg["end"]}],
@@ -768,6 +769,12 @@ async def run_llm_job(SessionLocal, job_id: int, transcription_service, diarizat
                             os.remove(clip_path)
                         except OSError:
                             pass
+                except Exception:
+                    skipped += 1
+                # Read the outcome outside the try above on purpose: a missing key
+                # would be a bug in identify_detailed, not a per-segment extraction
+                # failure, and absorbing it into `skipped` would report it as one.
+                if outcome is not None:
                     matches = outcome["matches"]
                     if outcome["degraded"]:
                         degraded += 1
@@ -776,8 +783,6 @@ async def run_llm_job(SessionLocal, job_id: int, transcription_service, diarizat
                     if matches:
                         changed.append((i, seg.get("speaker") or ""))
                         new_segments[i] = {**seg, "speaker": matches[0]["name"]}
-                except Exception:
-                    skipped += 1
                 job.progress_done = i + 1
                 db.commit()
             # The loop guard can't catch a cancel that lands during the final
