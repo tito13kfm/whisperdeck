@@ -747,6 +747,20 @@ Ranked by how many runs the problem hit, times what it cost, divided by how hard
 
 ### Tier 2, worth doing: real value, a bit more work
 
+> **STATUS, 2026-08-05.** Rows 9, 10, 12 (the naming rule half), 13, 15, 16,
+> 17 and 18 are implemented on branch `worktree-tier2-runner-tooling`. Rows 11,
+> 14 and 12's checker half are held for a second change, because each has a
+> prompt half and a checker half that guarantee each other: shipping the prompt
+> first would make it assert a check that does not exist yet, which is finding
+> 2.6b's exact shape, and shipping the checker first would meet the next run
+> with a blocking gate it was never told about. Row 19 is machine-local. **Row
+> 20 needs no work: `audit-pr-body.md:262` already emits `Reviewer slug:
+> <your-slug>`, picked up when Tier 1 row 7 rewrote the verdict template.**
+> **Row 16 is half of what it says:** Tier 1 row 4 already removed the
+> one-call `codegraph_explore` cap and every mention of a budget from
+> AGENTS.md, so only the truncation fallback remained to write, and it went to
+> AGENTS.md alone since neither runner prompt mentions the tool.
+
 | # | Change | Surface | Evidence |
 |---|---|---|---|
 | 9 | Require self-audit citations to be written or re-verified against the final PR head, after any rebase. | OC, CC | 4.13. Two escapes, three nits. Contested severity across three reviewers, which is itself an argument for removing the ambiguity. |
@@ -778,7 +792,10 @@ Ranked by how many runs the problem hit, times what it cost, divided by how hard
 - Raw `.log` and `.err.log` session files were read only where a report pointed at something needing the actual call sequence, per the agreed scope. There are roughly fifteen from this window that were not read, and they are the only place a run's real tool-call order survives.
 - For category A runs, no claim of the form "the prompt said X and the run ignored it" can be proven, because the prompt has no history (2.1). Every such statement in this document is made against the prompt's current text and is flagged where it matters, most sharply in 3.1.
 - `issue-132` (the Playwright MCP-versus-CLI verification test) was catalogued but not analyzed, since it belongs to no runner.
-- Tier 2 and Tier 3 (rows 9 to 26) are untouched.
+- Tier 2 and Tier 3 (rows 9 to 26) were untouched when this section was
+  written. Tier 2 was taken up on 2026-08-05; see the status note above its
+  table. Tier 3 (rows 21 to 26) is still open, and every row there is a
+  decision rather than an edit.
 
 ---
 

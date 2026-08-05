@@ -108,16 +108,30 @@ was missing the merged PR its entire task depended on. A second run found
 the main checkout's local `master` four commits behind `origin/master` at
 start, and paid for a mid-run rebase plus a full re-run of the suite.
 
-**Two path roots exist for the rest of this run — never cross them:**
-- **Your worktree** (your session's cwd after `EnterWorktree`) — every
+**Confirm both roots exist before writing anything.** Run `git worktree
+list` and check for two entries: yours (the new one carrying your branch
+name) and the main checkout (the entry with no branch suffix). Write both
+paths into `investigation.md`. This is the check that catches a
+path-crossing mistake at the point it is still cheap.
+
+**Two path roots exist for the rest of this run, never cross them:**
+- **Your worktree** (your session's cwd after `EnterWorktree`): every
   Phase 2 `Edit`/`Write` code change goes here.
-- **The main repo checkout** (`<MAIN>`, an absolute path, never your cwd)
-  — every run-artifact write (`investigation.md`,
+- **The main repo checkout** (`<MAIN>`, an absolute path, never your cwd):
+  every run-artifact write (`investigation.md`,
   `self-audit.md`, `wrong-directions.md`, `token-usage.md`, and the
   `verify_self_audit.py` invocation) goes here, at
   `.omo/runs/issue-<N>/<your-branch-name>/`, not the bare
   `.omo/runs/issue-<N>/` path (shared across every run on this issue
   number, collides with a parallel run's files).
+
+**`<your-branch-name>` is the branch name, exactly.** Not an abbreviation,
+not the issue number, not a model nickname. The report subdirectory name
+and the worktree directory name both match the branch, because
+`verify_self_audit.py` resolves your worktree by matching that directory
+name against `git worktree list`. Seven different naming patterns have
+been used for the same workflow, and one report directory was the bare
+word `sisyphus`, which matches every branch containing it.
 
 If you're ever unsure which root a path belongs to: code changes go where
 your cwd already is; report writes go to the absolute main-repo path
@@ -157,6 +171,10 @@ commands above are correct before and after `EnterWorktree`.
 **Infra notes:**
 - Never background a long-running process with a bare `&`. Use the `Bash`
   tool's own `run_in_background` parameter instead.
+- **No LSP in the worktree.** The IDE/LSP server is attached to the main
+  checkout only, so it has no diagnostics and no test-running for files
+  that live only in your worktree. Don't wait on it, and don't treat "LSP
+  not running" as a blocker. Run tests directly from the worktree path.
 - Fresh worktrees have no `node_modules` (gitignored). For any build step
   (`npm run build`, esbuild), use the main checkout's installed binaries:
   `npx esbuild ...` from the main repo path, or its `node_modules/.bin/`.
@@ -238,6 +256,15 @@ prompt instructing it to:
    Include real file/function names and line numbers, the full list of
    call sites/entry points in scope, the sibling-sweep result, and what
    (if anything) the issue's own suggested approach gets wrong or misses.
+
+**Require absence claims as command plus output, never as a conclusion.**
+Put this in the dispatch prompt verbatim: any statement that something does
+not exist (no such directory, no such test, no other caller, no existing
+handler) must be written as the command that was run and the output it
+returned, not as a sentence asserting the absence. A run's investigator
+reported "no `tests/e2e` directory exists in the repo at all." It does, and
+acting on that would have shipped a UI change with its browser tier
+untested. A conclusion cannot be checked; a command and its output can.
 
 Quote the issue's literal spec values verbatim in the dispatch prompt (see
 Delegation mechanics). After `investigation.md` comes back, create a
@@ -381,14 +408,33 @@ include it verbatim (backticked) in the `<item>` text.
 `python scripts/verify_self_audit.py .omo/runs/issue-<N>/<branch>/self-audit.md`
 (run from the main repo checkout). It rebuilds any `esbuild`-declared
 bundle and byte-diffs it against the committed output, and checks every
-`file:line` citation for a literal identifier match nearby. If it reports
-a stale build unrelated to any file you touched, that's a pre-existing
-condition, not something this task introduced — note it in
-`wrong-directions.md` rather than fixing it as part of this issue's scope.
+`file:line` citation for a literal identifier match nearby.
+
+**A stale-build finding needs a diagnosis before you may call it
+out-of-scope.** The old rule let any unrelated stale-build report be
+labelled a pre-existing condition and waved into `wrong-directions.md`.
+That rule was written when the checker produced false positives on every
+sourcemap build; both root causes were fixed in PR #332, so the check is
+now trustworthy and the blanket excuse is not. Before applying the label,
+write one line naming which artifact is stale, why nothing in your diff
+could have caused it, and whether it reproduces against a clean
+`origin/master` checkout. If it does reproduce there, it is pre-existing
+and belongs in `wrong-directions.md`. If it does not, it is yours. A run
+published a wrong "pre-existing on origin/master" call under the old
+wording and had to retract it.
 
 **Only mark `[x]` after re-confirming the artifact actually exists** —
 open the file and check the test/route/page is really there, don't mark
 from memory of what you intended to do.
+
+**Citations are verified against the branch's final head, not against the
+tree you wrote them on.** If you rebase, amend, or force-push after
+writing `self-audit.md`, every `file:line` in it is suspect: re-open each
+one at the new head and re-run `verify_self_audit.py` before Phase 4. Line
+drift after a rebase is the second most common self-audit escape in this
+repo, and three independent reviewers read the same instance three
+different ways (a false claim, harmless stale offsets, and normal for a
+hot branch). Re-verifying removes the argument instead of settling it.
 
 **Disclose any threshold or edge-case decision the issue didn't ask for.**
 Narrowing scope silently is the same class of self-report failure as
@@ -426,9 +472,55 @@ that and the PR.
 Restore the mutation before moving on, and confirm with `git diff` that only
 your intended change remains.
 
+If the observed result is that the test still passes under the mutation, or
+passes only because test setup side-effects produce the same state, the test
+is vacuous for that function: fix the test before checking any test-related
+box. Watch for assertions that read through a proxy. On an external-content
+FTS5 table, `SELECT COUNT(*)` counts the content table, not the index, so
+assert against the real artifact (`_docsize` rows, MATCH results) rather
+than a lookalike. Confirmed on PR #205, where both original tests passed
+while the function under them was a no-op.
+
+**Six checks that honest boxes still miss.** Every one of these escaped a
+self-audit that a reviewer then scored as fully honest, no false `[x]`
+found. They are not honesty failures, they are checks the list never asked
+for, so stronger language about existing items cannot reach them. Add a
+line for each that applies:
+
+- **Value-space exhaustiveness.** Enumerate the values that can actually
+  arrive at the code you changed (every status string, every enum member,
+  every exception type a call can raise) and confirm each has a correct
+  path. One run shipped a counter that treated cancelled as completed while
+  keying on `"processing"` when the real value was `"running"`, so the live
+  count could never appear. Another claimed all error paths returned the
+  original audio while `OSError` went uncaught.
+- **Boundary cardinality.** Exercise each criterion at a collection of one
+  and against the endpoint's own pagination limit. A one-item batch got no
+  header, which made every batch-level action unreachable, and grouping
+  computed after `?limit=50` could split a batch silently.
+- **Delivery chain to what the browser executes.** For any frontend change,
+  trace source to bundle to what the served page actually runs, including
+  the service worker's cache. Proving the committed bundle matches a fresh
+  build is true and one hop short.
+- **`done == total` on progress counters.** Pair the two ends. A counter
+  reasoned about only through its `total` reported 2/3 on a two-span job
+  right up to completion.
+- **Every deferral matched against the issue text.** Disclosure is not
+  discharge. A stub blessed in self-audit as a correct deferral was
+  required behavior in the issue body, so the deferral was never the
+  author's to make.
+- **A suite count tied to the invocation that produced it.** If you report
+  a number as the full suite, it must come from an unfiltered run. One run
+  labelled 101 targeted tests "Full test suite" when the repository suite
+  was 760.
+
 **A `[x]` that turns out false on review is a serious self-report
-violation, worse than an honest `[ ]`.** Run the FULL test suite (not just
-the new test file you wrote) before checking any test-related box.
+violation, worse than an honest `[ ]`.** You may still ship with open
+`[ ]` items if you have a real reason (time, scope, deliberately
+deferred). That is fine, just don't hide it: an honest not-done costs
+nothing, and a false done costs the reviewer's trust in every other line.
+Run the FULL test suite (not just the new test file you wrote) before
+checking any test-related box.
 
 **Before Phase 4, verify the main repo checkout is on master and clean:**
 
@@ -451,6 +543,29 @@ mistaken for a full review.
 `investigation.md`, `self-audit.md`, `wrong-directions.md`,
 `token-usage.md`.
 
+**When executing a pre-written plan** (a plan file handed to you directly,
+under `docs/plans/` or `.omo/plans/`, instead of your own Phase 1
+investigation), the same standard applies to the plan's own requirements,
+not only to code correctness:
+
+- If a task specifies an evidence path, that file must exist on disk
+  before you check that task's box. A task whose code works but produced
+  no evidence file is a `[ ]`, not a `[x]`: write the evidence file or
+  mark it honestly deferred.
+- If a task's acceptance criteria or QA scenario names a specific expected
+  value, the test asserting it must check that exact value (`==`, not
+  `in (...)`). Same trap as Phase 3's exact-value rule, harder to spot on
+  a diff read because the test stays green either way.
+- If the plan specifies a commit count, or one commit per task, check
+  `git log --oneline <base>..HEAD` against the plan's own count before
+  opening the PR. Collapsing commits is not automatically wrong, but
+  shipping fewer than specified with a design-level fix buried inside a
+  differently-titled commit is exactly what this checklist exists to
+  catch. Disclose it rather than letting the diff speak for itself.
+- A manual-verification item needs its own evidence note (what you did,
+  what you saw) before you can check it. "I'll verify this at the end"
+  with no circling back is a skipped gate, not a passed one.
+
 ## Phase 4: PR
 
 Open against `master`, `Closes #<N>` in the body (the real target issue
@@ -469,10 +584,15 @@ Use `.omo/runs/issue-<N>/<your-branch-name>/` (main repo absolute path):
 - `wrong-directions.md` — the moment any instruction (the issue text,
   this prompt, AGENTS.md, a skill file) turns out wrong when you actually
   execute on it, write the discrepancy here immediately with your
-  recommended fix.
+  recommended fix. Before logging something as wrong, re-check it against
+  the live config or the current doc. Don't assume a past run's finding
+  still holds, and don't read a failed tool call as proof the thing does
+  not exist. A stale finding recorded as fresh propagates into the next
+  retrospective as if it were current.
 - `token-usage.md` — list every `Agent()` call this run made, and which
   model backed each one (Sonnet, Haiku, Fable) — name the model, not "an
-  investigate agent."
+  investigate agent." Cross-check the list against the session's own cost
+  data: a mismatch is a transparency gap, not a rounding error.
 
 Report back to the user: which issue you actually targeted (Phase 0), the
 PR link, and pointers to all four `.omo/runs/issue-<N>/<your-branch-name>/*.md`
