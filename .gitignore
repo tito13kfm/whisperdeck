@@ -44,8 +44,16 @@ unsloth_compiled_cache/
 .audit-worktrees/
 
 # oh-my-openagent (OpenCode) runtime state: session-continuation blobs and
-# working plan docs, machine-local like .opencode/ above
-.omo/
+# working plan docs, machine-local like .opencode/ above.
+# Exception: the issue-runner prompt is tracked. It drives most of the agent
+# runs on this repo and used to have no history at all, so a bad edit could
+# not be reverted or bisected, changes never passed review, and a fresh clone
+# didn't have it while its Claude Code counterpart shipped with the repo.
+# Everything else under .omo/ (runs/, plans/, drafts/, session state) stays
+# local. Trailing /* rather than / so git descends far enough to see the
+# negation below.
+.omo/*
+!.omo/issue-runner-prompt.md
 
 # task-observer tool output, retiring, never produced a skill
 skill-observations/

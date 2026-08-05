@@ -197,3 +197,99 @@ def test_node_bin_dirs_skips_dirs_that_do_not_exist(tmp_path):
     bare.mkdir()
     subprocess.run(["git", "init", "-q"], cwd=str(bare), check=True)
     assert verify_self_audit.node_bin_dirs(bare) == []
+
+
+# --- mutation-check evidence ------------------------------------------------
+# A mutation-check box used to be a sentence, and a sentence can be written
+# without running anything. These cover the four real shapes that shipped.
+
+def _audit(tmp_path, body):
+    p = tmp_path / "self-audit.md"
+    p.write_text(body, encoding="utf-8")
+    return p
+
+
+def test_mutation_transcript_accepts_an_observed_run(tmp_path):
+    """The shape both prompts now require: a runner, a green count, a red count."""
+    findings = verify_self_audit.check_mutation_transcripts(_audit(tmp_path, """
+[x] `test_voice_match_skips_cancelled` — mutation check:
+    ran: .venv/Scripts/python.exe -m pytest tests/test_voice_match_job.py -q  ->  3 passed
+    mutated: `_match_speakers` body -> `return None`; reran  ->  1 failed, 2 passed
+    restored: reran  ->  3 passed
+"""))
+    assert findings == []
+
+
+def test_mutation_claim_without_evidence_is_blocking(tmp_path):
+    """The old format. It asserts the outcome instead of showing it, which is
+    exactly how four runs shipped a mutation that had never been applied."""
+    findings = verify_self_audit.check_mutation_transcripts(_audit(tmp_path, """
+[x] test_populate_fts_backfills — mutation check: fails with function body replaced by return (or None/False/0/[] of declared return type)? yes
+"""))
+    assert len(findings) == 1
+    assert findings[0].startswith("MUTATION CLAIM NOT EVIDENCED")
+    assert "runner invocation" in findings[0]
+    assert "pass count" in findings[0]
+    assert "failure count" in findings[0]
+
+
+def test_mutation_na_exemption_is_rejected(tmp_path):
+    """Issue #246's box, verbatim in shape. The test it exempted failed 100% of
+    the time and had only ever been `node -c` syntax-checked, so this `N/A` was
+    the last thing standing between a permanently-red test and the PR."""
+    findings = verify_self_audit.check_mutation_transcripts(_audit(tmp_path, """
+[x] test_detail_poll_tagging_fingerprint_changes — mutation check: N/A (e2e browser test, not a unit test with replaceable function body)
+"""))
+    assert len(findings) == 1
+    assert findings[0].startswith("MUTATION EXEMPTION")
+
+
+def test_mutation_green_only_is_blocking(tmp_path):
+    """Running the test proves it passes; it does not prove it can fail. A box
+    showing only a green run is the vacuous case (#205, #120) still getting
+    through."""
+    findings = verify_self_audit.check_mutation_transcripts(_audit(tmp_path, """
+[x] test_thing — mutation check:
+    ran: pytest tests/test_thing.py -q  ->  1 passed
+"""))
+    assert len(findings) == 1
+    assert findings[0].startswith("MUTATION CLAIM NOT EVIDENCED")
+    assert "failure count" in findings[0]
+    # The parts it did supply must not be reported as missing.
+    assert "runner invocation" not in findings[0]
+    assert "pass count" not in findings[0].split("Missing", 1)[1].split("failure count")[0]
+
+
+def test_unchecked_mutation_box_is_left_alone(tmp_path):
+    """An honest `[ ]` is explicitly allowed to ship. Only `[x]` claims are
+    checked, so this must not fire."""
+    assert verify_self_audit.check_mutation_transcripts(_audit(tmp_path, """
+[ ] test_thing — mutation check: NOT delivered, ran out of time
+""")) == []
+
+
+def test_multiple_mutation_boxes_are_scored_independently(tmp_path):
+    """Blocks are delimited by indentation, so an evidenced box must not absorb
+    the following unevidenced one (or vice versa)."""
+    findings = verify_self_audit.check_mutation_transcripts(_audit(tmp_path, """
+[x] test_good — mutation check:
+    ran: pytest tests/a.py -q  ->  2 passed
+    mutated: `f` -> `return None`; reran  ->  1 failed
+[x] test_bad — mutation check: yes, it fails under mutation
+[x] test_also_bad — mutation check: N/A
+"""))
+    assert len(findings) == 2
+    assert findings[0].startswith("MUTATION CLAIM NOT EVIDENCED")
+    assert "test_bad" in findings[0]
+    assert findings[1].startswith("MUTATION EXEMPTION")
+    assert "test_also_bad" in findings[1]
+
+
+def test_bulleted_mutation_box_is_recognized(tmp_path):
+    """Real self-audits write `- [x] ...` as often as `[x] ...`; the bullet must
+    not make the box invisible to the check."""
+    findings = verify_self_audit.check_mutation_transcripts(_audit(tmp_path, """
+- [x] test_thing — mutation check: fails when the body returns None? yes
+"""))
+    assert len(findings) == 1
+    assert findings[0].startswith("MUTATION CLAIM NOT EVIDENCED")

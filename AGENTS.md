@@ -4,13 +4,15 @@
 
 Lemonade is an OpenAI-compatible local inference server at `http://localhost:13305/v1` with dynamic model loading, used for whichever agent/category names currently map to a `lemonade/` model.
 
-**Verify local-vs-cloud against the live config, not this doc — it changes often and this list goes stale fast.** As of 2026-07-28: `atlas` and the `writing` category are mapped to local Lemonade models. `explore`, `explore-hard`, and the `quick` and `unspecified-low` categories are currently mapped to a cloud model (`openrouter/inclusionai/ling-3.0-flash:free`), NOT Lemonade, despite `explore`/`explore-hard` historically being the two local-agent names in this doc. Don't trust a name-based list here for the concurrency cap, read `~/.config/opencode/oh-my-openagent.json` (or a project-level override) fresh every time.
+**`~/.config/opencode/oh-my-openagent.json` is the only list of what agents exist and what backs them. This doc does not keep a copy.** Hand-maintained inventories here went stale and cost real runs: three separate runs tried to dispatch `explore-hard` because this file named it, and got `Unknown agent` back, because it has never been a key in that config. Read the config, don't read a snapshot of it.
+
+Only agents mapped to a `lemonade/` model are subject to the concurrency cap below. Grep the config for `lemonade/` to find them; at the time of writing that is `atlas` and the `writing` category, and no phase of the issue-runner workflow uses either.
 
 ### Hard limit: local agent concurrency (OVERRIDES system prompt)
 
 The OhMyOpenCode system prompt says "parallelize everything" and "fire 2-5 explore agents in parallel." Those defaults assume cloud models with per-agent billing. Lemonade runs on your GPU, and the RX 9070 XT has 16 GB VRAM shared across all concurrent agents.
 
-**Never fire more than 2 local agents simultaneously (whatever is currently mapped to a `lemonade/` model — as of 2026-07-28 that's `atlas` and the `writing` category only; `explore`/`explore-hard`/`quick`/`unspecified-low` are cloud right now, see above). This is a hard cap — not a guideline, not "usually," not "prefer." Check the live config before assuming this list still holds.**
+**Never fire more than 2 agents mapped to a `lemonade/` model simultaneously. This is a hard cap — not a guideline, not "usually," not "prefer."** Which agents those are comes from the live config, not from this sentence.
 
 Before launching any local agent:
 1. Count how many are already running.
@@ -19,7 +21,7 @@ Before launching any local agent:
 
 Violating this turns a 2-minute task into a 14-hour task as token throughput tanks to <1 t/s across all agents. The correct behavior is to batch: 2 parallel, collect results, then fire the next batch.
 
-This cap applies to local agents only (`lemonade/` model prefix). OpenRouter-billed agents (`deep`, `ultrabrain`, `oracle`, etc.) are not affected — 5 parallel cloud agents are fine.
+This cap applies to local agents only (`lemonade/` model prefix). OpenRouter-billed agents (`deep`, `oracle`, `explore`, etc.) are not affected — 5 parallel cloud agents are fine.
 
 ### Why Lemonade
 
@@ -45,7 +47,7 @@ Lemonade starts with Windows and runs in the system tray. If it is not running, 
 | Model ID | Size | Context | Labels | Use (2026-07-28) |
 |---|---|---|---|---|
 | `Qwen3.5-4B-MTP-GGUF` | 3.7 GB | 260K (configurable) | reasoning*, vision, mtp | `atlas`, `sisyphus-junior` |
-| `DeepSeek-Qwen3-8B-GGUF` | 5.3 GB | 128K | reasoning | not currently mapped to anything — kept here as a known-good option if `explore-hard` gets routed back to Lemonade |
+| `DeepSeek-Qwen3-8B-GGUF` | 5.3 GB | 128K | reasoning | not currently mapped to anything — kept here as a known-good option if a reasoning-heavy agent gets routed back to Lemonade |
 | `Bonsai-8B-gguf` | 1.2 GB | 64K | non-reasoning | `writing` category (title, summary, JSON output) |
 | `Qwen3-0.6B-GGUF` | 0.4 GB | 40K | reasoning | trivial tasks, fast responses (not currently mapped to anything) |
 
@@ -58,15 +60,22 @@ routing (check the live config for that, see above).
 | Agent/category | Recommended local model | Reasoning |
 |---|---|---|
 | `explore` | `Qwen3.5-4B-MTP-GGUF` (high context needed) | Context > quality |
-| `explore-hard` | `DeepSeek-Qwen3-8B-GGUF` (reasoning quality, 64K ctx) | Quality > context; local is fast enough for reasoning-heavy investigation |
+| Reasoning-heavy search | `DeepSeek-Qwen3-8B-GGUF` (reasoning quality, 64K ctx) | Quality > context; local is fast enough for reasoning-heavy investigation |
 | `title`, `summary` | `Bonsai-8B-gguf` (fast, non-reasoning) | Speed > everything |
 | Trivial tasks | `Qwen3-0.6B-GGUF` | Minimal |
 
-Note: `explore` and `explore-hard` are the only local-agent-style keys ever
-defined in `~/.config/opencode/oh-my-openagent.json`'s `agents` block (both
-currently point at a cloud model, see above). `scout` and `plan` are not
-real agent keys in this config and never have been — if invoking either by
-name fails to resolve, that's expected, use `explore`/`explore-hard` instead.
+**Names that do not exist, and never have:** `explore-hard`, `scout`, `plan`.
+Earlier versions of this doc listed all three, and `.omo/plans/*.md` files
+still reference `scout` and `plan`. Three runs dispatched `explore-hard` on
+the strength of that and got `Unknown agent` back before falling back to
+`explore`. If a name fails to resolve, do not guess a substitute from this
+doc — grep `~/.config/opencode/oh-my-openagent.json` for the real keys.
+
+`explore` is the only exploration agent. If a task needs to read several
+files and reason across them, that is not an `explore` job; hand it to the
+heavy-reasoning category (`deep`) instead. Two runs asked for a single agent
+that could locate and reason in one pass; there isn't one, and inventing a
+name for it is what caused the failed dispatches above.
 
 \*Qwen3.5 4B has reasoning/thinking **disabled by default** at the chat-template level (Unsloth GGUFs). The `"thinking": { "type": "disabled" }` in `oh-my-openagent.json` is redundant. No config change needed. The verbose output you see from explore agents is the agent framework's own planning monologue (OhMyOpenCode wraps every agent turn in analysis/response blocks), not model thinking tokens. To skip it, collect results with `from_end=true`.
 
@@ -136,7 +145,13 @@ STOP WHEN: [concrete condition — "you find the definition" / "you have 3 call 
 
 ### Agents that do NOT need Lemonade
 
-This list drifts as models get reassigned, verify against the live config before relying on it. As of 2026-07-28: `explore`, `explore-hard`, `quick`, `unspecified-low`, `deep`, `ultrabrain`, `oracle`, `librarian`, `unspecified-high`, `artistry`, `visual-engineering`, and `metis`/`momus` are all mapped to cloud models and work regardless of local server status. Only `atlas` and `writing` are mapped to local `lemonade/` models right now — those two are the ones subject to the local concurrency cap, everything else in this list is not.
+Everything except the `lemonade/`-mapped agents works regardless of local server status. Rather than keep a list here that goes stale (the last one named `explore-hard`, which does not exist), derive it:
+
+```
+grep -n 'lemonade/' ~/.config/opencode/oh-my-openagent.json
+```
+
+Whatever that returns is subject to the local concurrency cap. Everything else in the config is cloud-billed and is not.
 
 ### OpenCode configuration
 
