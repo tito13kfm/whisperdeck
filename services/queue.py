@@ -596,14 +596,14 @@ async def _finalize_if_done(db, transcript_id: int, diarization_service) -> None
     # history yet (first completion), but on a resume/retry re-finalize any
     # entries recorded against the previous segmentation are index-stale —
     # clear them so undo can't stamp old labels onto the new lines.
-    from services.relabel import clear_relabel_history
+    from services.relabel import clear_relabel_history, count_distinct_speakers
     clear_relabel_history(db, transcript.id)
     transcript.segments = segments
     transcript.full_text = full_text
     transcript.duration_seconds = duration_seconds
     transcript.status = new_status
     if speaker_count is not None:
-        transcript.speaker_count = speaker_count
+        transcript.speaker_count = count_distinct_speakers(merged)
         transcript.diarization_method = diarization_method
     transcript.updated_at = utcnow_naive()
     db.commit()
