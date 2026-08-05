@@ -33,7 +33,7 @@ file isn't touched in the same session, that's a bug — fix it before moving on
 
 ## In Progress
 
-_(nothing right now)_
+- **Agent-runner tooling fixes** — `docs/retrospectives/2026-08-04-agent-runner-retrospective.md` reviewed every `/issue`, `/issue-claude` and `/audit-pr` run archived since 2026-07-28 and ranked 26 changes. Tier 1 (8 changes) merged in #338. Tier 2 (12) and Tier 3 (6 open questions, including the browser-verification gap and the non-green e2e baseline) are still open. Section 7 of that doc is the work list.
 
 ## Parked (not designed yet)
 
