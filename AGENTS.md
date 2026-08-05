@@ -100,7 +100,7 @@ Models auto-load on first request and auto-unload when idle. The `pinned` option
 ### Priority order: codegraph → direct read → agents
 
 1. **codegraph_explore first** — returns verbatim line-numbered source + call graph + blast radius in one call. Covers 80-90% of codebase questions. Single round-trip, no context cost.
-2. **Direct read next** — if codegraph doesn't cover what you need and you know the exact file and line range, read it yourself. Faster than spawning an agent.
+2. **Direct read next** — if codegraph doesn't cover what you need and you know the exact file and line range, read it yourself. Faster than spawning an agent. **This is also the fallback when a `codegraph_explore` result truncates.** If the excerpt cuts off at the function you actually need, read that function directly rather than spending a second codegraph call, which will usually truncate the same way. Three runs hit this; one of them chased a gap that had already been closed, because the truncated excerpt showed it a partial function and nothing said the view was incomplete.
 3. **Explore agents last** — for what remains: patterns across many files, "find all X" surveys, or searches codegraph can't answer.
 
 Once you fire an agent, you committed. Do NOT second-guess that decision:
@@ -204,6 +204,13 @@ Don't run full browser-driven e2e audits for every small change; reserve them fo
 3. **Full browser e2e (`e2e-ux-audit`, `e2e-ux-audit-deep`)** — reserve for pre-release checkpoints or after a batch of changes lands, not per-PR. Any change with a runtime/UI surface should drive the affected flow in a targeted manual/scripted check, not the full 6-journey or deep audit suite.
 
 Rule of thumb: a backend fix scoped to one module doesn't need a browser; a UI-visible or cross-cutting change does, but scope the runtime check to the flow that changed, not the whole app.
+
+### The service worker breaks two obvious Playwright approaches
+
+Both of these cost a run real time, and neither is guessable from the test code.
+
+- **`page.route("**/api/...", handler)` silently does nothing.** The handler never fires and the request still reaches the real backend, because the service worker reissues the fetch and route interception never sees the reissued one. Intercept at a layer the worker cannot bypass, or unregister the worker for the test.
+- **Reusing a port serves a stale bundle.** The app's own service worker cache, plus long cache headers, will hand back the previous `rack.min.js` even after a rebuild. Use a fresh port whenever you re-verify a rebuilt bundle, and confirm you are looking at the served bytes rather than the ones on disk.
 
 Mutation check for every new test: the test must fail if the function under test's body were replaced with `return`. A test that only exercises the no-op path, or asserts through a proxy (e.g., `COUNT(*)` on an external-content FTS5 table reads the content table, not the index), proves nothing.
 
