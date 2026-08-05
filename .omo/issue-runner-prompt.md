@@ -51,22 +51,38 @@ ended up targeting and why (tracking-issue resolution or direct).
 **Then check whether the work already landed under a different issue
 number.** The tracking-issue walk above only looks for a merged PR closing
 the target's own number, which misses work that shipped under some other
-number and was never ticked off. Before starting Phase 1:
+number and was never ticked off. Prior work gets recorded in two places, so
+search both before starting Phase 1:
 
     git log --oneline -40
+    gh issue list --state closed --limit 30 --search "<key noun from the title>"
 
-Grep that for the issue's key identifiers (the function, field, endpoint or
-setting it names). If a plausible commit appears, read it before
-investigating anything. If the work is already done, stop and report that
-rather than re-doing it.
+Grep the log for the issue's key identifiers (the function, field, endpoint or
+setting it names), and search closed issues for the issue's *symptom phrasing*,
+not only its identifiers. Neither search subsumes the other: the commit grep
+only fires when the fix commit's subject happens to name the same symbol the
+issue does, which is luck, and a duplicate issue is often worded around the
+symptom with no identifier in common. If a plausible commit or a near-identical
+closed issue turns up, read it before investigating anything.
 
-Confirmed pattern, five runs in one week: #177 investigated two checklist
+**"Already done" is a per-claim verdict, not a per-issue verdict.** When the
+headline defect turns out to be fixed but the body also carries secondary
+notes, a complement-sweep instruction, or an "also noticed nearby" section,
+check each of those separately before closing anything. Report which claims are
+fixed and which are still live, and file the live ones rather than letting them
+close along with the duplicate.
+
+Confirmed pattern, six runs in one week: #177 investigated two checklist
 items already implemented in earlier commits (709359f, 7767782) and produced
 zero code changes; #233 found its spec item was `already done`; #271 found
 both endpoints already converted by #268; #284 found a plan item that would
 have been dead code until #285 landed; #286 nearly re-implemented #285,
-whose checkbox was never ticked despite two merged PRs. This costs one
-command.
+whose checkbox was never ticked despite two merged PRs; #340 was a duplicate
+of #330, whose fix (51c3b1d, PR #331) merged about eight hours before #340 was
+filed, from an investigation branch cut before that merge. #340 was caught by
+the closed-issue search rather than the commit grep, and two of the three
+claims in its body were still live once the headline was ruled a duplicate
+(the complement sweep it asked for turned up #346). This costs two commands.
 
 ## Setup
 
