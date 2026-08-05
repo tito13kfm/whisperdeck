@@ -10,7 +10,7 @@ import numpy as np
 import pytest
 
 from database import User, VoiceProfile, VoiceClip
-from services.voice_id import VoiceIdentificationService, voice_id_service
+from services.voice_id import VoiceIdentificationService, voice_id_service, _MFCC_MODEL_ID
 
 
 def _test_user(db_session):
@@ -833,3 +833,135 @@ def test_get_pyannote_inference_builds_one_instance_when_two_threads_race(tmp_pa
 
     assert calls["instantiated"] == 1
     assert got["main"] is got["worker"]
+
+
+# ── issue #109: the MFCC fallback must never be silent ──
+
+
+def _mfcc_svc(tmp_path):
+    svc = VoiceIdentificationService(voices_dir=str(tmp_path / "voices_mfcc"))
+    svc._backend = "librosa_mfcc"
+    return svc
+
+
+def test_is_degraded_model_depends_on_the_selected_backend(tmp_path):
+    strong = _svc(tmp_path)
+    weak = _mfcc_svc(tmp_path)
+
+    assert strong._is_degraded_model(_MFCC_MODEL_ID) is True
+    assert strong._is_degraded_model("speechbrain/spkrec-ecapa-voxceleb") is False
+    assert weak._is_degraded_model(_MFCC_MODEL_ID) is False
+
+
+def test_degraded_model_warning_only_fires_for_a_real_degradation(tmp_path):
+    strong = _svc(tmp_path)
+    weak = _mfcc_svc(tmp_path)
+
+    warning = strong.degraded_model_warning(_MFCC_MODEL_ID)
+    assert warning is not None
+    assert "MFCC" in warning
+    assert strong.degraded_model_warning("speechbrain/spkrec-ecapa-voxceleb") is None
+    assert weak.degraded_model_warning(_MFCC_MODEL_ID) is None
+    assert strong.degraded_model_warning(None) is None
+
+
+def test_identify_detailed_warns_when_a_fallback_probe_cannot_reach_the_roster(db_session, tmp_path, monkeypatch):
+    user = _test_user(db_session)
+    db_session.add(VoiceProfile(
+        user_id=user.id, name="Alice", embedding=[0.1, 0.2, 0.3],
+        embedding_model="speechbrain/spkrec-ecapa-voxceleb", sample_count=1,
+    ))
+    db_session.commit()
+    svc = _svc(tmp_path)
+    monkeypatch.setattr(svc, "_extract_embedding",
+                        lambda path, hf_token=None: (np.array([0.1, 0.2, 0.3]), _MFCC_MODEL_ID))
+
+    outcome = svc.identify_detailed(db_session, user.id, "fake.wav")
+
+    assert outcome["matches"] == []
+    assert outcome["degraded"] is True
+    assert outcome["compared"] == 0
+    assert outcome["skipped_model_mismatch"] == 1
+    assert "MFCC" in outcome["warning"]
+    assert svc.identify(db_session, user.id, "fake.wav") == []
+
+
+def test_identify_detailed_stays_quiet_on_a_genuine_no_match(db_session, tmp_path, monkeypatch):
+    user = _test_user(db_session)
+    db_session.add(VoiceProfile(
+        user_id=user.id, name="Bob", embedding=[1.0, 0.0, 0.0],
+        embedding_model="speechbrain/spkrec-ecapa-voxceleb", sample_count=1,
+    ))
+    db_session.commit()
+    svc = _svc(tmp_path)
+    monkeypatch.setattr(svc, "_extract_embedding",
+                        lambda path, hf_token=None: (np.array([0.0, 1.0, 0.0]),
+                                                     "speechbrain/spkrec-ecapa-voxceleb"))
+
+    outcome = svc.identify_detailed(db_session, user.id, "fake.wav")
+
+    assert outcome["matches"] == []
+    assert outcome["compared"] == 1
+    assert outcome["skipped_model_mismatch"] == 0
+    assert outcome["degraded"] is False
+    assert outcome["warning"] is None
+
+
+def test_identify_detailed_warns_when_extraction_fails_outright(db_session, tmp_path, monkeypatch):
+    user = _test_user(db_session)
+    svc = _svc(tmp_path)
+    monkeypatch.setattr(svc, "_extract_embedding", lambda path, hf_token=None: None)
+
+    outcome = svc.identify_detailed(db_session, user.id, "fake.wav")
+
+    assert outcome["matches"] == []
+    assert outcome["probe_model"] is None
+    assert outcome["degraded"] is False
+    assert "extraction failed" in outcome["warning"]
+
+
+def test_enroll_rejects_a_degraded_clip_when_the_roster_uses_another_model(db_session, tmp_path, monkeypatch):
+    user = _test_user(db_session)
+    db_session.add(VoiceProfile(
+        user_id=user.id, name="Alice", embedding=[0.1, 0.2, 0.3],
+        embedding_model="speechbrain/spkrec-ecapa-voxceleb", sample_count=1,
+    ))
+    db_session.commit()
+    svc = _svc(tmp_path)
+    monkeypatch.setattr(svc, "_extract_embedding",
+                        lambda path, hf_token=None: (np.array([0.4, 0.5, 0.6]), _MFCC_MODEL_ID))
+
+    with pytest.raises(ValueError, match="MFCC"):
+        svc.enroll(db_session, user.id, name="Bob", audio_path="fake.wav")
+
+    assert db_session.query(VoiceProfile).filter(VoiceProfile.name == "Bob").first() is None
+
+
+def test_enroll_allows_a_fallback_clip_when_the_roster_is_empty(db_session, tmp_path, monkeypatch):
+    user = _test_user(db_session)
+    svc = _svc(tmp_path)
+    monkeypatch.setattr(svc, "_extract_embedding",
+                        lambda path, hf_token=None: (np.array([0.4, 0.5, 0.6]), _MFCC_MODEL_ID))
+
+    profile = svc.enroll(db_session, user.id, name="Solo", audio_path="fake.wav")
+
+    assert profile.embedding_model == _MFCC_MODEL_ID
+    assert profile.sample_count == 1
+
+
+def test_add_clip_rejects_a_degraded_first_clip_on_an_empty_profile(db_session, tmp_path, monkeypatch):
+    user = _test_user(db_session)
+    other = VoiceProfile(user_id=user.id, name="Alice", embedding=[0.1, 0.2, 0.3],
+                         embedding_model="speechbrain/spkrec-ecapa-voxceleb", sample_count=1)
+    target = VoiceProfile(user_id=user.id, name="Bob", embedding=None,
+                          embedding_model=None, sample_count=0)
+    db_session.add_all([other, target])
+    db_session.commit()
+    svc = _svc(tmp_path)
+    monkeypatch.setattr(svc, "_extract_embedding",
+                        lambda path, hf_token=None: (np.array([0.4, 0.5, 0.6]), _MFCC_MODEL_ID))
+
+    with pytest.raises(ValueError, match="MFCC"):
+        svc.add_clip(db_session, target.id, user.id, "fake.wav")
+
+    assert db_session.query(VoiceClip).filter(VoiceClip.voice_profile_id == target.id).count() == 0
