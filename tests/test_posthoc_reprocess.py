@@ -361,7 +361,10 @@ def test_run_llm_job_rediarize_merges_in_place_without_key(db_session, tmp_path)
     job.status = "running"
     db_session.commit()
 
-    merged = [{"start": 0, "end": 1, "text": "a b", "speaker": "SPEAKER_01"}]
+    merged = [
+        {"start": 0, "end": 0.5, "text": "a", "speaker": "SPEAKER_01"},
+        {"start": 0.5, "end": 1, "text": "b", "speaker": "SPEAKER_02"},
+    ]
     fake_diar = AsyncMock()
     fake_diar.diarize_and_merge = AsyncMock(return_value=(merged, 2, "pyannote"))
 

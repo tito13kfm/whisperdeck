@@ -1389,7 +1389,7 @@ async def _run_transcription_pipeline(
                     stereo_audio_path=transcript.stereo_audio_path,
                 )
                 transcript.segments = merged
-                transcript.speaker_count = speaker_count
+                transcript.speaker_count = count_distinct_speakers(merged)
                 transcript.diarization_method = diarization_method
                 db.commit()
             except Exception as e:

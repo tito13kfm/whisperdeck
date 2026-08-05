@@ -675,10 +675,10 @@ async def run_llm_job(SessionLocal, job_id: int, transcription_service, diarizat
                 # stored inverse patch (index-based, recorded against the OLD
                 # segments) is now meaningless — undo would stamp stale labels
                 # onto unrelated lines. Invalidate in the same commit.
-                from services.relabel import clear_relabel_history
+                from services.relabel import clear_relabel_history, count_distinct_speakers
                 clear_relabel_history(db, transcript.id)
                 transcript.segments = merged
-                transcript.speaker_count = speaker_count
+                transcript.speaker_count = count_distinct_speakers(merged)
                 transcript.diarization_method = diarization_method
                 transcript.updated_at = utcnow_naive()
                 job.progress_done = 1
