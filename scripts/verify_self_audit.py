@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Mechanically verify a self-audit.md before it's trusted.
 
-Three deterministic checks, no model calls:
+Four deterministic checks, no model calls:
 
 1. Build freshness: for every esbuild `<src> ... --outfile=<out>` script in
    package.json, rebuild <src> to a temp file and diff it byte-for-byte
@@ -26,6 +26,12 @@ Three deterministic checks, no model calls:
    week shipped a mutation claim that had never been applied, and a fifth
    used `mutation check: N/A` on a test that failed unconditionally and had
    only ever been syntax-checked. Exemptions are rejected outright.
+
+4. Main-checkout hygiene: the main checkout must be on master with nothing
+   but `.omo/runs/` artifacts modified. The prompts already require the clean
+   half; the branch half is new, because a session ran `git checkout <branch>`
+   in the main checkout twice, and run artifacts are written there, so a
+   wrong-branch main checkout files reports against a tree nobody audited.
 
 This does not replace a real review -- keyword overlap is a cheap smoke
 test, not a semantic check -- but it costs no tokens, is exact where it can
@@ -369,6 +375,86 @@ def check_mutation_transcripts(self_audit_path: Path):
     return findings
 
 
+ALLOWED_MAIN_DIRTY_PREFIXES = (".omo/runs/",)
+ALLOWED_MAIN_DIRTY_FILES = ("scheduled_tasks.lock",)
+
+
+def check_main_checkout(self_audit_path: Path):
+    """The main checkout must be parked on master with nothing but run
+    artifacts modified.
+
+    Both prompts already tell a run to confirm `git -C <MAIN> diff --stat`
+    shows only `.omo/runs/` files, and that gate has caught a stray edit
+    landing in the main checkout. It cannot catch the main checkout sitting on
+    the wrong BRANCH, which has now happened twice. The second time, a session
+    ran a plain `git checkout <branch>` in the main checkout instead of making
+    a worktree; every file the branch predated vanished from disk, including a
+    just-merged docs file and the tracked `.omo/issue-runner-prompt.md`, which
+    looked exactly like data loss. Nothing was lost either time, but the first
+    went unnoticed for two days.
+
+    Run artifacts are written to `<MAIN>/.omo/runs/...`, so a run whose main
+    checkout is on some other branch is filing its reports against a tree that
+    does not match the code it audited.
+    """
+    findings = []
+    audit_dir = self_audit_path.resolve().parent
+    if not audit_dir.exists():
+        return findings
+    try:
+        common = subprocess.run(
+            ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+            cwd=str(audit_dir), capture_output=True, text=True, timeout=10,
+        )
+        if common.returncode != 0:
+            return findings
+        main_root = Path(common.stdout.strip()).parent
+
+        branch = subprocess.run(
+            ["git", "-C", str(main_root), "symbolic-ref", "--quiet", "--short", "HEAD"],
+            capture_output=True, text=True, timeout=10,
+        )
+        current = branch.stdout.strip() if branch.returncode == 0 else "(detached HEAD)"
+        if current != "master":
+            findings.append(
+                f"MAIN CHECKOUT ON WRONG BRANCH: {main_root} is on '{current}', "
+                f"not master. Branch work belongs in a worktree. While the main "
+                f"checkout sits elsewhere, files that branch predates look "
+                f"deleted and these run artifacts describe a tree that is not "
+                f"checked out there. Fix: "
+                f"git -C \"{main_root}\" checkout master"
+            )
+
+        # -uall matters: plain --porcelain collapses an untracked directory to
+        # a single `?? .omo/` entry, so a prefix match on `.omo/runs/` would
+        # never fire and every run artifact would read as a stray edit.
+        status = subprocess.run(
+            ["git", "-C", str(main_root), "status", "--porcelain", "-uall"],
+            capture_output=True, text=True, timeout=20,
+        )
+        if status.returncode == 0:
+            stray = []
+            for line in status.stdout.splitlines():
+                path = line[3:].strip().strip('"')
+                if path.startswith(ALLOWED_MAIN_DIRTY_PREFIXES):
+                    continue
+                if path in ALLOWED_MAIN_DIRTY_FILES:
+                    continue
+                stray.append(path)
+            if stray:
+                shown = ", ".join(sorted(stray)[:8])
+                more = "" if len(stray) <= 8 else f" (+{len(stray) - 8} more)"
+                findings.append(
+                    f"MAIN CHECKOUT DIRTY: {main_root} has changes outside "
+                    f".omo/runs/: {shown}{more}. A Phase 2 edit that landed in "
+                    f"the main checkout instead of the worktree looks exactly "
+                    f"like this."
+                )
+    except (OSError, subprocess.SubprocessError):
+        return findings
+    return findings
+
+
 def main():
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -397,10 +483,12 @@ def main():
         findings += check_build_freshness(args.repo_root)
     findings += check_citations(args.repo_root, args.self_audit_path)
     findings += check_mutation_transcripts(args.self_audit_path)
+    findings += check_main_checkout(args.self_audit_path)
 
     if not findings:
         print("OK: no stale builds, no suspect line citations, "
-              "every mutation check evidenced.")
+              "every mutation check evidenced, main checkout on master "
+              "and clean.")
         return 0
 
     blocking = [f for f in findings if not f.startswith("WEAK CITATION")]

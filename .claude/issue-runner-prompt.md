@@ -107,6 +107,18 @@ If you're ever unsure which root a path belongs to: code changes go where
 your cwd already is; report writes go to the absolute main-repo path
 above, regardless of cwd.
 
+**Never run `git checkout`, `git switch`, or `git checkout -b` in `<MAIN>`.**
+The main checkout stays on `master` for the whole run. Branches are created by
+`EnterWorktree` (or `git worktree add <path> -b <name> origin/master`), never
+by switching the main checkout. This has gone wrong twice: a session ran a
+plain `git checkout <branch>` in the main checkout, and because run artifacts
+are written under `<MAIN>/.omo/runs/`, every file that branch predated vanished
+from disk — a just-merged docs file and the tracked
+`.omo/issue-runner-prompt.md` among them. Nothing was lost either time, but it
+reads exactly like data loss, and the first instance went unnoticed for two
+days. A `post-checkout` hook now warns when it happens, and
+`verify_self_audit.py` blocks on it in Phase 3.5.
+
 **Resolving `<MAIN>`:** run this once, at the start, and reuse the value
 verbatim for the rest of the run. Substitute it everywhere this document
 writes `<MAIN>`, the same way you substitute `<N>` for the issue number.
@@ -402,9 +414,15 @@ your intended change remains.
 violation, worse than an honest `[ ]`.** Run the FULL test suite (not just
 the new test file you wrote) before checking any test-related box.
 
-**Before Phase 4, verify the main repo checkout is clean:**
-`git -C <MAIN> diff --stat` must show only `.omo/runs/`
-files and (if present) `scheduled_tasks.lock`.
+**Before Phase 4, verify the main repo checkout is on master and clean:**
+
+    git -C <MAIN> rev-parse --abbrev-ref HEAD     # must print: master
+    git -C <MAIN> status --porcelain -uall        # only .omo/runs/ files, plus scheduled_tasks.lock if present
+
+Both halves are checked mechanically by `verify_self_audit.py`, so a wrong
+branch or a stray edit is a blocking finding, not a note. The branch half
+exists because a session twice moved the main checkout off master with a plain
+`git checkout`.
 
 **This workflow does not run an independent-model audit pass** (opencode's
 `/issue` does, via Oracle in its own Phase 3.75). Self-audit here is

@@ -293,3 +293,84 @@ def test_bulleted_mutation_box_is_recognized(tmp_path):
 """))
     assert len(findings) == 1
     assert findings[0].startswith("MUTATION CLAIM NOT EVIDENCED")
+
+
+# --- main-checkout hygiene ---------------------------------------------------
+# Run artifacts are written to <MAIN>/.omo/runs/, so the main checkout being on
+# the wrong branch means the reports describe a tree that is not checked out
+# there. Throwaway repos, so these do not depend on this machine's state.
+
+def _repo_with_audit(tmp_path, branch="master", extra_file=None):
+    """A repo shaped like the main checkout, with a self-audit under
+    .omo/runs/issue-1/<branch>/ where a real run would put it."""
+    repo = tmp_path / "main"
+    audit_dir = repo / ".omo" / "runs" / "issue-1" / "some-branch"
+    audit_dir.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", "-b", "master", "."], cwd=str(repo), check=True)
+    (repo / "tracked.txt").write_text("x", encoding="utf-8")
+    subprocess.run(["git", "add", "tracked.txt"], cwd=str(repo), check=True)
+    subprocess.run(
+        ["git", "-c", "user.email=t@e", "-c", "user.name=t",
+         "commit", "-q", "-m", "init"],
+        cwd=str(repo), check=True)
+    if branch != "master":
+        subprocess.run(["git", "checkout", "-q", "-b", branch], cwd=str(repo), check=True)
+    if extra_file:
+        (repo / extra_file).parent.mkdir(parents=True, exist_ok=True)
+        (repo / extra_file).write_text("dirty", encoding="utf-8")
+    audit = audit_dir / "self-audit.md"
+    audit.write_text("[x] something — delivered\n", encoding="utf-8")
+    return repo, audit
+
+
+def test_main_checkout_on_master_and_clean_passes(tmp_path):
+    _, audit = _repo_with_audit(tmp_path)
+    assert verify_self_audit.check_main_checkout(audit) == []
+
+
+def test_main_checkout_on_a_feature_branch_is_blocking(tmp_path):
+    """The real incident: a session ran `git checkout worktree-issue-109-...`
+    in the main checkout, and every file that branch predated vanished from
+    disk. Nothing was lost, but it reads as data loss and went unnoticed for
+    two days the first time it happened."""
+    _, audit = _repo_with_audit(tmp_path, branch="worktree-issue-109-voiceid-fallback")
+    findings = verify_self_audit.check_main_checkout(audit)
+    assert len(findings) == 1
+    assert findings[0].startswith("MAIN CHECKOUT ON WRONG BRANCH")
+    assert "worktree-issue-109-voiceid-fallback" in findings[0]
+    assert "checkout master" in findings[0]
+
+
+def test_run_artifacts_do_not_count_as_a_dirty_main_checkout(tmp_path):
+    """A run writes its own reports into <MAIN>/.omo/runs/ while it works, so
+    those must not trip the dirty check or the gate would fire on every run."""
+    _, audit = _repo_with_audit(tmp_path)
+    assert verify_self_audit.check_main_checkout(audit) == []
+    # The audit file itself is untracked under .omo/runs/ and is ignored above;
+    # add a second artifact to be explicit about the allowance.
+    (audit.parent / "token-usage.md").write_text("x", encoding="utf-8")
+    assert verify_self_audit.check_main_checkout(audit) == []
+
+
+def test_stray_edit_in_the_main_checkout_is_blocking(tmp_path):
+    """A Phase 2 edit that landed in the main checkout instead of the worktree
+    looks exactly like this, and has happened for real."""
+    _, audit = _repo_with_audit(tmp_path, extra_file="services/thing.py")
+    findings = verify_self_audit.check_main_checkout(audit)
+    assert len(findings) == 1
+    assert findings[0].startswith("MAIN CHECKOUT DIRTY")
+    assert "services/thing.py" in findings[0]
+
+
+def test_both_problems_are_reported_together(tmp_path):
+    _, audit = _repo_with_audit(tmp_path, branch="feature", extra_file="app.py")
+    findings = verify_self_audit.check_main_checkout(audit)
+    assert len(findings) == 2
+    assert any(f.startswith("MAIN CHECKOUT ON WRONG BRANCH") for f in findings)
+    assert any(f.startswith("MAIN CHECKOUT DIRTY") for f in findings)
+
+
+def test_missing_audit_directory_is_not_a_finding(tmp_path):
+    """Other checks already report on a missing path; this one must stay silent
+    rather than emit a confusing git error from an unusable cwd."""
+    assert verify_self_audit.check_main_checkout(tmp_path / "nope" / "self-audit.md") == []
