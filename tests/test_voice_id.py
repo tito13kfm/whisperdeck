@@ -3,6 +3,8 @@ fallback chain when the primary backend fails, and surfaced error detail."""
 import io
 import os
 import sys
+import threading
+import time
 import types
 import numpy as np
 import pytest
@@ -199,9 +201,20 @@ def test_embed_pyannote_sets_last_backend_error_on_failure(tmp_path, monkeypatch
 
 def test_enroll_error_includes_underlying_reason_when_all_backends_fail(tmp_path, monkeypatch):
     svc = _svc(tmp_path)
-    monkeypatch.setattr(svc, "_embed_speechbrain", lambda path: None)
+    reason = "torchaudio.load: no audio backend available (torchcodec incompatibility)"
+
+    def failing_speechbrain(path):
+        # mirrors what the real _embed_speechbrain does on an exception: record
+        # why it failed, then report failure. Recording the reason from inside
+        # the extraction call is the only faithful way to set it up — the
+        # reason is per-extraction state, so pre-seeding it before enroll()
+        # would be cleared by _extract_embedding() the same way a stale reason
+        # from an earlier call is.
+        svc._last_backend_error = reason
+        return None
+
+    monkeypatch.setattr(svc, "_embed_speechbrain", failing_speechbrain)
     monkeypatch.setattr(svc, "_embed_mfcc", lambda path: None)
-    svc._last_backend_error = "torchaudio.load: no audio backend available (torchcodec incompatibility)"
 
     with pytest.raises(ValueError) as exc_info:
         svc.enroll(db=None, user_id=1, name="Alice", audio_path="fake.wav")
@@ -688,3 +701,135 @@ def test_embed_pyannote_downmixes_stereo_to_mono(tmp_path, monkeypatch):
 
     assert result is not None
     assert seen["shape"] == (1, 3)
+
+
+# --- thread safety of the singleton's mutable state (issue #110) -------------
+# voice_id_service is a module-level singleton reached from the event loop (the
+# /api/voices routes) and from a ThreadPoolExecutor worker (the voice_match job
+# in services/llm_jobs.py). These tests pin that down.
+
+
+def test_enroll_error_reason_is_not_contaminated_by_a_concurrent_worker_thread(tmp_path, monkeypatch):
+    """The reason enroll() reports must be its own extraction's failure, not
+    whatever a voice_match worker thread happened to fail with meanwhile."""
+    svc = _svc(tmp_path)
+    main_inside_extraction = threading.Event()
+    worker_wrote_its_error = threading.Event()
+
+    def fake_embed_speechbrain(path):
+        if path == "main.wav":
+            svc._last_backend_error = "speechbrain: main-thread failure"
+            main_inside_extraction.set()
+            # hold the main thread inside its own extraction until the worker
+            # thread has recorded a failure of its own
+            assert worker_wrote_its_error.wait(timeout=10)
+        else:
+            svc._last_backend_error = "speechbrain: worker-thread failure"
+        return None
+
+    monkeypatch.setattr(svc, "_embed_speechbrain", fake_embed_speechbrain)
+    monkeypatch.setattr(svc, "_embed_mfcc", lambda path: None)
+
+    def worker():
+        assert main_inside_extraction.wait(timeout=10)
+        svc._extract_embedding("worker.wav")
+        worker_wrote_its_error.set()
+
+    thread = threading.Thread(target=worker)
+    thread.start()
+    try:
+        with pytest.raises(ValueError) as exc_info:
+            svc.enroll(db=None, user_id=1, name="Alice", audio_path="main.wav")
+    finally:
+        worker_wrote_its_error.set()  # never leave the worker parked on a failure
+        thread.join(timeout=10)
+
+    message = str(exc_info.value)
+    assert "main-thread failure" in message
+    assert "worker-thread failure" not in message
+
+
+def test_extract_embedding_reports_the_current_failure_not_a_stale_one(tmp_path, monkeypatch):
+    """_embed_mfcc deliberately won't clobber a more specific primary-backend
+    error, which only holds within one extraction — a second call must report
+    its own failure, not the first call's."""
+    svc = VoiceIdentificationService(voices_dir=str(tmp_path / "voices"))
+    svc._backend = "librosa_mfcc"
+    calls = {"n": 0}
+
+    def fake_load(path, sr=None, duration=None):
+        calls["n"] += 1
+        raise RuntimeError(f"librosa boom {calls['n']}")
+
+    monkeypatch.setitem(sys.modules, "librosa", types.SimpleNamespace(load=fake_load))
+
+    assert svc._extract_embedding("first.wav") is None
+    assert "librosa boom 1" in svc._last_backend_error
+
+    assert svc._extract_embedding("second.wav") is None
+    assert "librosa boom 2" in svc._last_backend_error
+    assert "librosa boom 1" not in svc._last_backend_error
+
+
+def test_get_classifier_builds_one_instance_when_two_threads_race(tmp_path, monkeypatch):
+    svc = _svc(tmp_path)
+    calls = {"instantiated": 0}
+    first_thread_inside_loader = threading.Event()
+
+    class FakeClassifier:
+        pass
+
+    def fake_from_hparams(**kwargs):
+        calls["instantiated"] += 1
+        first_thread_inside_loader.set()
+        time.sleep(0.2)  # hold the load open so a second thread can race in
+        return FakeClassifier()
+
+    monkeypatch.setitem(
+        sys.modules,
+        "speechbrain.inference.speaker",
+        types.SimpleNamespace(EncoderClassifier=types.SimpleNamespace(from_hparams=fake_from_hparams)),
+    )
+
+    got = {}
+    thread = threading.Thread(target=lambda: got.__setitem__("worker", svc._get_classifier()))
+    thread.start()
+    assert first_thread_inside_loader.wait(timeout=10)
+    got["main"] = svc._get_classifier()
+    thread.join(timeout=10)
+
+    assert calls["instantiated"] == 1
+    assert got["main"] is got["worker"]
+
+
+def test_get_pyannote_inference_builds_one_instance_when_two_threads_race(tmp_path, monkeypatch):
+    svc = VoiceIdentificationService(voices_dir=str(tmp_path / "voices"))
+    svc._backend = "pyannote"
+    calls = {"instantiated": 0}
+    first_thread_inside_loader = threading.Event()
+
+    class FakeInference:
+        def __init__(self, model, window):
+            pass
+
+    class FakeModel:
+        @staticmethod
+        def from_pretrained(name, token=None):
+            calls["instantiated"] += 1
+            first_thread_inside_loader.set()
+            time.sleep(0.2)
+            return FakeModel()
+
+    monkeypatch.setitem(
+        sys.modules, "pyannote.audio", types.SimpleNamespace(Model=FakeModel, Inference=FakeInference)
+    )
+
+    got = {}
+    thread = threading.Thread(target=lambda: got.__setitem__("worker", svc._get_pyannote_inference()))
+    thread.start()
+    assert first_thread_inside_loader.wait(timeout=10)
+    got["main"] = svc._get_pyannote_inference()
+    thread.join(timeout=10)
+
+    assert calls["instantiated"] == 1
+    assert got["main"] is got["worker"]
