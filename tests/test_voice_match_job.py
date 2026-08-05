@@ -527,11 +527,11 @@ def test_voice_match_recomputes_speaker_count_on_merge(db_session, tmp_path):
 
     def fake_identify(db, user_id, audio_path, threshold=0.65, hf_token=None):
         # Every segment confidently matches the same enrolled profile.
-        return [{"id": 1, "name": "Alice", "similarity": 0.9, "sample_count": 3}]
+        return _outcome([{"id": 1, "name": "Alice", "similarity": 0.9, "sample_count": 3}])
 
     factory = lambda: _NoCloseSession(db_session)
     with patch("services.llm_jobs.extract_clips_concat", fake_extract), \
-         patch("services.llm_jobs.voice_id_service.identify", fake_identify):
+         patch("services.llm_jobs.voice_id_service.identify_detailed", fake_identify):
         asyncio.run(run_llm_job(factory, job.id, transcription_service=None))
 
     db_session.refresh(job)
@@ -562,11 +562,11 @@ def test_voice_match_no_match_leaves_speaker_count_matching_segments(db_session,
         return str(tmp_path / "clip.wav")
 
     def fake_identify(db, user_id, audio_path, threshold=0.65, hf_token=None):
-        return []  # no confident match for any segment
+        return _outcome()  # compared, but no confident match for any segment
 
     factory = lambda: _NoCloseSession(db_session)
     with patch("services.llm_jobs.extract_clips_concat", fake_extract), \
-         patch("services.llm_jobs.voice_id_service.identify", fake_identify):
+         patch("services.llm_jobs.voice_id_service.identify_detailed", fake_identify):
         asyncio.run(run_llm_job(factory, job.id, transcription_service=None))
 
     db_session.refresh(job)

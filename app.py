@@ -3372,6 +3372,16 @@ async def enroll_voice(
             # degraded enrollment doesn't stay invisible (issue #109).
             "warning": voice_id_service.degraded_model_warning(profile.embedding_model),
         }
+    except ValueError as e:
+        # enroll() raises ValueError for the cases the caller can act on: no
+        # backend, extraction failed, a clip that would be unmatchable against
+        # the roster. Those are 400s, not server faults. Matches the add-clip
+        # route, which already did this.
+        try:
+            os.remove(save_path)
+        except OSError:
+            pass
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

@@ -184,6 +184,63 @@ def test_enroll_speaker_cleans_up_when_enroll_fails(client, db_session, tmp_path
     assert not sample.exists()
 
 
+def test_enroll_speaker_accepts_a_fallback_clip_for_a_brand_new_name(client, db_session, tmp_path):
+    """Issue #109. This route stamps the new profile with `backend_name` before
+    extracting anything, so the row it just created is the only thing on the
+    roster carrying a model id. The orphan guard has to skip profiles with no
+    clips, or a fallback clip collides with its own placeholder and enrollment
+    fails even though nothing was enrolled yet."""
+    import numpy as np
+    from database import VoiceClip
+    t = _transcript(db_session, tmp_path)
+    sample = tmp_path / "seed.wav"
+    sample.write_bytes(b"wav")
+
+    with patch("app.extract_clips_concat", AsyncMock(return_value=str(sample))), \
+         patch("app.voice_id_service._backend", "speechbrain"), \
+         patch("app.voice_id_service._extract_embedding",
+               return_value=(np.array([1.0, 2.0]), "MFCC fingerprint (librosa)")):
+        r = client.post(f"/api/transcripts/{t.id}/enroll-speaker",
+                        json={"name": "Newcomer", "clips": [{"start": 0.0, "end": 2.0}]})
+
+    assert r.status_code == 200, r.json()
+    body = r.json()
+    # the degradation is reported rather than silently accepted
+    assert body["warning"] is not None
+    assert "MFCC" in body["warning"]
+    # and the clip really landed
+    profile = db_session.query(VoiceProfile).filter(VoiceProfile.name == "Newcomer").first()
+    assert profile is not None
+    assert profile.embedding_model == "MFCC fingerprint (librosa)"
+    assert db_session.query(VoiceClip).filter(
+        VoiceClip.voice_profile_id == profile.id).count() == 1
+
+
+def test_enroll_speaker_still_refuses_a_fallback_clip_against_an_enrolled_roster(client, db_session, tmp_path):
+    """The complement of the test above, so the guard cannot quietly become a
+    no-op: a profile that really is enrolled under speechbrain means an MFCC
+    clip would create a speaker voice match can never find."""
+    import numpy as np
+    t = _transcript(db_session, tmp_path)
+    user = _test_user(db_session)
+    db_session.add(VoiceProfile(user_id=user.id, name="Alice", embedding=[0.1, 0.2],
+                                embedding_model="speechbrain/spkrec-ecapa-voxceleb",
+                                sample_count=1))
+    db_session.commit()
+    sample = tmp_path / "seed.wav"
+    sample.write_bytes(b"wav")
+
+    with patch("app.extract_clips_concat", AsyncMock(return_value=str(sample))), \
+         patch("app.voice_id_service._backend", "speechbrain"), \
+         patch("app.voice_id_service._extract_embedding",
+               return_value=(np.array([1.0, 2.0]), "MFCC fingerprint (librosa)")):
+        r = client.post(f"/api/transcripts/{t.id}/enroll-speaker",
+                        json={"name": "Newcomer", "clips": [{"start": 0.0, "end": 2.0}]})
+
+    assert r.status_code == 400
+    assert "MFCC" in r.json()["detail"]
+
+
 def test_enroll_speaker_appends_clip_to_existing_profile_without_overwriting(client, db_session, tmp_path):
     t = _transcript(db_session, tmp_path)
     user = _test_user(db_session)
