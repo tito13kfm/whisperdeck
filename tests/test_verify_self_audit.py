@@ -5,6 +5,7 @@ import importlib.util
 import json
 import re
 import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -485,8 +486,12 @@ def test_a_run_with_no_oracle_pass_is_not_asked_for_an_oracle_row(tmp_path):
     assert verify_self_audit.check_token_usage(audit) == []
 
 
-def test_missing_orchestrator_line_is_advisory(tmp_path):
-    """Two runs reported no model spend at all for work a model did inline."""
+def test_missing_orchestrator_line_is_advisory(tmp_path, monkeypatch, capsys):
+    """Two runs reported no model spend at all for work a model did inline.
+
+    Asserted through main() rather than on the finding alone, because
+    "advisory" is a claim about the exit code, and the prefix string on its own
+    proves nothing about how main() classifies it."""
     audit = _audit_pair(
         tmp_path,
         "Independent review: none in-run; via /audit-pr after the PR.\n",
@@ -494,10 +499,32 @@ def test_missing_orchestrator_line_is_advisory(tmp_path):
     )
     findings = verify_self_audit.check_token_usage(audit)
     assert len(findings) == 1
-    assert findings[0].startswith("TOKEN USAGE INCOMPLETE")
-    assert findings[0] in [
-        f for f in findings if f.startswith(verify_self_audit.ADVISORY_PREFIXES)
-    ]
+    assert findings[0].startswith(verify_self_audit.ADVISORY_PREFIXES)
+
+    monkeypatch.setattr(sys, "argv", [
+        "verify_self_audit.py", str(audit),
+        "--skip-build-check", "--repo-root", str(tmp_path),
+    ])
+    assert verify_self_audit.main() == 0
+    out = capsys.readouterr().out
+    assert "0 blocking finding(s), 1 advisory" in out
+
+
+def test_a_missing_independent_review_line_makes_main_exit_nonzero(
+        tmp_path, monkeypatch, capsys):
+    """The other half of the same contract: this one is blocking, so the same
+    invocation shape has to come back nonzero."""
+    audit = _audit_pair(
+        tmp_path,
+        "[x] guard added - delivered\n",
+        "| deep | some-model |\nOrchestrator: ~10k tokens.\n",
+    )
+    monkeypatch.setattr(sys, "argv", [
+        "verify_self_audit.py", str(audit),
+        "--skip-build-check", "--repo-root", str(tmp_path),
+    ])
+    assert verify_self_audit.main() == 1
+    assert "INDEPENDENT REVIEW NOT RECORDED" in capsys.readouterr().out
 
 
 def test_missing_token_usage_file_is_advisory_not_blocking(tmp_path):

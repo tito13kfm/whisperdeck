@@ -52,7 +52,14 @@ of the four reviewers who missed them to look harder.
 Usage:
     python scripts/verify_self_audit.py PATH/TO/self-audit.md [--repo-root PATH]
 
-Exits nonzero if any finding is reported.
+This judges a self-audit produced by one of the two issue runners, and check 5
+holds it to what those prompts require. Pointed at a self-audit written outside
+a runner, it will report the missing `Independent review:` line as blocking,
+which is the intended reading rather than an edge case: a self-audit that does
+not say whether anything else looked at the work is incomplete.
+
+Exits nonzero if any BLOCKING finding is reported. Advisory findings
+(`ADVISORY_PREFIXES`) are printed but do not fail the run.
 """
 import argparse
 import json

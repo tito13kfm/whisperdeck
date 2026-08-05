@@ -1174,8 +1174,15 @@ leave several comments on it.
 
 ### Verification
 
-- Full suite from the worktree: `909 passed, 22 deselected` (e2e deselected by
+- Full suite from the worktree: `910 passed, 22 deselected` (e2e deselected by
   `pytest.ini`), against 895 after #348 and 848 at the end of Tier 1.
+- Advisory-versus-blocking is asserted through `main()`'s exit code, not just
+  through a finding's prefix. Nothing pinned the exit code before, and the
+  first version of the advisory test asserted a comprehension that filtered a
+  one-element list by the predicate the line above had already checked, which
+  is true by construction. It survived the mutation probe on the strength of
+  its sibling assertion. That is the vacuous-assertion class this document's
+  own 4.13 is about, caught in review of this change.
 - Both new checker functions mutation-tested under the repo's own rule.
   `check_independent_review` body replaced with `return []`: `3 failed, 32
   passed`. `check_token_usage` the same: `3 failed, 32 passed`. Restored by the
