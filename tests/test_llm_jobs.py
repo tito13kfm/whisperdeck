@@ -336,6 +336,47 @@ def test_cancel_zeros_progress_in_db(db_session):
     assert serialized["progress"] == {"done": 0, "total": 0}
 
 
+def test_progress_callback_no_op_after_cancel(db_session):
+    """Regression: progress_cb must not re-inflate counters after cancel.
+
+    Scenario: 60 segments (~18 k chars) with _CHUNK_CHAR_BUDGET=6000
+    produce 3 batches. Cancel lands during batch 2's (middle batch's) HTTP
+    call, then the loop's cancel_cb check at the top of batch 3 returns
+    True, so correct_transcript returns 'cancelled' and _finish() is never
+    called. Without the cancel guard in progress(), counters are re-inflated
+    from the zeroed state set by cancel_llm_job and persist because nothing
+    calls _finish() to re-zero them.
+    """
+    segs = [{"start": i, "end": i + 1, "speaker": "S", "text": "word " * 60} for i in range(60)]
+    user, t = _make_user_and_transcript(db_session, segments=segs)
+    job = enqueue_llm_job(db_session, user.id, t.id, "correction", "groq", "m")
+    job.status = "running"
+    db_session.commit()
+
+    calls = 0
+
+    async def cancel_during_second_batch(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            # Cancel lands while the second batch is in flight.
+            # cancel_llm_job zeroes counters and sets status='cancelled'.
+            cancel_llm_job(db_session, user.id, job.id)
+        return _FakeResponse("S: fixed")
+
+    factory = lambda: _NoCloseSession(db_session)
+    with patch("httpx.AsyncClient.post", AsyncMock(side_effect=cancel_during_second_batch)):
+        asyncio.run(run_llm_job(factory, job.id, transcription_service=None))
+
+    db_session.refresh(job)
+    assert job.status == "cancelled"
+    # The critical assertion: counters must remain zeroed after cancel.
+    # Without the fix, progress_cb(2, N) re-inflates them after cancel.
+    assert job.progress_done == 0, f"progress_done should be 0 after cancel, got {job.progress_done}"
+    assert job.progress_total == 0, f"progress_total should be 0 after cancel, got {job.progress_total}"
+    assert calls == 2, "both batches should have started before cancel was detected"
+
+
 # ── routes ────────────────────────────────────────────────────────────────
 
 def _upload(client):

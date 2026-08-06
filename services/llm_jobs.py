@@ -362,6 +362,9 @@ async def run_llm_job(SessionLocal, job_id: int, transcription_service, diarizat
 
         if job.kind == "correction":
             def progress(done, total):
+                db.refresh(job)
+                if job.status == "cancelled":
+                    return
                 job.progress_done = done
                 job.progress_total = total
                 db.commit()
