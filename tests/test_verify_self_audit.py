@@ -211,14 +211,74 @@ def _audit(tmp_path, body):
 
 
 def test_mutation_transcript_accepts_an_observed_run(tmp_path):
-    """The shape both prompts now require: a runner, a green count, a red count."""
+    """The shape both prompts now require: a runner, a green count, a red count,
+    and the line the runner printed when it went red."""
     findings = verify_self_audit.check_mutation_transcripts(_audit(tmp_path, """
 [x] `test_voice_match_skips_cancelled` — mutation check:
     ran: .venv/Scripts/python.exe -m pytest tests/test_voice_match_job.py -q  ->  3 passed
     mutated: `_match_speakers` body -> `return None`; reran  ->  1 failed, 2 passed
+        E       assert 'unmatched' == 'alice'
     restored: reran  ->  3 passed
 """))
     assert findings == []
+
+
+def test_a_count_without_the_failure_line_is_blocking(tmp_path):
+    """PR #353's shape. Every other requirement is satisfied and the transcript
+    still described a failure that could not happen: the test passes with or
+    without the code under it, because a later cleanup path restores the state
+    it asserts on. A count is the one field writable without running
+    anything."""
+    findings = verify_self_audit.check_mutation_transcripts(_audit(tmp_path, """
+[x] test_progress_callback_no_op_after_cancel — mutation check:
+    ran: pytest tests/test_llm_jobs.py::test_progress_callback_no_op_after_cancel -q  ->  1 passed
+    mutated: removed `db.refresh(job)` and the cancelled early return; reran  ->  1 failed
+    restored: reran  ->  1 passed
+"""))
+    assert len(findings) == 1
+    assert findings[0].startswith("MUTATION CLAIM NOT EVIDENCED")
+    assert "the line the runner printed when it failed" in findings[0]
+
+
+def test_a_pytest_summary_line_counts_as_the_failure_line(tmp_path):
+    """`-q` output names the test rather than the assertion. That is still the
+    runner's own words about what broke, so it satisfies the requirement."""
+    findings = verify_self_audit.check_mutation_transcripts(_audit(tmp_path, """
+[x] test_thing — mutation check:
+    ran: pytest tests/test_thing.py -q  ->  1 passed
+    mutated: `f` body -> `return 0`; reran  ->  1 failed
+        FAILED tests/test_thing.py::test_thing - AssertionError
+    restored: reran  ->  1 passed
+"""))
+    assert findings == []
+
+
+def test_a_raised_exception_counts_as_the_failure_line(tmp_path):
+    """Not every mutation fails on an assert. One that raises is just as much an
+    observation, and blocking it would push runs to invent an assert."""
+    findings = verify_self_audit.check_mutation_transcripts(_audit(tmp_path, """
+[x] test_thing — mutation check:
+    ran: pytest tests/test_thing.py -q  ->  1 passed
+    mutated: dropped the guard; reran  ->  1 error
+        E       KeyError: 'speaker_id'
+    restored: reran  ->  1 passed
+"""))
+    assert findings == []
+
+
+def test_prose_about_asserting_is_not_a_failure_line(tmp_path):
+    """The requirement is the runner's output, not a description of what the
+    test checks. Loose matching on the word `assert` would let the prose that
+    already surrounds these boxes satisfy it."""
+    findings = verify_self_audit.check_mutation_transcripts(_audit(tmp_path, """
+[x] test_thing — mutation check:
+    ran: pytest tests/test_thing.py -q  ->  1 passed
+    mutated: `f` body -> `return None`; reran  ->  1 failed
+        the test asserts the counters are zero, so it went red as expected
+    restored: reran  ->  1 passed
+"""))
+    assert len(findings) == 1
+    assert findings[0].startswith("MUTATION CLAIM NOT EVIDENCED")
 
 
 def test_mutation_claim_without_evidence_is_blocking(tmp_path):
@@ -276,6 +336,7 @@ def test_multiple_mutation_boxes_are_scored_independently(tmp_path):
 [x] test_good — mutation check:
     ran: pytest tests/a.py -q  ->  2 passed
     mutated: `f` -> `return None`; reran  ->  1 failed
+        E       assert None == 3
 [x] test_bad — mutation check: yes, it fails under mutation
 [x] test_also_bad — mutation check: N/A
 """))
