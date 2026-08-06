@@ -372,8 +372,14 @@ def test_fts_trigger_update_syncs_index(db_session):
 
 
 def test_fts_trigger_delete_removes_from_search(db_session):
-    """Deleting a transcript excludes it from search_transcripts results
-    even if the FTS index still has a stale entry."""
+    """Deleting a transcript excludes it from search_transcripts results, and
+    drops its entry from the FTS index itself (issue #309).
+
+    The search-level assertion alone is vacuous for the trigger: both search
+    paths filter status = 'completed' and JOIN back to transcripts, so they
+    return nothing for a deleted row whether or not the index was cleaned.
+    The index-level assertions after the delete are what actually exercise
+    trg_transcripts_fts_delete."""
     user = _make_user(db_session)
     t = _make_transcript(db_session, user.id, full_text="hello world")
     rows = db_session.execute(
@@ -385,6 +391,16 @@ def test_fts_trigger_delete_removes_from_search(db_session):
     db_session.commit()
     results = search_transcripts(db_session, user.id, "hello")
     assert len(results) == 0
+    rows_after = db_session.execute(
+        text("SELECT rowid FROM transcripts_fts WHERE transcripts_fts MATCH :q"),
+        {"q": '"hello"'},
+    ).fetchall()
+    assert rows_after == [], "term 'hello' still in the FTS index after delete"
+    docsize = db_session.execute(
+        text("SELECT COUNT(*) FROM transcripts_fts_docsize WHERE id = :tid"),
+        {"tid": t.id},
+    ).scalar()
+    assert docsize == 0, "FTS index entry survived the transcript delete"
 
 
 def test_fts_trigger_segment_text_indexed(db_session):
@@ -526,6 +542,11 @@ def test_populate_fts_restores_deleted_index(db_session):
             text("SELECT COUNT(*) FROM transcripts_fts_docsize")
         ).scalar()
         assert docsize == 2
+        # Backfilling t2 goes through the UPDATE trigger against a row the
+        # index does not hold. Before #309 guarded that trigger's delete half,
+        # this left the index corrupt: searchable, membership correct, and
+        # integrity-check failing from then on.
+        conn.execute(text(_INTEGRITY_SQL))
 
 
 def test_populate_fts_idempotent(db_session):
@@ -534,10 +555,11 @@ def test_populate_fts_idempotent(db_session):
 
     The backfill path (index wiped, then repopulated) is covered by
     test_populate_fts_restores_deleted_index. The per-row-delete then
-    backfill edge case is not testable in isolation — delete-all on an
-    external-content FTS5 table corrupts internal state permanently, and
-    a single-row delete followed by the trigger's delete-on-update hits
-    the same FTS5 limitation."""
+    backfill case is covered by the issue #309 cleanup tests below: a
+    'delete-all' followed by a trigger-consistent reinsert leaves the index
+    clean, idempotent, and safe to DELETE from afterwards. The note that used
+    to sit here, saying delete-all corrupts internal state permanently and the
+    case was untestable, was wrong on both counts."""
     from database import populate_fts
     engine = db_session.get_bind()
     user = _make_user(db_session)
@@ -705,4 +727,366 @@ def test_fts_update_trigger_migrates_existing_database(tmp_path):
             )
     finally:
         db.close()
+        engine2.dispose()
+
+
+# ── FTS delete trigger and orphan cleanup (issue #309) ──────────────────────
+
+_INTEGRITY_SQL = ("INSERT INTO transcripts_fts(transcripts_fts, rank) "
+                  "VALUES('integrity-check', 1)")
+
+
+def _match_ids(conn, query):
+    """Rowids the FTS index itself matches, sorted. Sorted because FTS5 does
+    not promise an order without ORDER BY and every assertion below is about
+    set membership."""
+    rows = conn.execute(
+        text("SELECT rowid FROM transcripts_fts WHERE transcripts_fts MATCH :q"),
+        {"q": query},
+    ).fetchall()
+    return sorted(row[0] for row in rows)
+
+
+def _docsize_ids(conn):
+    """Index membership. COUNT(*) on transcripts_fts would count the content
+    table, not the index, so the shadow table is the real artifact."""
+    return [row[0] for row in conn.execute(
+        text("SELECT id FROM transcripts_fts_docsize ORDER BY id")
+    ).fetchall()]
+
+
+def _orphan_ids(conn):
+    return [row[0] for row in conn.execute(text(
+        "SELECT d.id FROM transcripts_fts_docsize d "
+        "WHERE NOT EXISTS (SELECT 1 FROM transcripts t WHERE t.id = d.id) "
+        "ORDER BY d.id"
+    )).fetchall()]
+
+
+def test_fts_trigger_delete_removes_segment_terms(db_session):
+    """The delete has to carry segment text derived from OLD.segments. If it
+    passed OLD.segment_text, which is NULL on every ORM-created row, the
+    segment-only terms would stay in the index after the delete."""
+    user = _make_user(db_session)
+    t = _make_transcript(db_session, user.id, full_text="base text",
+                         segments=[{"speaker": "A", "text": "segonlyterm here",
+                                    "start": 0, "end": 1}])
+    engine = db_session.get_bind()
+    with engine.connect() as conn:
+        assert _match_ids(conn, '"segonlyterm"') == [t.id]
+    db_session.delete(t)
+    db_session.commit()
+    with engine.connect() as conn:
+        assert _match_ids(conn, '"segonlyterm"') == []
+        assert _docsize_ids(conn) == []
+
+
+def test_fts_trigger_delete_leaves_sibling_rows_indexed(db_session):
+    """Deleting one of two rows must remove only that row's terms."""
+    user = _make_user(db_session)
+    keep = _make_transcript(db_session, user.id, title="keep",
+                            full_text="alpha shared")
+    drop = _make_transcript(db_session, user.id, title="drop",
+                            full_text="beta shared")
+    engine = db_session.get_bind()
+    db_session.delete(drop)
+    db_session.commit()
+    with engine.connect() as conn:
+        assert _docsize_ids(conn) == [keep.id]
+        assert _match_ids(conn, '"shared"') == [keep.id]
+        assert _match_ids(conn, '"beta"') == []
+        conn.execute(text(_INTEGRITY_SQL))
+
+
+def test_fts_trigger_delete_of_never_indexed_row_keeps_index_valid(db_session):
+    """A pre-FTS row with status != 'completed' is skipped by populate_fts() and
+    so is absent from the index for the whole life of the install. Deleting one
+    must not corrupt the index.
+
+    This is what the trigger's WHEN EXISTS guard on transcripts_fts_docsize
+    buys. Without it the trigger issues 'delete' for a rowid the index does not
+    hold, and integrity-check fails from then on, even though the content table
+    and the index now agree on membership and every search still looks right.
+
+    The unindexed row is built by dropping the INSERT trigger, which is the same
+    end state as a row that predates FTS. integrity-check is asserted only after
+    the delete: while that row exists in the content table and not in the index,
+    the check fails on the setup itself, which says nothing about the trigger."""
+    user = _make_user(db_session)
+    engine = db_session.get_bind()
+    indexed = _make_transcript(db_session, user.id, title="indexed",
+                               full_text="alpha unique")
+    with engine.begin() as conn:
+        conn.execute(text("DROP TRIGGER trg_transcripts_fts_insert"))
+    unindexed = _make_transcript(db_session, user.id, title="unindexed",
+                                 full_text="beta unique")
+    with engine.connect() as conn:
+        assert _docsize_ids(conn) == [indexed.id]
+    db_session.delete(unindexed)
+    db_session.commit()
+    with engine.connect() as conn:
+        assert _docsize_ids(conn) == [indexed.id]
+        assert _match_ids(conn, '"alpha"') == [indexed.id]
+        conn.execute(text(_INTEGRITY_SQL))
+
+
+def test_fts_trigger_update_of_never_indexed_row_keeps_index_valid(db_session):
+    """Sibling of the test above, on the UPDATE trigger. The issue named only
+    the missing DELETE trigger, but the UPDATE trigger's delete half had the
+    same unguarded 'delete' and corrupted the index the same way for a row that
+    was never indexed.
+
+    This is not a hypothetical path: populate_fts() indexes a pre-FTS row by
+    UPDATEing it, so every backfill ran the unguarded delete half against an
+    unindexed rowid. Fixed here by guarding that statement with WHERE EXISTS,
+    on the statement rather than the trigger, because the insert half below it
+    still has to run or the backfill would index nothing."""
+    user = _make_user(db_session)
+    engine = db_session.get_bind()
+    indexed = _make_transcript(db_session, user.id, title="indexed",
+                               full_text="alpha unique")
+    with engine.begin() as conn:
+        conn.execute(text("DROP TRIGGER trg_transcripts_fts_insert"))
+    unindexed = _make_transcript(db_session, user.id, title="unindexed",
+                                 full_text="beta unique")
+    unindexed.full_text = "gamma unique"
+    db_session.commit()
+    with engine.connect() as conn:
+        # The insert half still ran, so the row is now indexed exactly once,
+        # under its new terms only.
+        assert _docsize_ids(conn) == sorted([indexed.id, unindexed.id])
+        assert _match_ids(conn, '"gamma"') == [unindexed.id]
+        assert _match_ids(conn, '"beta"') == []
+        assert _match_ids(conn, '"alpha"') == [indexed.id]
+        conn.execute(text(_INTEGRITY_SQL))
+
+
+def test_cleanup_fts_orphans_removes_orphan_and_is_idempotent(db_session):
+    """Broken state: a database that deleted transcripts before #309 added the
+    delete trigger, so the index still holds their entries. Built by dropping
+    the trigger and then deleting a row, which is exactly what those installs
+    did.
+
+    The segment-term assertion after the repair is the one that fails if the
+    cleanup is ever changed to 'rebuild': a rebuild indexes the literal
+    segment_text column, which is NULL, so every row silently loses its
+    segment terms."""
+    from database import cleanup_fts_orphans
+    engine = db_session.get_bind()
+    user = _make_user(db_session)
+
+    keep = _make_transcript(db_session, user.id, title="keep",
+                            full_text="alpha shared",
+                            segments=[{"speaker": "A", "text": "segkeepterm",
+                                       "start": 0, "end": 1}])
+    orphan = _make_transcript(db_session, user.id, title="orphan",
+                              full_text="beta shared")
+    orphan_id = orphan.id
+
+    with engine.begin() as conn:
+        conn.execute(text("DROP TRIGGER trg_transcripts_fts_delete"))
+    db_session.delete(orphan)
+    db_session.commit()
+
+    with engine.connect() as conn:
+        assert _orphan_ids(conn) == [orphan_id]
+        assert _match_ids(conn, '"beta"') == [orphan_id]
+
+    assert cleanup_fts_orphans(engine) == 1
+
+    with engine.connect() as conn:
+        assert _orphan_ids(conn) == []
+        assert _docsize_ids(conn) == [keep.id]
+        assert _match_ids(conn, '"beta"') == []
+        assert _match_ids(conn, '"shared"') == [keep.id]
+        assert _match_ids(conn, '"segkeepterm"') == [keep.id]
+
+    assert cleanup_fts_orphans(engine) == 0
+
+    with engine.connect() as conn:
+        assert _docsize_ids(conn) == [keep.id]
+        assert _match_ids(conn, '"segkeepterm"') == [keep.id]
+
+
+def test_cleanup_fts_orphans_noop_when_no_orphans(db_session):
+    """Nothing to clean: the detect query gates the rest, so a clean database
+    never wipes and rebuilds its index on startup.
+
+    Asserting the searchable state cannot show that, because an unconditional
+    wipe-and-reindex ends up searchable too. Neither can comparing the raw
+    transcripts_fts_data blocks: for a one-document index, delete-all plus a
+    reinsert of the same row produces byte-identical blocks, so a fingerprint
+    passes whether the wipe ran or not. The only assertion that actually
+    distinguishes the two is that the 'delete-all' statement never reaches the
+    database, so this watches the statements the function emits."""
+    from sqlalchemy import event
+    from database import cleanup_fts_orphans
+    engine = db_session.get_bind()
+    user = _make_user(db_session)
+    t = _make_transcript(db_session, user.id, full_text="alpha text",
+                         segments=[{"speaker": "A", "text": "segkeepterm",
+                                    "start": 0, "end": 1}])
+
+    emitted = []
+
+    def _record(conn, cursor, statement, parameters, context, executemany):
+        emitted.append(statement)
+
+    event.listen(engine, "before_cursor_execute", _record)
+    try:
+        assert cleanup_fts_orphans(engine) == 0
+    finally:
+        event.remove(engine, "before_cursor_execute", _record)
+
+    assert emitted, "no statements recorded, the listener did not attach"
+    wipes = [s for s in emitted if "delete-all" in s]
+    assert wipes == [], f"index was wiped on a database with no orphans: {wipes}"
+
+    with engine.connect() as conn:
+        assert _docsize_ids(conn) == [t.id]
+        assert _match_ids(conn, '"segkeepterm"') == [t.id]
+
+
+def test_cleanup_fts_orphans_does_not_index_previously_unindexed_rows(db_session):
+    """Membership is captured, not recomputed. An install's index holds "all
+    post-FTS rows plus completed pre-FTS rows", which is not expressible as a
+    predicate, so reindexing "all rows" would pull in rows that were never
+    indexed and skew the term frequencies this cleanup exists to correct."""
+    from database import cleanup_fts_orphans
+    engine = db_session.get_bind()
+    user = _make_user(db_session)
+    keep = _make_transcript(db_session, user.id, title="keep",
+                            full_text="alpha text")
+    orphan = _make_transcript(db_session, user.id, title="orphan",
+                              full_text="beta text")
+    orphan_id = orphan.id
+
+    with engine.begin() as conn:
+        conn.execute(text("DROP TRIGGER trg_transcripts_fts_insert"))
+    _make_transcript(db_session, user.id, title="never", full_text="gamma text")
+    with engine.begin() as conn:
+        conn.execute(text("DROP TRIGGER trg_transcripts_fts_delete"))
+    db_session.delete(orphan)
+    db_session.commit()
+
+    with engine.connect() as conn:
+        assert _orphan_ids(conn) == [orphan_id]
+
+    assert cleanup_fts_orphans(engine) == 1
+
+    with engine.connect() as conn:
+        assert _docsize_ids(conn) == [keep.id]
+        assert _match_ids(conn, '"alpha"') == [keep.id]
+        assert _match_ids(conn, '"gamma"') == []
+
+
+def test_cleanup_fts_orphans_reindexes_across_chunks(db_session, monkeypatch):
+    """The reinsert is chunked to stay under SQLite's bound-parameter limit.
+    Force a chunk size of 2 against 3 surviving rows so the loop runs more than
+    once and nothing is dropped at the boundary."""
+    import database
+    from database import cleanup_fts_orphans
+    monkeypatch.setattr(database, "_FTS_REINDEX_CHUNK", 2)
+    engine = db_session.get_bind()
+    user = _make_user(db_session)
+    kept = [_make_transcript(db_session, user.id, title=f"k{i}",
+                             full_text=f"term{i} shared") for i in range(3)]
+    orphan = _make_transcript(db_session, user.id, title="orphan",
+                              full_text="beta shared")
+    orphan_id = orphan.id
+
+    with engine.begin() as conn:
+        conn.execute(text("DROP TRIGGER trg_transcripts_fts_delete"))
+    db_session.delete(orphan)
+    db_session.commit()
+
+    with engine.connect() as conn:
+        assert _orphan_ids(conn) == [orphan_id]
+
+    assert cleanup_fts_orphans(engine) == 1
+
+    kept_ids = sorted(t.id for t in kept)
+    with engine.connect() as conn:
+        assert _docsize_ids(conn) == kept_ids
+        assert _match_ids(conn, '"shared"') == kept_ids
+        for i, t in enumerate(kept):
+            assert _match_ids(conn, f'"term{i}"') == [t.id]
+
+
+def test_cleanup_fts_orphans_without_fts_tables_is_noop(db_session, tmp_path):
+    """Two zero-cardinality cases.
+
+    A database with the FTS schema but no transcript rows reports 0. And a
+    database with no transcripts table at all, which is what an engine pointed
+    at a file init_db() has never run against looks like, must return 0 rather
+    than raise: without the table-existence check the detect query fails with
+    "no such table: transcripts_fts_docsize"."""
+    from sqlalchemy import create_engine
+    from database import cleanup_fts_orphans
+
+    assert cleanup_fts_orphans(db_session.get_bind()) == 0
+
+    bare = create_engine(f"sqlite:///{tmp_path / 'bare.db'}")
+    try:
+        assert cleanup_fts_orphans(bare) == 0
+    finally:
+        bare.dispose()
+
+
+def test_init_db_cleans_pre_309_orphans_on_restart(tmp_path):
+    """End-to-end upgrade path. A database created before #309 has no delete
+    trigger and accumulates orphaned index entries. Re-running init_db(), which
+    is what every app restart does, must add the trigger, drop the orphan, keep
+    the survivor's terms including its segment terms, and leave an index that a
+    later real DELETE applies to cleanly.
+
+    That last step is the guard against the latent corruption a 'rebuild'
+    cleanup would have introduced: integrity-check passes right after a
+    rebuild, and the next DELETE fails with "database disk image is
+    malformed"."""
+    from database import init_db
+
+    db_path = tmp_path / "pre309.db"
+    engine, SessionLocal, _ = init_db(str(db_path))
+    db = SessionLocal()
+    try:
+        user = _make_user(db)
+        keep = _make_transcript(db, user.id, title="keep",
+                                full_text="alpha text",
+                                segments=[{"speaker": "A", "text": "segkeepterm",
+                                           "start": 0, "end": 1}])
+        orphan = _make_transcript(db, user.id, title="orphan",
+                                  full_text="beta text")
+        keep_id, orphan_id = keep.id, orphan.id
+    finally:
+        db.close()
+
+    # Simulate the pre-#309 state: no delete trigger, and a transcript deleted
+    # while it was absent.
+    with engine.begin() as conn:
+        conn.execute(text("DROP TRIGGER trg_transcripts_fts_delete"))
+        conn.execute(text("DELETE FROM transcripts WHERE id = :tid"),
+                     {"tid": orphan_id})
+    with engine.connect() as conn:
+        assert _orphan_ids(conn) == [orphan_id]
+    engine.dispose()
+
+    engine2, SessionLocal2, _ = init_db(str(db_path))
+    db2 = SessionLocal2()
+    try:
+        with engine2.connect() as conn:
+            assert _orphan_ids(conn) == []
+            assert _docsize_ids(conn) == [keep_id]
+            assert _match_ids(conn, '"segkeepterm"') == [keep_id]
+            assert _match_ids(conn, '"beta"') == []
+
+        surviving = db2.query(Transcript).filter(Transcript.id == keep_id).one()
+        db2.delete(surviving)
+        db2.commit()
+
+        with engine2.connect() as conn:
+            assert _docsize_ids(conn) == []
+            assert _match_ids(conn, '"alpha"') == []
+    finally:
+        db2.close()
         engine2.dispose()

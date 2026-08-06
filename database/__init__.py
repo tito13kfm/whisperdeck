@@ -551,6 +551,94 @@ def populate_fts(engine) -> None:
                 )
 
 
+_FTS_REINDEX_CHUNK = 500
+
+
+def cleanup_fts_orphans(engine) -> int:
+    """Drop FTS index entries whose transcripts row no longer exists.
+
+    Returns the number of orphaned entries removed. Databases created before
+    the AFTER DELETE trigger (issue #309) kept the index entry of every deleted
+    transcript forever. Search results were unaffected because both search
+    paths JOIN back to transcripts, but the orphans inflate the index and skew
+    FTS5 ranking, since term frequencies still count the deleted documents.
+    Existing installs do not self-heal, so this runs once per startup and is a
+    no-op as soon as there is nothing to clean.
+
+    Deliberately NOT `INSERT INTO transcripts_fts(transcripts_fts)
+    VALUES('rebuild')`, which is the obvious repair and corrupts the database.
+    A rebuild re-reads the content table, so it indexes the literal
+    segment_text column, while all three triggers index a value derived from
+    the segments JSON. Two things follow: every row loses its segment terms,
+    and the index stops agreeing with what the triggers believe is indexed, so
+    the next trigger-issued 'delete' carries derived segment text against an
+    index entry holding NULL. Those values must match in external-content mode.
+    They do not, and the next DELETE fails with "database disk image is
+    malformed". `integrity-check` returns OK right after the rebuild, so that
+    corruption is latent and a post-cleanup integrity-check would pass.
+
+    What runs instead: capture the current index membership, 'delete-all', then
+    reinsert using the same derived expression the triggers use. Membership has
+    to be captured rather than recomputed, because it is not expressible as a
+    predicate. The INSERT trigger indexes every row regardless of status while
+    populate_fts() only backfilled `status = 'completed'` rows, so an existing
+    index holds "all post-FTS rows plus completed pre-FTS rows". Reindexing
+    "all rows" would pull previously unindexed rows in and skew the very term
+    frequencies this cleanup exists to correct.
+
+    Everything runs on one connection inside one transaction. That is load
+    bearing: `engine.begin()` rolls the whole sequence back if a reinsert
+    fails, where a wipe committed separately from its reinsert would leave the
+    index empty.
+    """
+    inspector = inspect(engine)
+    table_names = inspector.get_table_names()
+    if "transcripts" not in table_names or "transcripts_fts" not in table_names:
+        return 0
+
+    # Identical to the expression in all three triggers, aliased to `t`.
+    segment_text_sql = (
+        "COALESCE((SELECT group_concat(json_extract(value,'$.text'),' ') "
+        "FROM json_each(t.segments)), '')"
+    )
+
+    with engine.begin() as conn:
+        orphan_count = conn.execute(text(
+            "SELECT COUNT(*) FROM transcripts_fts_docsize d "
+            "WHERE NOT EXISTS (SELECT 1 FROM transcripts t WHERE t.id = d.id)"
+        )).scalar()
+        if not orphan_count:
+            return 0
+
+        keep = [row[0] for row in conn.execute(text(
+            "SELECT d.id FROM transcripts_fts_docsize d "
+            "JOIN transcripts t ON t.id = d.id"
+        )).fetchall()]
+
+        conn.execute(text("INSERT INTO transcripts_fts(transcripts_fts) VALUES('delete-all')"))
+
+        # title, full_text and corrected_text are selected raw, deliberately
+        # not coalesced to '': the triggers pass them raw as well, and the
+        # values supplied to a later 'delete' have to be the ones that were
+        # indexed. Chunked to stay under SQLite's bound-parameter limit, which
+        # is 999 on older builds.
+        for start in range(0, len(keep), _FTS_REINDEX_CHUNK):
+            chunk = keep[start:start + _FTS_REINDEX_CHUNK]
+            placeholders = ", ".join(f":id{i}" for i in range(len(chunk)))
+            conn.execute(
+                text(
+                    "INSERT INTO transcripts_fts "
+                    "(rowid, title, full_text, corrected_text, segment_text) "
+                    "SELECT t.id, t.title, t.full_text, t.corrected_text, "
+                    f"{segment_text_sql} "
+                    f"FROM transcripts t WHERE t.id IN ({placeholders})"
+                ),
+                {f"id{i}": tid for i, tid in enumerate(chunk)},
+            )
+
+    return orphan_count
+
+
 def init_db(db_path: str = "data/whisperdesk.db") -> tuple:
     """Initialize the database. Returns (engine, SessionLocal, migrated_tables).
 
@@ -648,23 +736,67 @@ def init_db(db_path: str = "data/whisperdesk.db") -> tuple:
         # content table; use transcripts_fts_docsize for index membership
         # checks.
         # DROP + unconditional CREATE (not IF NOT EXISTS): this trigger's body
-        # changed to fix #206 (stale FTS entries after UPDATE). Any database
-        # created before that fix already has a trigger named
-        # trg_transcripts_fts_update — IF NOT EXISTS would see it and skip
-        # creating the corrected body, silently leaving old databases broken.
+        # changed to fix #206 (stale FTS entries after UPDATE), and again to add
+        # the membership guard below (#309). Any database created before either
+        # fix already has a trigger named trg_transcripts_fts_update — IF NOT
+        # EXISTS would see it and skip creating the corrected body, silently
+        # leaving old databases broken.
+        # The delete half is guarded on transcripts_fts_docsize because issuing
+        # 'delete' for a rowid the index does not hold corrupts the index:
+        # integrity-check fails afterwards even once the content table and the
+        # index agree on membership again. Rows that were never indexed are
+        # ordinary here, not hypothetical — populate_fts() below UPDATEs exactly
+        # those rows to get them indexed, which is what fires this trigger for
+        # them. The guard has to sit on the statement (INSERT ... SELECT ...
+        # WHERE EXISTS) rather than on the trigger (WHEN ...), because the
+        # insert half underneath must still run for an unindexed row: skipping
+        # the whole body would leave the backfill with nothing to index.
         conn.execute(text("DROP TRIGGER IF EXISTS trg_transcripts_fts_update"))
         conn.execute(text(
             "CREATE TRIGGER trg_transcripts_fts_update "
             "AFTER UPDATE ON transcripts BEGIN "
             "INSERT INTO transcripts_fts(transcripts_fts, rowid, title, full_text, corrected_text, segment_text) "
-            "VALUES('delete', OLD.id, OLD.title, OLD.full_text, OLD.corrected_text, "
-            "COALESCE((SELECT group_concat(json_extract(value,'$.text'),' ') FROM json_each(OLD.segments)), '')); "
+            "SELECT 'delete', OLD.id, OLD.title, OLD.full_text, OLD.corrected_text, "
+            "COALESCE((SELECT group_concat(json_extract(value,'$.text'),' ') FROM json_each(OLD.segments)), '') "
+            "WHERE EXISTS (SELECT 1 FROM transcripts_fts_docsize WHERE id = OLD.id); "
             "INSERT INTO transcripts_fts(rowid, title, full_text, corrected_text, segment_text) "
             "VALUES ("
             "NEW.id, NEW.title, NEW.full_text, NEW.corrected_text, "
             "COALESCE((SELECT group_concat(json_extract(value,'$.text'),' ') FROM json_each(NEW.segments)), '')"
             "); END"
         ))
+        # Trigger: AFTER DELETE — drop the row's terms from the FTS index
+        # (issue #108 shipped without one, issue #309). Mirrors the delete half
+        # of the UPDATE trigger above exactly, segment_text included: it is
+        # computed from OLD.segments, not read from OLD.segment_text, because
+        # that column is NULL on every ORM-created row and the values supplied
+        # to an external-content 'delete' must match what was indexed.
+        # IF NOT EXISTS is correct here, unlike the UPDATE trigger's
+        # unconditional DROP + CREATE. That DROP exists because #206 changed
+        # the body of a trigger old databases already had; no database has ever
+        # had a trigger named trg_transcripts_fts_delete, so there is no stale
+        # body to displace.
+        # Guarded on transcripts_fts_docsize for the same reason as the UPDATE
+        # trigger's delete half: a 'delete' for a rowid the index does not hold
+        # corrupts the index. Deleting a row that was never indexed is a real
+        # case, not a hypothetical one — a pre-FTS row with status != 'completed'
+        # is skipped by populate_fts() and so is absent from the index for the
+        # whole life of the install. Here the guard sits on the trigger (WHEN)
+        # rather than on the statement, because the whole body is conditional.
+        conn.execute(text(
+            "CREATE TRIGGER IF NOT EXISTS trg_transcripts_fts_delete "
+            "AFTER DELETE ON transcripts "
+            "WHEN EXISTS (SELECT 1 FROM transcripts_fts_docsize WHERE id = OLD.id) "
+            "BEGIN "
+            "INSERT INTO transcripts_fts(transcripts_fts, rowid, title, full_text, corrected_text, segment_text) "
+            "VALUES('delete', OLD.id, OLD.title, OLD.full_text, OLD.corrected_text, "
+            "COALESCE((SELECT group_concat(json_extract(value,'$.text'),' ') FROM json_each(OLD.segments)), '')); "
+            "END"
+        ))
+    # Before populate_fts(), so the anti-join there sees the corrected index
+    # and the reindex below has fewer rows to rewrite. Either order reaches the
+    # same final state; this one is cheaper.
+    cleanup_fts_orphans(engine)
     populate_fts(engine)
     SessionLocal = sessionmaker(bind=engine)
     backfill_llm_job_result_snapshots(SessionLocal)
