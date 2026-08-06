@@ -46,9 +46,6 @@ scripts/settings_payload.json
 .opencode/command/*
 !.opencode/command/issue.md
 
-# Local unsloth studio scratch/working dir (machine-local, unrelated to this project)
-unsloth_compiled_cache/
-
 # Local verification and audit scratch space
 .local/
 .audit-worktrees/
