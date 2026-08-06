@@ -6,8 +6,9 @@ import os
 from unittest.mock import AsyncMock, patch
 
 from backends.base import Segment, TranscriptionResult
-from database import LlmJob, Transcript, User
-from services.llm_jobs import enqueue_llm_job, run_llm_job
+from database import LlmJob, RelabelHistory, Transcript, User
+from services.llm_jobs import enqueue_llm_job, run_llm_job, cancel_llm_job
+from services.relabel import record_relabel
 
 
 class _FakeProvider:
@@ -399,6 +400,69 @@ def test_run_llm_job_rediarize_fails_when_audio_missing(db_session):
     db_session.refresh(job)
     assert job.status == "failed"
     assert "No stored audio" in job.error
+
+
+def test_rediarize_cancel_during_diarize_skips_the_writes(db_session, tmp_path):
+    """A cancel landing while diarize_and_merge is running must
+    return before clear_relabel_history and the transcript.segments
+    assignment — mirroring the voice_note guard pattern."""
+    user = User(username="diarist3", password_hash="x", password_salt="y")
+    db_session.add(user)
+    db_session.commit()
+    audio = tmp_path / "b.mp3"
+    audio.write_bytes(b"fake")
+    original_segments = [
+        {"start": 0, "end": 1, "text": "hi", "speaker": "SPEAKER_01"},
+    ]
+    t = Transcript(
+        user_id=user.id, title="d2", filename="d2.mp3", status="completed",
+        full_text="hi", segments=original_segments,
+        audio_path=str(audio),
+    )
+    db_session.add(t)
+    db_session.commit()
+
+    # Seed some relabel history to prove it survives the cancel.
+    record_relabel(db_session, t, "rename", [(0, "SPEAKER_00")],
+                   description="initial rename")
+    db_session.commit()
+    pre_count = (
+        db_session.query(RelabelHistory)
+        .filter(RelabelHistory.transcript_id == t.id).count()
+    )
+    assert pre_count == 1
+
+    job = enqueue_llm_job(db_session, user.id, t.id, "rediarize", "", "")
+    job.status = "running"
+    db_session.commit()
+
+    merged = [
+        {"start": 0, "end": 0.5, "text": "a", "speaker": "SPEAKER_02"},
+        {"start": 0.5, "end": 1, "text": "b", "speaker": "SPEAKER_03"},
+    ]
+
+    async def diarize_then_cancel(*args, **kwargs):
+        cancel_llm_job(db_session, user.id, job.id)
+        return (merged, 2, "pyannote")
+
+    fake_diar = AsyncMock()
+    fake_diar.diarize_and_merge = diarize_then_cancel
+
+    from services.llm_jobs import run_llm_job as _run
+    factory = lambda: _NoCloseSession(db_session)
+    asyncio.run(_run(factory, job.id, transcription_service=None,
+                     diarization_service=fake_diar))
+
+    db_session.refresh(job)
+    db_session.refresh(t)
+    assert job.status == "cancelled"
+    assert t.segments == original_segments
+    # Relabel history must not have been wiped.
+    post_count = (
+        db_session.query(RelabelHistory)
+        .filter(RelabelHistory.transcript_id == t.id).count()
+    )
+    assert post_count == 1
 
 
 # ── Task 5: post-hoc context doc ───────────────────────────────────────────

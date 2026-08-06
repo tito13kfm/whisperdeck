@@ -671,6 +671,9 @@ async def run_llm_job(SessionLocal, job_id: int, transcription_service, diarizat
                     hf_token=user_settings.get("hf_token"),
                     stereo_audio_path=transcript.stereo_audio_path,
                 )
+                db.refresh(job)
+                if job.status == "cancelled":
+                    return
                 # Rediarize regenerates the segmentation wholesale, so every
                 # stored inverse patch (index-based, recorded against the OLD
                 # segments) is now meaningless — undo would stamp stale labels
