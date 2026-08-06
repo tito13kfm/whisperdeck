@@ -2,9 +2,8 @@
 
 Entry point for `/issue-claude <N>` in Claude Code. This is a parallel port
 of opencode's `.omo/issue-runner-prompt.md`, adapted to Claude Code's own
-tools. Opencode's `/issue` and this command never drift into each other;
-if you're tuning workflow logic, decide which tool's users need the change
-and edit that tool's copy specifically.
+tools: a port, not a copy. Both files are tracked; edits to either go
+through a PR.
 
 You (the orchestrator) run this on Opus. The
 `.claude/commands/issue-claude.md` wrapper already confirmed that before
@@ -69,22 +68,11 @@ check each of those separately before closing anything. Report which claims
 are fixed and which are still live, and file the live ones rather than
 letting them close along with the duplicate.
 
-Confirmed pattern, six runs in one week: one investigated two checklist
-items already implemented in earlier commits and produced zero code
-changes; one found its spec item `already done`; one found both endpoints
-already converted by a prior issue; one nearly re-implemented a feature
-whose tracking checkbox was never ticked despite two merged PRs; one was
-handed an issue whose headline defect had merged eight hours before that
-issue was even filed, under a different number, from an investigation branch
-cut before the fix landed. That last one was caught by the closed-issue
-search, not the commit grep, and two of the three claims in its body were
-still live after the headline was ruled a duplicate. This costs two commands.
-
 ## Setup: worktree + branch
 
 **Fetch first. `EnterWorktree` does not fetch for you.** It branches from a
-local ref, so if the local ref is stale your worktree is stale, and the
-prompt used to claim otherwise. Run this before creating the worktree:
+local ref, so if the local ref is stale your worktree is stale. Run this
+before creating the worktree:
 
     git fetch origin && git log origin/master -1
 
@@ -101,12 +89,6 @@ If they differ, rebase onto `origin/master` before writing any code, and
 say so in your first status update. Don't branch off a local branch you
 find already checked out either — it may be someone else's stale
 in-progress work, not a base for you.
-
-Confirmed failure mode: a run took `fresh off origin/master` at face value,
-got a worktree at `290e5f7` while `origin/master` was at `5207255`, and so
-was missing the merged PR its entire task depended on. A second run found
-the main checkout's local `master` four commits behind `origin/master` at
-start, and paid for a mid-run rebase plus a full re-run of the suite.
 
 **Confirm both roots exist before writing anything.** Run `git worktree
 list` and check for two entries: yours (the new one carrying your branch
@@ -129,9 +111,8 @@ path-crossing mistake at the point it is still cheap.
 not the issue number, not a model nickname. The report subdirectory name
 and the worktree directory name both match the branch, because
 `verify_self_audit.py` resolves your worktree by matching that directory
-name against `git worktree list`. Seven different naming patterns have
-been used for the same workflow, and one report directory was the bare
-word `sisyphus`, which matches every branch containing it.
+name against `git worktree list`, so a name that only resembles the branch
+can resolve to somebody else's checkout and verify the wrong code.
 
 If you're ever unsure which root a path belongs to: code changes go where
 your cwd already is; report writes go to the absolute main-repo path
@@ -140,14 +121,10 @@ above, regardless of cwd.
 **Never run `git checkout`, `git switch`, or `git checkout -b` in `<MAIN>`.**
 The main checkout stays on `master` for the whole run. Branches are created by
 `EnterWorktree` (or `git worktree add <path> -b <name> origin/master`), never
-by switching the main checkout. This has gone wrong twice: a session ran a
-plain `git checkout <branch>` in the main checkout, and because run artifacts
-are written under `<MAIN>/.omo/runs/`, every file that branch predated vanished
-from disk — a just-merged docs file and the tracked
-`.omo/issue-runner-prompt.md` among them. Nothing was lost either time, but it
-reads exactly like data loss, and the first instance went unnoticed for two
-days. A `post-checkout` hook now warns when it happens, and
-`verify_self_audit.py` blocks on it in Phase 3.5.
+by switching the main checkout. Run artifacts are written under
+`<MAIN>/.omo/runs/`, so a branch switch there hides every file that branch
+predates, including this prompt. A `post-checkout` hook warns when it
+happens, and `verify_self_audit.py` blocks on it in Phase 3.5.
 
 **Resolving `<MAIN>`:** run this once, at the start, and reuse the value
 verbatim for the rest of the run. Substitute it everywhere this document
@@ -261,10 +238,8 @@ prompt instructing it to:
 Put this in the dispatch prompt verbatim: any statement that something does
 not exist (no such directory, no such test, no other caller, no existing
 handler) must be written as the command that was run and the output it
-returned, not as a sentence asserting the absence. A run's investigator
-reported "no `tests/e2e` directory exists in the repo at all." It does, and
-acting on that would have shipped a UI change with its browser tier
-untested. A conclusion cannot be checked; a command and its output can.
+returned, not as a sentence asserting the absence. A conclusion cannot be
+checked; a command and its output can.
 
 Quote the issue's literal spec values verbatim in the dispatch prompt (see
 Delegation mechanics). After `investigation.md` comes back, create a
@@ -411,17 +386,13 @@ bundle and byte-diffs it against the committed output, and checks every
 `file:line` citation for a literal identifier match nearby.
 
 **A stale-build finding needs a diagnosis before you may call it
-out-of-scope.** The old rule let any unrelated stale-build report be
-labelled a pre-existing condition and waved into `wrong-directions.md`.
-That rule was written when the checker produced false positives on every
-sourcemap build; both root causes were fixed in PR #332, so the check is
-now trustworthy and the blanket excuse is not. Before applying the label,
-write one line naming which artifact is stale, why nothing in your diff
-could have caused it, and whether it reproduces against a clean
-`origin/master` checkout. If it does reproduce there, it is pre-existing
-and belongs in `wrong-directions.md`. If it does not, it is yours. A run
-published a wrong "pre-existing on origin/master" call under the old
-wording and had to retract it.
+out-of-scope.** The checker no longer false-positives on `--sourcemap`
+builds, so "pre-existing condition" is not a blanket excuse for one. Before
+applying the label, write one line naming which artifact is stale, why
+nothing in your diff could have caused it, and whether it reproduces against
+a clean `origin/master` checkout. If it does reproduce there, it is
+pre-existing and belongs in `wrong-directions.md`. If it does not, it is
+yours.
 
 **Only mark `[x]` after re-confirming the artifact actually exists** —
 open the file and check the test/route/page is really there, don't mark
@@ -432,9 +403,8 @@ tree you wrote them on.** If you rebase, amend, or force-push after
 writing `self-audit.md`, every `file:line` in it is suspect: re-open each
 one at the new head and re-run `verify_self_audit.py` before Phase 4. Line
 drift after a rebase is the second most common self-audit escape in this
-repo, and three independent reviewers read the same instance three
-different ways (a false claim, harmless stale offsets, and normal for a
-hot branch). Re-verifying removes the argument instead of settling it.
+repo, and re-verifying settles it instead of leaving reviewers to argue
+over whether the offsets are stale or the claim is false.
 
 **Disclose any threshold or edge-case decision the issue didn't ask for.**
 Narrowing scope silently is the same class of self-report failure as
@@ -466,12 +436,10 @@ Requirements, each of which `verify_self_audit.py` checks mechanically:
 **`mutation check: N/A` is not accepted, and neither is any other
 exemption.** If the test drives a browser and the function lives in
 `static/rack.js`, the mutation is still mechanical: remove the line, rebuild
-the bundle, re-run, restore, rebuild again. That exact sequence has been
-done on this repo. The one time a run wrote `mutation check: N/A (e2e
-browser test, not a unit test with replaceable function body)`, the test it
-exempted failed 100% of the time and had never been executed at all — only
-syntax-checked with `node -c`. The `N/A` was the last thing standing between
-that and the PR.
+the bundle, re-run, restore, rebuild again. The one run that wrote `mutation
+check: N/A (e2e browser test, not a unit test with replaceable function
+body)` had exempted a test that failed 100% of the time regardless of the
+fix, and had never been executed at all, only syntax-checked with `node -c`.
 
 Restore the mutation before moving on, and confirm with `git diff` that only
 your intended change remains.
@@ -482,14 +450,14 @@ is vacuous for that function: fix the test before checking any test-related
 box. Watch for assertions that read through a proxy. On an external-content
 FTS5 table, `SELECT COUNT(*)` counts the content table, not the index, so
 assert against the real artifact (`_docsize` rows, MATCH results) rather
-than a lookalike. Confirmed on PR #205, where both original tests passed
-while the function under them was a no-op.
+than a lookalike. Tests have passed against a function that was a complete
+no-op for exactly this reason.
 
-**Six checks that honest boxes still miss.** Every one of these escaped a
-self-audit that a reviewer then scored as fully honest, no false `[x]`
-found. They are not honesty failures, they are checks the list never asked
-for, so stronger language about existing items cannot reach them. Add a
-line for each that applies:
+**Six checks that honest boxes still miss.** Every one escaped a self-audit
+a reviewer then scored as fully honest, no false `[x]` found. They are not
+honesty failures; the list simply never asked for them, so stronger language
+about the existing items cannot reach them. Add a line for each that
+applies:
 
 Each of the six needs a `<file>:<line>` or a command plus its output. Prose is
 not evidence and the citation check cannot see it.
@@ -542,9 +510,7 @@ checking any test-related box.
     git -C <MAIN> status --porcelain -uall        # only .omo/runs/ files, plus scheduled_tasks.lock if present
 
 Both halves are checked mechanically by `verify_self_audit.py`, so a wrong
-branch or a stray edit is a blocking finding, not a note. The branch half
-exists because a session twice moved the main checkout off master with a plain
-`git checkout`.
+branch or a stray edit is a blocking finding, not a note.
 
 **This workflow does not run an independent-model audit pass** (opencode's
 `/issue` does, via Oracle in its own Phase 3.75). Self-audit here is
@@ -559,9 +525,8 @@ audit pass; independent review happens via /audit-pr after the PR is opened.
 `verify_self_audit.py` blocks when that line is absent, and blocks on a
 line that neither claims a real pass nor gives this disclosure. The wording
 matters because the checker matches it: `none in-run` plus `/audit-pr` is
-what discharges the gate. This exists because a run once shipped with no
-independent review of any kind and disclosed nothing, which after the fact
-is indistinguishable from a clean pass. Don't let self-audit-only be
+what discharges the gate. Nothing else distinguishes a run that skipped
+independent review from one that passed it, so don't let self-audit-only be
 mistaken for a full review.
 
 **Before Phase 4, confirm all four self-report files exist**:
@@ -619,10 +584,9 @@ Use `.omo/runs/issue-<N>/<your-branch-name>/` (main repo absolute path):
   investigate agent." Cross-check the list against the session's own cost
   data: a mismatch is a transparency gap, not a rounding error. **Your own
   turns count too.** Write one line for the orchestrator's consumption even
-  if the number is an estimate, and label it `Orchestrator`. The file
-  reports what was delegated and has treated the orchestrator as free, so
-  runs that did the work inline reported near-zero, which is backwards from
-  what they actually cost. `verify_self_audit.py` reports a missing
+  if the number is an estimate, and label it `Orchestrator`. Treating the
+  orchestrator as free is how a run that did the work inline reports
+  near-zero for work a model did. `verify_self_audit.py` reports a missing
   orchestrator line as advisory.
 
 Report back to the user: which issue you actually targeted (Phase 0), the
