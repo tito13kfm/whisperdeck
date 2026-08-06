@@ -303,7 +303,8 @@ afterward gave you a specific reason to doubt it.
 
 Check AGENTS.md's testing tiers for what this change requires.
 
-**Playwright MCP** works. Use `browser_navigate`/`browser_snapshot`/
+**Playwright MCP** works; if a browser tool call fails, run `opencode mcp
+list` before concluding it is unavailable. Use `browser_navigate`/`browser_snapshot`/
 `browser_click`/`browser_type`/`browser_console_messages`/`browser_evaluate`
 for live-browser verification — these operate on the accessibility tree, any
 model can drive them. `browser_take_screenshot` needs a vision-capable model
