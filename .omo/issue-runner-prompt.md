@@ -185,12 +185,15 @@ no branch suffix is the main checkout.
 You are the orchestrator/foreman for this task, not the implementer. Delegate
 investigation, coding, and verification to your worker agents.
 
-**The local-agent cap does not apply to this workflow.** Every agent any
+**The local-agent cap does not apply to this workflow.** Every worker any
 phase below uses (`explore`, `deep`, `oracle`, `multimodal-looker`) is
-cloud-billed. The only `lemonade/`-mapped entries are `atlas` and the
-`writing` category, and no phase here uses either, so don't spend a config
-read deciding whether the 2-agent cap binds. It doesn't. If you ever do hand
-a phase to `atlas` or `writing`, re-read AGENTS.md's Lemonade section first.
+cloud-billed. `atlas` is the only `lemonade/`-mapped entry, and no phase
+here uses it, so don't spend a config read deciding whether the 2-agent cap
+binds. It doesn't. If you ever do hand a phase to `atlas`, re-read
+AGENTS.md's Lemonade section first. Don't infer the rest of the mapping
+from this paragraph: it once also named the `writing` category as local
+when that category had already moved to a cloud model, and a stale
+inventory sentence is exactly what this prompt keeps out of AGENTS.md.
 
 ## Agent assignments per phase
 
@@ -215,6 +218,17 @@ effort, so picking between them was a decision with no consequence, and the
 prompt used to send you to the config to make it. It has been removed from
 `oh-my-openagent.json`. If you see it referenced anywhere else, that
 reference is stale.
+
+**`deep` is a category, not an agent name, so it is not dispatchable the way
+`explore` and `oracle` are.** In `oh-my-openagent.json` it lives under
+`categories`, and nothing under `agents` is named `deep`. Dispatching it as
+an agent fails outright: issue #346 got back `Unknown agent: deep` and spent
+a dispatch discovering it. Route it as a category instead. The paragraph
+above and the phase list below both call it a tier because that is what it
+is, but a tier is selected by category, and only names under `agents` can be
+named as one. Check which section of the config a name sits in before
+dispatching it, rather than trusting that everything this document names is
+addressable the same way.
 
 - **Phase 1 (investigate):** `explore` for straightforward "read this file,
   report X" lookups. For anything requiring actual reasoning (comparing the
@@ -566,6 +580,34 @@ self-audit that a reviewer then scored as fully honest, no false `[x]`
 found. They are not honesty failures, they are checks the list never asked
 for, so stronger language about the existing items cannot reach them. Add
 a line for each that applies:
+
+**Each of these six lines carries evidence in the same form the rest of the
+file uses: a `<file>:<line>` citation, or the command you ran and the output
+it returned.** They are the only boxes on this checklist that were allowed to
+be answered from reasoning alone, and that is exactly what went wrong: issue
+#346's `/audit-pr` review blocked on two of them, reporting `contains a false
+[x] claim about cancellation progress state` and `overstates _finish
+behavior`, both written as confident prose with no checkable citation.
+`verify_self_audit.py` could not have caught either, because it only
+validates lines that carry a citation, and neither did. Prose is not
+evidence here for the same reason Phase 1 requires absence claims as command
+plus output: a conclusion cannot be checked, a citation and a command can.
+
+**`N/A` is an answer, not an exemption.** Several of the six genuinely do not
+apply to a given change, and saying so is correct. Say so with the evidence
+that makes it true: `Delivery chain: N/A` earns its `[x]` from
+`git diff --stat` showing no frontend file in the diff, not from the
+assertion that the change is backend-only. Do not invent a `file:line` to
+satisfy the checker when a command is the honest evidence, and do not leave
+a bare `N/A` standing alone.
+
+**If a reviewer catches a false `[x]` and you correct it, say so on the line
+you corrected.** Write what the line originally claimed and that a review
+found it wrong, in one clause. A silently rewritten self-audit reads exactly
+like one that was right the first time, and `.omo/runs/` is gitignored, so
+there is no history anywhere to recover the original wording from. Issue
+#346's two blocked lines were corrected in place with no note, and only the
+reviewer's own verdict file records that they were ever wrong.
 
 - **Value-space exhaustiveness.** Enumerate the values that can actually
   arrive at the code you changed (every status string, every enum member,
