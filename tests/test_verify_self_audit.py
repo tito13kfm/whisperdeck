@@ -673,6 +673,22 @@ def test_six_check_heading_present_but_unrecognized_labels_says_so(tmp_path):
     assert "wording this check does not recognize" in findings[0]
 
 
+def test_an_indented_bullet_box_cannot_borrow_the_next_box_s_evidence(tmp_path):
+    """Continuation lines belong to the box above them, but a box is never a
+    continuation of another box. Written as an indented bullet list, a bare
+    N/A would otherwise absorb the following line's command and pass on
+    evidence that was never its own."""
+    findings = verify_self_audit.check_six_checks(_audit(tmp_path, """
+## Six "honest boxes still miss" checks
+
+  - [x] Delivery chain: N/A, backend-only change.
+  - [x] Suite count tied to invocation: `pytest tests/ -q` -> 911 passed.
+"""))
+    assert len(findings) == 1
+    assert findings[0].startswith("SIX-CHECK WITHOUT EVIDENCE")
+    assert "delivery-chain" in findings[0]
+
+
 def test_six_check_open_box_is_not_a_claim(tmp_path):
     """`[ ]` is an honest not-done, so it cannot be a false claim. Only `[x]`
     lines are held to evidence, same rule as the rest of the file."""

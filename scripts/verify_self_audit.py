@@ -673,17 +673,24 @@ SIX_COMMAND_RE = re.compile(
 )
 
 
+BOX_LINE_RE = re.compile(r"^(?:[-*]\s*)?\[[x ]\]\s*(?P<body>.+)$", re.IGNORECASE)
+
+
 def six_check_blocks(text: str):
     """Yield (label, header_line, block_text) for each `[x]` six-check box.
 
     A box owns its own line plus any indented continuation beneath it, the
-    same ownership rule the mutation-transcript check uses.
+    same ownership rule the mutation-transcript check uses. It stops at the
+    next box even when that box is itself indented: a self-audit written as
+    an indented bullet list (`  - [x] ...`) would otherwise let one box
+    swallow the next one's citation and pass on borrowed evidence, which is
+    the exact false pass this check exists to close.
     """
     lines = text.splitlines()
     for i, raw in enumerate(lines):
         stripped = raw.strip()
-        m = re.match(r"^(?:[-*]\s*)?\[x\]\s*(?P<body>.+)$", stripped, re.IGNORECASE)
-        if not m:
+        m = BOX_LINE_RE.match(stripped)
+        if not m or not re.match(r"^(?:[-*]\s*)?\[x\]", stripped, re.IGNORECASE):
             continue
         body = m.group("body")
         label = next((name for name, rx in SIX_CHECK_LABELS if rx.search(body)), None)
@@ -691,7 +698,10 @@ def six_check_blocks(text: str):
             continue
         block = [raw]
         for follow in lines[i + 1:]:
-            if follow.strip() and not follow[:1].isspace():
+            if not follow.strip():
+                block.append(follow)
+                continue
+            if not follow[:1].isspace() or BOX_LINE_RE.match(follow.strip()):
                 break
             block.append(follow)
         yield label, stripped, "\n".join(block)
