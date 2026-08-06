@@ -1202,6 +1202,38 @@ leave several comments on it.
   were updated in the same change so no runner is asked for something it was
   never told.
 - Row 19 and the `/audit-pr` default change live under `~/.config/opencode/`,
-  which is not a git repository at all. They have no history and no review.
-  This is the third batch of edits to land there, and the Tier 1 caveat asking
-  whether those files want row 6's treatment is still unanswered.
+  which was not a git repository at all when they landed. They had no history
+  and no review, and they were the third batch of edits to arrive there that
+  way.
+
+  **Resolved the same day.** That directory is now a git repository, branch
+  `main`, baseline commit `b5b4ea7`, covering the config, both audit-pr
+  prompt surfaces, the agent definitions and the commands. It is **local only
+  and has no remote, deliberately**: the safety argument for versioning a
+  credential-adjacent config tree is that its history never leaves the
+  machine. `core.autocrlf` is off and `core.eol` is `lf` for that repo, so a
+  checkout cannot rewrite the line endings of files opencode reads.
+  `node_modules/` and its lockfiles, the `.codegraph` index, and
+  `.omo/run-continuation/` session state are untracked.
+
+  This closes the history and rollback half of the Tier 1 caveat. It does not
+  close the review half, and cannot: there is no PR flow on a local repo. The
+  two runner prompts remain the surfaces that get review, because those live
+  in this repo.
+
+  Worth recording what the setup found, because it is the reason the repo has
+  no remote. Two stale backups held plaintext API keys:
+  `opencode.jsonc.preswap-20260728` and `archive-2026-07-24/opencode.json`,
+  between them an OpenRouter key (in both) and a local Unsloth key. The live
+  `opencode.jsonc` had already moved to `{env:...}` placeholders, so these
+  were leftovers rather than current practice. Both files were scrubbed to
+  the same placeholder form **before** `git init`, so no key is in that
+  repository's history, and the scrub was verified by grepping `git log -p
+  --all`. Nothing was ever pushed and nothing leaked, but the OpenRouter key
+  sat in plaintext on disk for weeks and is worth rotating on that basis
+  alone.
+
+  The general lesson is the one this document keeps finding in other forms: a
+  directory nobody versions accumulates state nobody audits. Three batches of
+  prompt edits and two plaintext credentials were sitting in the same tree,
+  and only the prompt edits were ever noticed.
