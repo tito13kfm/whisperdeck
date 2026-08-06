@@ -62,5 +62,11 @@ scripts/settings_payload.json
 .omo/*
 !.omo/issue-runner-prompt.md
 
-# task-observer tool output, retiring, never produced a skill
+# task-observer tool output, retiring, never produced a skill.
+# Both spellings on purpose. The directory was tracked as skill-observations/
+# and later renamed to .skill-observations/, but the pattern was never updated,
+# so the dotted directory it actually writes to has been showing as untracked
+# ever since. The undotted pattern stays for any machine still on the old
+# layout.
+.skill-observations/
 skill-observations/
