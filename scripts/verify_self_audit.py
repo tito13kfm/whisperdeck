@@ -644,14 +644,25 @@ def check_token_usage(self_audit_path: Path):
 # label each one is written under, plus the section heading they sit beneath,
 # because a run that reworded one label should still be recognized as having
 # answered it.
+#
+# Anchored to the start of the box, because these are labels, not phrases.
+# Matching them anywhere in the line claimed a box that read `[x] LSP
+# diagnostics -- ... direct pytest and full suite passed` as the suite-count
+# check and flagged it for citing nothing, on issue #306's real self-audit. A
+# box announces which of the six it is answering in its opening words or it
+# is not one of them.
 SIX_CHECK_LABELS = (
-    ("value-space", re.compile(r"value[- ]space|value space exhaustiv", re.IGNORECASE)),
+    ("value-space", re.compile(r"value[- ]space", re.IGNORECASE)),
     ("boundary-cardinality", re.compile(r"boundary cardinalit", re.IGNORECASE)),
     ("delivery-chain", re.compile(r"delivery chain", re.IGNORECASE)),
     ("progress-counters", re.compile(r"done\s*==\s*total|progress counter", re.IGNORECASE)),
-    ("deferrals", re.compile(r"deferral", re.IGNORECASE)),
-    ("suite-count", re.compile(r"suite count|full (?:test )?suite\b", re.IGNORECASE)),
+    ("deferrals", re.compile(r"(?:every )?deferral", re.IGNORECASE)),
+    ("suite-count", re.compile(r"(?:a )?suite count|full (?:test )?suite\b", re.IGNORECASE)),
 )
+# How far into the box a label may start. Enough to clear the decoration a
+# label picks up in practice (`**`, a backtick, a leading `A `), not enough to
+# reach a phrase in the middle of a sentence.
+SIX_LABEL_LEAD = 12
 SIX_CHECK_HEADING_RE = re.compile(r"^#+\s+.*\bsix\b", re.IGNORECASE)
 # `N/A` is a legitimate answer for several of these on a given change. It is
 # rejected only when nothing checkable stands behind it.
@@ -693,7 +704,15 @@ def six_check_blocks(text: str):
         if not m or not re.match(r"^(?:[-*]\s*)?\[x\]", stripped, re.IGNORECASE):
             continue
         body = m.group("body")
-        label = next((name for name, rx in SIX_CHECK_LABELS if rx.search(body)), None)
+        label = next(
+            (
+                name
+                for name, rx in SIX_CHECK_LABELS
+                for hit in [rx.search(body)]
+                if hit and hit.start() <= SIX_LABEL_LEAD
+            ),
+            None,
+        )
         if label is None:
             continue
         block = [raw]

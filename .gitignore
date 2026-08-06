@@ -32,9 +32,19 @@ scripts/ux_audit_*
 scripts/provider_local.json
 scripts/settings_payload.json
 
-# OpenCode project-level config (agents use global ~/.config/opencode/agents/)
-.opencode/
-!.opencode/oh-my-openagent.jsonc
+# OpenCode project-level config (agents use global ~/.config/opencode/agents/).
+# `.opencode/*` rather than `.opencode/`, because git cannot re-include a file
+# whose parent directory is itself excluded: the old `!.opencode/oh-my-openagent.jsonc`
+# line never took effect, and nothing under this directory was ever tracked.
+# oh-my-openagent.jsonc stays untracked on purpose (it is a local per-machine
+# override and says so in its own header). `command/issue.md` is tracked,
+# same reasoning as `.omo/issue-runner-prompt.md` below: it pins which agent
+# orchestrates a /issue run, and a run that silently used whatever agent the
+# session had selected produced a PR audited by the model that wrote it.
+.opencode/*
+!.opencode/command/
+.opencode/command/*
+!.opencode/command/issue.md
 
 # Local unsloth studio scratch/working dir (machine-local, unrelated to this project)
 unsloth_compiled_cache/
