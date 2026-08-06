@@ -61,6 +61,7 @@ scripts/settings_payload.json
 # negation below.
 .omo/*
 !.omo/issue-runner-prompt.md
+!.omo/runs/*
 
 # task-observer tool output, retiring, never produced a skill.
 # Both spellings on purpose. The directory was tracked as skill-observations/
