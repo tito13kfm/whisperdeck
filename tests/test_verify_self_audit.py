@@ -689,6 +689,31 @@ def test_an_indented_bullet_box_cannot_borrow_the_next_box_s_evidence(tmp_path):
     assert "delivery-chain" in findings[0]
 
 
+def test_a_phrase_mid_sentence_does_not_claim_a_six_check_box(tmp_path):
+    """Issue #306's real self-audit, shortened. This box is about LSP, and it
+    mentions a full suite run in passing. Matching the label anywhere in the
+    line read it as the suite-count check and flagged it for citing nothing,
+    while the actual suite-count box two lines up was fine."""
+    findings = verify_self_audit.check_six_checks(_audit(tmp_path, """
+## Six "honest boxes still miss" checks
+
+[x] Suite count tied to invocation — full-suite count above is from the unfiltered `pytest -q` invocation.
+[x] LSP diagnostics — command lsp_diagnostics(services/llm_jobs.py) returned LSP file path must be inside request cwd; direct pytest and full suite passed.
+"""))
+    assert findings == []
+
+
+def test_a_label_behind_light_decoration_still_counts(tmp_path):
+    """Runs write these as bold or backticked labels. The anchor has to clear
+    that much or it stops recognizing the boxes it exists to check."""
+    findings = verify_self_audit.check_six_checks(_audit(tmp_path, """
+[x] **Delivery chain**: N/A, backend only.
+"""))
+    assert len(findings) == 1
+    assert findings[0].startswith("SIX-CHECK WITHOUT EVIDENCE")
+    assert "delivery-chain" in findings[0]
+
+
 def test_six_check_open_box_is_not_a_claim(tmp_path):
     """`[ ]` is an honest not-done, so it cannot be a false claim. Only `[x]`
     lines are held to evidence, same rule as the rest of the file."""
