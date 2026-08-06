@@ -21,11 +21,14 @@ Six deterministic checks, no model calls:
    pointed at unrelated code after the file drifted).
 
 3. Mutation-check evidence: every `[x] ... mutation check` box must show a
-   runner invocation plus a pass count and a failure count, so the box
-   records what was observed instead of what was predicted. Four runs in one
-   week shipped a mutation claim that had never been applied, and a fifth
-   used `mutation check: N/A` on a test that failed unconditionally and had
-   only ever been syntax-checked. Exemptions are rejected outright.
+   runner invocation, a pass count, a failure count, and the line the runner
+   printed when it failed, so the box records what was observed instead of
+   what was predicted. Four runs in one week shipped a mutation claim that had
+   never been applied, and a fifth used `mutation check: N/A` on a test that
+   failed unconditionally and had only ever been syntax-checked. Exemptions
+   are rejected outright. The failure line is required because counts alone
+   proved forgeable: PR #353 reported `1 failed` for a test that passes with
+   or without the code under it.
 
 4. Main-checkout hygiene: the main checkout must be on master with nothing
    but `.omo/runs/` artifacts modified. The prompts already require the clean
@@ -356,6 +359,22 @@ MUTATION_RUNNER_RE = re.compile(
 # prediction; "-> 1 failed" is an observation. Only the latter matches.
 MUTATION_GREEN_RE = re.compile(r"\b\d+\s+passed\b", re.IGNORECASE)
 MUTATION_RED_RE = re.compile(r"\b\d+\s+(?:failed|error|errors)\b", re.IGNORECASE)
+# A count says a test went red. It does not say WHICH check went red, and a
+# count is the one part of a transcript that can be written without running
+# anything. PR #353's box read `reran -> 1 failed, progress_done was 2` for a
+# test that passes with or without the guard, because the assertion it makes
+# is restored by a later cleanup path either way. So the mutated run also has
+# to show the line the runner printed when it failed: pytest's `E ` prefix, a
+# `FAILED <path>::<test>` line, the assert expression, or the exception class.
+# None of these is impossible to fabricate. All of them are specific enough
+# that a reviewer can check them against the test source, which a bare count
+# is not.
+MUTATION_FAILURE_LINE_RE = re.compile(
+    r"(?m)^\s*E\s+\S"                          # pytest's failure detail prefix
+    r"|\bFAILED\s+\S+::\S+"                    # pytest's failure summary line
+    r"|\bassert\s+\S+\s*(?:==|!=|<=|>=|<|>|\bis\b|\bin\b|\bnot\b)"  # the assertion
+    r"|\b[A-Za-z_][A-Za-z0-9_]*(?:Error|Exception)\b",              # or what raised
+)
 
 
 def check_mutation_transcripts(self_audit_path: Path):
@@ -374,6 +393,15 @@ def check_mutation_transcripts(self_audit_path: Path):
     a pass count for the unmutated run, and a failure count for the mutated
     one. Counts rather than words, because "fails if replaced by return" is
     exactly the prediction being rejected.
+
+    Counts alone turned out to be forgeable. PR #353 wrote `reran -> 1 failed,
+    progress_done was 2` about a test that passes with or without the code
+    under it, because a later cleanup path restores the state it asserts on
+    either way, and an independent reviewer had to read the source to see it.
+    So the mutated run must also show what the runner printed when it failed,
+    the assert or the exception, not just how many tests were red. That is
+    still forgeable, but it names something a reviewer can check against the
+    test in one read.
     """
     findings = []
     lines = self_audit_path.read_text(encoding="utf-8").splitlines()
@@ -410,6 +438,12 @@ def check_mutation_transcripts(self_audit_path: Path):
                 missing.append("an unmutated pass count (e.g. `1 passed`)")
             if not MUTATION_RED_RE.search(text):
                 missing.append("a mutated failure count (e.g. `1 failed`)")
+            if not MUTATION_FAILURE_LINE_RE.search(text):
+                missing.append(
+                    "the line the runner printed when it failed (the `E assert "
+                    "...` detail, a `FAILED <file>::<test>` line, or the "
+                    "exception), not just the count"
+                )
             if missing:
                 findings.append(
                     f"MUTATION CLAIM NOT EVIDENCED: '{label}' states an outcome "

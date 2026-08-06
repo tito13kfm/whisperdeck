@@ -450,6 +450,7 @@ results:
 [x] test_<name> — mutation check:
     ran: <MAIN>/.venv/Scripts/python.exe -m pytest tests/test_x.py::test_name -q  ->  1 passed
     mutated: <function> body -> `return None`; reran  ->  1 failed
+        E       assert 2 == 0
     restored: reran  ->  1 passed
 ```
 
@@ -458,6 +459,9 @@ Requirements, each of which `verify_self_audit.py` checks mechanically:
 - A real runner invocation appears (`pytest`, `node --test`, `npm test`).
 - An unmutated green result appears as a count, e.g. `1 passed`.
 - A mutated red result appears as a count, e.g. `1 failed`.
+- The failure line the runner printed: pytest's `E assert ...` detail, a
+  `FAILED <file>::<test>` line, or the exception. Paste it verbatim. A count
+  alone is not accepted.
 
 **`mutation check: N/A` is not accepted, and neither is any other
 exemption.** If the test drives a browser and the function lives in
@@ -487,29 +491,15 @@ found. They are not honesty failures, they are checks the list never asked
 for, so stronger language about existing items cannot reach them. Add a
 line for each that applies:
 
-**Each of these six carries evidence in the same form the rest of the file
-uses: a `<file>:<line>` citation, or the command you ran and the output it
-returned.** They are the only boxes here that were ever answerable from
-reasoning alone, and that is what went wrong. A run answered them in prose,
-an independent reviewer then blocked two as false, and `verify_self_audit.py`
-could not have caught either, because its citation check skips any line that
-carries no citation. A conclusion cannot be checked; a citation and a command
-can. The checker now blocks a bare `N/A` on these boxes, so this is a gate,
-not a style note.
+Each of the six needs a `<file>:<line>` or a command plus its output. Prose is
+not evidence and the citation check cannot see it.
 
-**`N/A` is an answer, not an exemption.** Several of the six genuinely do not
-apply to a given change, and saying so is correct. Say it with the evidence
-that makes it true: `Delivery chain: N/A` earns its `[x]` from
-`git diff --stat` showing no frontend file in the diff, not from the
-assertion that the change is backend-only. Don't invent a `file:line` to get
-past the checker when a command is the honest evidence, and don't leave a
-bare `N/A` standing alone.
+`N/A` is allowed with evidence, blocked without it:
+`` Delivery chain: N/A, `git diff --stat` shows no frontend file ``. Don't
+invent a `file:line` where a command is the real evidence.
 
-**If a reviewer catches a false `[x]` and you correct it, say so on the line
-you corrected.** One clause naming what it originally claimed and that a
-review found it wrong. A silently rewritten self-audit reads exactly like one
-that was right the first time, and `.omo/runs/` is gitignored, so no history
-anywhere holds the original wording.
+If a review finds an `[x]` false, correct the line and say on it that a review
+found it wrong.
 
 - **Value-space exhaustiveness.** Enumerate the values that can actually
   arrive at the code you changed (every status string, every enum member,
