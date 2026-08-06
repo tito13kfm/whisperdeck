@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Mechanically verify a self-audit.md before it's trusted.
 
-Five deterministic checks, no model calls:
+Six deterministic checks, no model calls:
 
 1. Build freshness: for every esbuild `<src> ... --outfile=<out>` script in
    package.json, rebuild <src> to a temp file and diff it byte-for-byte
@@ -42,6 +42,17 @@ Five deterministic checks, no model calls:
    sibling token-usage.md has to name it, because four runs recorded an Oracle
    verdict in self-audit.md while omitting the single largest paid per-run
    cost from their agent table.
+
+6. Six-check evidence: the six add-on checks the prompts require (value-space
+   exhaustiveness, boundary cardinality, delivery chain, done == total,
+   deferrals matched against the issue text, suite count tied to its
+   invocation) must each rest on a file:line or a command, not on prose.
+   Check 2 skips any line without a citation, so these were the one part of
+   the checklist nothing mechanical could reach: issue #346 shipped two of
+   them written from reasoning, and an independent reviewer blocked both as
+   false. Blocking is narrow here, a bare `N/A` with nothing behind it, since
+   a check that blocks an honest run just teaches the next one to invent a
+   citation.
 
 This does not replace a real review -- keyword overlap is a cheap smoke
 test, not a semantic check -- but it costs no tokens, is exact where it can
@@ -629,10 +640,141 @@ def check_token_usage(self_audit_path: Path):
     return findings
 
 
+# The six checks the prompts add on top of the promise list. Matched on the
+# label each one is written under, plus the section heading they sit beneath,
+# because a run that reworded one label should still be recognized as having
+# answered it.
+SIX_CHECK_LABELS = (
+    ("value-space", re.compile(r"value[- ]space|value space exhaustiv", re.IGNORECASE)),
+    ("boundary-cardinality", re.compile(r"boundary cardinalit", re.IGNORECASE)),
+    ("delivery-chain", re.compile(r"delivery chain", re.IGNORECASE)),
+    ("progress-counters", re.compile(r"done\s*==\s*total|progress counter", re.IGNORECASE)),
+    ("deferrals", re.compile(r"deferral", re.IGNORECASE)),
+    ("suite-count", re.compile(r"suite count|full (?:test )?suite\b", re.IGNORECASE)),
+)
+SIX_CHECK_HEADING_RE = re.compile(r"^#+\s+.*\bsix\b", re.IGNORECASE)
+# `N/A` is a legitimate answer for several of these on a given change. It is
+# rejected only when nothing checkable stands behind it.
+SIX_EXEMPTION_RE = re.compile(
+    r"\b(?:n/a|n\.a\.|not applicable|does not apply|doesn'?t apply)\b",
+    re.IGNORECASE,
+)
+# A `path/to/file.ext:123` citation anywhere in the box or its continuations.
+SIX_CITATION_RE = re.compile(r"[\w./\\-]+\.\w+:\d+")
+# Or the command that establishes the claim. `git diff --stat` showing no
+# frontend file is real evidence for a delivery-chain N/A; the sentence "this
+# is a backend-only change" is not. The backticks are required, not
+# decoration: a bare word match turns prose like "find the other caller" or
+# "git history shows" into evidence, and this check exists precisely because
+# prose was passing for evidence.
+SIX_COMMAND_RE = re.compile(
+    r"`[^`]*\b(?:git|grep|rg|ls|find|pytest|npm|node|python3?|gh|esbuild)\b[^`]*`",
+    re.IGNORECASE,
+)
+
+
+BOX_LINE_RE = re.compile(r"^(?:[-*]\s*)?\[[x ]\]\s*(?P<body>.+)$", re.IGNORECASE)
+
+
+def six_check_blocks(text: str):
+    """Yield (label, header_line, block_text) for each `[x]` six-check box.
+
+    A box owns its own line plus any indented continuation beneath it, the
+    same ownership rule the mutation-transcript check uses. It stops at the
+    next box even when that box is itself indented: a self-audit written as
+    an indented bullet list (`  - [x] ...`) would otherwise let one box
+    swallow the next one's citation and pass on borrowed evidence, which is
+    the exact false pass this check exists to close.
+    """
+    lines = text.splitlines()
+    for i, raw in enumerate(lines):
+        stripped = raw.strip()
+        m = BOX_LINE_RE.match(stripped)
+        if not m or not re.match(r"^(?:[-*]\s*)?\[x\]", stripped, re.IGNORECASE):
+            continue
+        body = m.group("body")
+        label = next((name for name, rx in SIX_CHECK_LABELS if rx.search(body)), None)
+        if label is None:
+            continue
+        block = [raw]
+        for follow in lines[i + 1:]:
+            if not follow.strip():
+                block.append(follow)
+                continue
+            if not follow[:1].isspace() or BOX_LINE_RE.match(follow.strip()):
+                break
+            block.append(follow)
+        yield label, stripped, "\n".join(block)
+
+
+def check_six_checks(self_audit_path: Path):
+    """The six add-on checks must carry evidence, not reasoning.
+
+    Every other `[x]` on this checklist points at something: a file:line, a
+    test name, a mutation transcript. The six checks the prompts bolted on
+    later were answerable in prose, and issue #346 shipped two that a paid
+    reviewer then blocked as false, one of them a concrete wrong claim about
+    cancellation progress state. Neither was reachable by `check_citations`,
+    because a line with no citation is a line that check skips entirely.
+
+    So: a `file:line`, or the command that establishes the claim. Blocking is
+    kept narrow on purpose. An `N/A` with nothing behind it is rejected,
+    because that is the shape both #346 misses had. Anything else missing
+    evidence is advisory, since a checker that blocks an honest run teaches
+    the next run to manufacture a citation, which is worse than the prose it
+    replaced.
+    """
+    findings = []
+    text = self_audit_path.read_text(encoding="utf-8", errors="replace")
+    blocks = list(six_check_blocks(text))
+
+    if not blocks:
+        has_heading = any(SIX_CHECK_HEADING_RE.match(l) for l in text.splitlines())
+        findings.append(
+            "SIX-CHECK BLOCK MISSING (advisory): no `[x]` line matches any of "
+            "the six add-on checks (value-space exhaustiveness, boundary "
+            "cardinality, delivery chain, done == total, deferrals matched "
+            "against the issue text, suite count tied to its invocation)."
+            + (
+                " A section heading for them is present, so they were probably "
+                "answered under wording this check does not recognize."
+                if has_heading
+                else " The section appears to be absent entirely."
+            )
+        )
+        return findings
+
+    for label, header, block in blocks:
+        if SIX_CITATION_RE.search(block) or SIX_COMMAND_RE.search(block):
+            continue
+        shown = header if len(header) <= 120 else header[:117] + "..."
+        if SIX_EXEMPTION_RE.search(block):
+            findings.append(
+                f"SIX-CHECK WITHOUT EVIDENCE: the {label} box is answered N/A "
+                f"with no file:line and no command behind it -- '{shown}'. N/A "
+                "is a fine answer; it still needs what makes it true (a "
+                "`git diff --stat` with no frontend file in it, a grep that "
+                "returns nothing, the citation showing the single code path). "
+                "Two boxes of exactly this shape were blocked as false by a "
+                "reviewer on issue #346."
+            )
+        else:
+            findings.append(
+                f"SIX-CHECK WITHOUT CITATION (advisory): the {label} box cites "
+                f"nothing checkable -- '{shown}'. Add the file:line it rests on "
+                "or the command you ran, so a later reader can confirm it "
+                "without re-deriving your reasoning."
+            )
+
+    return findings
+
+
 ADVISORY_PREFIXES = (
     "WEAK CITATION",
     "TOKEN USAGE INCOMPLETE",
     "WORKTREE NAME MISMATCH",
+    "SIX-CHECK WITHOUT CITATION",
+    "SIX-CHECK BLOCK MISSING",
 )
 
 
@@ -677,11 +819,13 @@ def main():
     findings += check_main_checkout(args.self_audit_path)
     findings += check_independent_review(args.self_audit_path)
     findings += check_token_usage(args.self_audit_path)
+    findings += check_six_checks(args.self_audit_path)
 
     if not findings:
         print("OK: no stale builds, no suspect line citations, "
               "every mutation check evidenced, main checkout on master "
-              "and clean, independent review recorded.")
+              "and clean, independent review recorded, six add-on checks "
+              "evidenced.")
         return 0
 
     blocking = [f for f in findings if not f.startswith(ADVISORY_PREFIXES)]

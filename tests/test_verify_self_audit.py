@@ -494,7 +494,10 @@ def test_missing_orchestrator_line_is_advisory(tmp_path, monkeypatch, capsys):
     proves nothing about how main() classifies it."""
     audit = _audit_pair(
         tmp_path,
-        "Independent review: none in-run; via /audit-pr after the PR.\n",
+        "Independent review: none in-run; via /audit-pr after the PR.\n"
+        # Carries an evidenced six-check line so check 6 stays silent here and
+        # the count below keeps meaning "the orchestrator advisory, once".
+        "[x] Suite count tied to invocation: `pytest tests/ -q` -> 911 passed.\n",
         "No model calls were made. All work used deterministic tools.\n",
     )
     findings = verify_self_audit.check_token_usage(audit)
@@ -589,3 +592,110 @@ def test_no_matching_worktree_returns_a_pair_of_nones(tmp_path, monkeypatch):
     repo, _wt, audit = _worktree_repo(tmp_path, "issue-42-thing", "totally-unrelated")
     monkeypatch.chdir(repo)
     assert verify_self_audit.find_worktree_for_branch_dir(audit) == (None, None)
+
+
+# --- check 6: the six add-on checks carry evidence, not reasoning -----------
+# Issue #346 answered these in prose, `/audit-pr` blocked two of them as false,
+# and check 2 could not see either one because a line with no citation is a
+# line it skips. Blocking here is deliberately narrow, so the passing cases
+# matter as much as the failing one.
+
+def test_six_checks_with_citations_and_commands_pass(tmp_path):
+    """An honestly evidenced block, including two N/A boxes that earn it with a
+    command rather than a file:line."""
+    findings = verify_self_audit.check_six_checks(_audit(tmp_path, """
+## Six "honest boxes still miss" checks
+
+[x] Value-space exhaustiveness: status is "running" or "cancelled" here; both
+    paths handled at services/llm_jobs.py:674.
+[x] Boundary cardinality: N/A, single-await path, not a collection.
+    `rg -n "for .* in " services/llm_jobs.py:660,690` -> no loop in this branch.
+[x] Delivery chain: N/A, backend only. `git diff --stat` -> no static/ file in
+    the diff.
+[x] done == total on progress counters: both reset to 0/0 at
+    services/llm_jobs.py:303.
+[x] Every deferral matched against issue text: no deferrals.
+    `grep -c "\\[decision\\]" self-audit.md` -> 0
+[x] Suite count tied to invocation: `.venv/Scripts/python.exe -m pytest tests/ -q`
+    -> 911 passed, 22 deselected.
+"""))
+    assert findings == []
+
+
+def test_six_check_bare_na_is_blocking(tmp_path):
+    """The #346 shape: an exemption standing on its own reasoning. This is the
+    only case that blocks."""
+    findings = verify_self_audit.check_six_checks(_audit(tmp_path, """
+[x] Delivery chain: N/A, this is a backend-only change (no frontend code
+    modified).
+"""))
+    assert len(findings) == 1
+    assert findings[0].startswith("SIX-CHECK WITHOUT EVIDENCE")
+    assert "delivery-chain" in findings[0]
+
+
+def test_six_check_prose_without_na_is_advisory_not_blocking(tmp_path):
+    """A confident un-cited answer is worth flagging, but blocking it would
+    push the next run to manufacture a citation to get past the checker."""
+    findings = verify_self_audit.check_six_checks(_audit(tmp_path, """
+[x] Value-space exhaustiveness: every status value reaching this branch is
+    handled correctly.
+"""))
+    assert len(findings) == 1
+    assert findings[0].startswith("SIX-CHECK WITHOUT CITATION")
+    assert not findings[0].startswith(verify_self_audit.ADVISORY_PREFIXES[:3])
+    assert findings[0].startswith(verify_self_audit.ADVISORY_PREFIXES)
+
+
+def test_six_checks_absent_entirely_is_reported(tmp_path):
+    """Without this the check silently passes the run that skipped the section,
+    which is the run that needs it most."""
+    findings = verify_self_audit.check_six_checks(_audit(tmp_path, """
+## Promises from investigation.md
+
+[x] `rediarize` cancel guard — delivered at services/llm_jobs.py:674
+"""))
+    assert len(findings) == 1
+    assert findings[0].startswith("SIX-CHECK BLOCK MISSING")
+    assert "absent entirely" in findings[0]
+
+
+def test_six_check_heading_present_but_unrecognized_labels_says_so(tmp_path):
+    """Distinguishes "answered under different wording" from "never answered",
+    because the two need different fixes."""
+    findings = verify_self_audit.check_six_checks(_audit(tmp_path, """
+## Six extra checks
+
+[x] Everything looked fine on all six.
+"""))
+    assert len(findings) == 1
+    assert findings[0].startswith("SIX-CHECK BLOCK MISSING")
+    assert "wording this check does not recognize" in findings[0]
+
+
+def test_an_indented_bullet_box_cannot_borrow_the_next_box_s_evidence(tmp_path):
+    """Continuation lines belong to the box above them, but a box is never a
+    continuation of another box. Written as an indented bullet list, a bare
+    N/A would otherwise absorb the following line's command and pass on
+    evidence that was never its own."""
+    findings = verify_self_audit.check_six_checks(_audit(tmp_path, """
+## Six "honest boxes still miss" checks
+
+  - [x] Delivery chain: N/A, backend-only change.
+  - [x] Suite count tied to invocation: `pytest tests/ -q` -> 911 passed.
+"""))
+    assert len(findings) == 1
+    assert findings[0].startswith("SIX-CHECK WITHOUT EVIDENCE")
+    assert "delivery-chain" in findings[0]
+
+
+def test_six_check_open_box_is_not_a_claim(tmp_path):
+    """`[ ]` is an honest not-done, so it cannot be a false claim. Only `[x]`
+    lines are held to evidence, same rule as the rest of the file."""
+    findings = verify_self_audit.check_six_checks(_audit(tmp_path, """
+## Six "honest boxes still miss" checks
+
+[ ] Delivery chain: not checked, ran out of time.
+[x] Suite count tied to invocation: `pytest tests/ -q` -> 911 passed.
+"""))
+    assert findings == []

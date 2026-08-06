@@ -487,6 +487,30 @@ found. They are not honesty failures, they are checks the list never asked
 for, so stronger language about existing items cannot reach them. Add a
 line for each that applies:
 
+**Each of these six carries evidence in the same form the rest of the file
+uses: a `<file>:<line>` citation, or the command you ran and the output it
+returned.** They are the only boxes here that were ever answerable from
+reasoning alone, and that is what went wrong. A run answered them in prose,
+an independent reviewer then blocked two as false, and `verify_self_audit.py`
+could not have caught either, because its citation check skips any line that
+carries no citation. A conclusion cannot be checked; a citation and a command
+can. The checker now blocks a bare `N/A` on these boxes, so this is a gate,
+not a style note.
+
+**`N/A` is an answer, not an exemption.** Several of the six genuinely do not
+apply to a given change, and saying so is correct. Say it with the evidence
+that makes it true: `Delivery chain: N/A` earns its `[x]` from
+`git diff --stat` showing no frontend file in the diff, not from the
+assertion that the change is backend-only. Don't invent a `file:line` to get
+past the checker when a command is the honest evidence, and don't leave a
+bare `N/A` standing alone.
+
+**If a reviewer catches a false `[x]` and you correct it, say so on the line
+you corrected.** One clause naming what it originally claimed and that a
+review found it wrong. A silently rewritten self-audit reads exactly like one
+that was right the first time, and `.omo/runs/` is gitignored, so no history
+anywhere holds the original wording.
+
 - **Value-space exhaustiveness.** Enumerate the values that can actually
   arrive at the code you changed (every status string, every enum member,
   every exception type a call can raise) and confirm each has a correct
