@@ -13,6 +13,7 @@ test_audio.mp3
 !.claude/commands/
 !.claude/commands/**
 !.claude/issue-runner-prompt.md
+!.claude/idea-runner-prompt.md
 .serena/
 *.log
 dist/
