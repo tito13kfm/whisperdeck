@@ -144,12 +144,11 @@ your cwd already is; report writes go to the absolute main-repo path
 above, regardless of cwd.
 
 **Never run `git checkout`, `git switch`, or `git checkout -b` in `<MAIN>`.**
-The main checkout stays on `master` for the whole run. Branches are created by
-`EnterWorktree` (or `git worktree add <path> -b <name> origin/master`), never
-by switching the main checkout. Run artifacts are written under
-`<MAIN>/.omo/runs/`, so a branch switch there hides every file that branch
-predates, including this prompt. A `post-checkout` hook warns when it
-happens, and `verify_self_audit.py` blocks on it in Phase 3.5.
+This repo's `CLAUDE.md` already covers why (run artifacts hide under a
+branch switch there) and what enforces it (`post-checkout` hook,
+`verify_self_audit.py` in Phase 3.5). Branches are created by
+`EnterWorktree` (or `git worktree add <path> -b <name> origin/master`),
+never by switching the main checkout.
 
 **Resolving `<MAIN>`:** run this once, at the start, and reuse the value
 verbatim for the rest of the run. Substitute it everywhere this document
@@ -461,10 +460,9 @@ Requirements, each of which `verify_self_audit.py` checks mechanically:
 **`mutation check: N/A` is not accepted, and neither is any other
 exemption.** If the test drives a browser and the function lives in
 `static/rack.js`, the mutation is still mechanical: remove the line, rebuild
-the bundle, re-run, restore, rebuild again. The one run that wrote `mutation
-check: N/A (e2e browser test, not a unit test with replaceable function
-body)` had exempted a test that failed 100% of the time regardless of the
-fix, and had never been executed at all, only syntax-checked with `node -c`.
+the bundle, re-run, restore, rebuild again. This exemption has been used
+before to wave through a test that had never actually run (only
+syntax-checked with `node -c`) and would have failed 100% of the time.
 
 Restore the mutation before moving on, and confirm with `git diff` that only
 your intended change remains.
@@ -585,11 +583,9 @@ not only to code correctness:
 
 Open against `master`, `Closes #<N>` in the body (the real target issue
 number from Phase 0, not a tracking issue's number) so it auto-closes on
-merge. No AI-authorship trailers (no `Co-Authored-By: Claude`, no
-"Generated with..." footer), commit as the normal configured git user. No
-em/en dashes, plain language, repo writing style. Do not merge — stop
-after opening the PR, same as this repo's existing PR-hygiene rule for
-issue-runner output.
+merge. Follow this repo's `CLAUDE.md` for commit/PR hygiene and writing
+style (you already have it loaded). Do not merge: stop after opening
+the PR.
 
 ## Phase 5: self-report
 
