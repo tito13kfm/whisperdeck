@@ -2,7 +2,7 @@
 import pytest
 
 from database import Transcript, User
-from services.search import search_transcripts, search_transcripts_snippets, _MAX_QUERY_CHARS
+from services.search import search_transcripts, search_transcripts_snippets, _MAX_QUERY_CHARS, _matches_segment
 from sqlalchemy import text
 
 
@@ -204,6 +204,60 @@ def test_matching_segments_empty_when_match_in_full_text_only(db_session):
     assert results[0]["matching_segments"] == []
 
 
+def test_matches_segment_porter_semantics():
+    """_matches_segment defers to FTS5 with the same porter unicode61
+    tokenizer as transcripts_fts, so segment matching agrees with the
+    index instead of approximating it (issue #192)."""
+    # Stemmed match: happy and happiness both stem to happi
+    assert _matches_segment({"text": "The happiness project"}, ["happy"]) is True
+
+    # Exact word still matches
+    assert _matches_segment({"text": "He was happy with the result"}, ["happy"]) is True
+
+    # Inflections that share a Porter stem match
+    assert _matches_segment({"text": "he was running fast"}, ["run"]) is True
+    assert _matches_segment({"text": "two cats appeared"}, ["cat"]) is True
+
+    # Unrelated words rejected
+    assert _matches_segment({"text": "The cat sat"}, ["happiness"]) is False
+
+    # Empty or missing text never matches
+    assert _matches_segment({"text": ""}, ["happy"]) is False
+    assert _matches_segment({}, ["happy"]) is False
+
+
+def test_matches_segment_rejects_shared_prefix_different_stems():
+    """Regression for every PR #364 audit counterexample: words that share a
+    prefix or substring with the query term but have a different Porter stem
+    must not match. Substring and length-gate heuristics all failed here."""
+    assert _matches_segment({"text": "it will happen"}, ["happy"]) is False
+    assert _matches_segment({"text": "it happens often"}, ["happy"]) is False
+    assert _matches_segment({"text": "concatenate the strings"}, ["cats"]) is False
+    assert _matches_segment({"text": "the runner stumbled"}, ["run"]) is False
+
+
+def test_matching_segments_stemmed_integration(db_session):
+    """Integration: matching_segments includes segments that share a Porter
+    stem with the query even when the literal substring doesn't match, and
+    excludes shared-prefix words with a different stem."""
+    user = _make_user(db_session)
+    _make_transcript(db_session, user.id,
+                     full_text="Discussing the happiness project",
+                     segments=[
+                         {"speaker": "Alice", "text": "The happiness project",
+                          "start": 0.0, "end": 1.0},
+                         {"speaker": "Bob", "text": "it will happen",
+                          "start": 1.0, "end": 2.0},
+                         {"speaker": "Carol", "text": "hello world",
+                          "start": 2.0, "end": 3.0},
+                     ])
+
+    results = search_transcripts(db_session, user.id, "happy")
+    assert len(results) == 1
+    assert len(results[0]["matching_segments"]) == 1
+    assert results[0]["matching_segments"][0]["text"] == "The happiness project"
+
+
 # ── User isolation ────────────────────────────────────────────────────────
 
 def test_user_isolation(db_session):
@@ -327,6 +381,19 @@ def test_snippets_match_source_segment_text(db_session):
                      segments=[{"speaker": "A", "text": "unique_segment_term here",
                                 "start": 0, "end": 1}])
     results = search_transcripts_snippets(db_session, user.id, "unique_segment_term")
+    assert len(results) == 1
+    assert results[0]["match_source"] == "segment_text"
+
+
+def test_snippets_match_source_stemmed_segment_text(db_session):
+    """match_source uses the same FTS5 porter matching as the segment pass:
+    query 'happy' matching segment text 'happiness' is attributed to
+    segment_text, not the literal-miss fallback of full_text (issue #192)."""
+    user = _make_user(db_session)
+    _make_transcript(db_session, user.id, full_text="base text",
+                     segments=[{"speaker": "A", "text": "the happiness project",
+                                "start": 0, "end": 1}])
+    results = search_transcripts_snippets(db_session, user.id, "happy")
     assert len(results) == 1
     assert results[0]["match_source"] == "segment_text"
 
