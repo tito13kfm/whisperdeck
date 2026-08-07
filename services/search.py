@@ -1,12 +1,15 @@
 """Cross-transcript search using SQLite FTS5 full-text index (issue #108).
 
-search_transcripts(): FTS5 MATCH identifies matching transcript IDs; a secondary
-Python pass over segments JSON extracts per-segment matches for the assistant.
+search_transcripts(): FTS5 MATCH identifies matching transcript IDs; a second
+FTS5 pass over the segment texts (same porter unicode61 tokenizer as the main
+index) identifies per-segment matches for the assistant (issue #192).
 
 search_transcripts_snippets(): FTS5 MATCH with snippet() returns HTML-highlighted
 excerpts for the web UI. Uses external-content mode (content='transcripts') so
 snippet() reads original text from the content table.
 """
+import sqlite3
+
 from sqlalchemy import text
 
 from database import Transcript
@@ -14,75 +17,58 @@ from database import Transcript
 _MAX_QUERY_CHARS = 500
 
 
+def _quote_fts5_term(term: str) -> str:
+    """Double-quote a term for literal FTS5 matching. Embedded double-quotes
+    are escaped by doubling (SQLite FTS5 convention)."""
+    return '"' + term.replace('"', '""') + '"'
+
+
 def _sanitize_fts5_query(query: str) -> str:
-    """Wrap each whitespace-separated term in double-quotes for literal FTS5
-    matching. Embedded double-quotes are escaped by doubling (SQLite FTS5
-    convention)."""
-    terms = query.split()
-    sanitized = []
-    for t in terms:
-        escaped = t.replace('"', '""')
-        sanitized.append(f'"{escaped}"')
-    return " AND ".join(sanitized)
+    """Wrap each whitespace-separated term in double-quotes and join with AND."""
+    return " AND ".join(_quote_fts5_term(t) for t in query.split())
 
 
-# ── Porter stemmer lookup ──────────────────────────────────────────────────
-# FTS5's Porter tokenizer stems inflected words to roots (happy/happiness →
-# happi). _matches_segment does literal substring matching, which misses
-# stemmed matches. Rather than replicate Porter in Python, we use a small
-# in-memory FTS5 table to derive the stemmed form of each query term, then
-# pass those stems as additional search terms to _matches_segment.
-#
-# Example: query "happy" → stem "happi" → "happi" IS a substring of
-# "happiness", so the segment matches. No heuristic, no false positives.
+def _fts_match_indices(texts: list[str], terms: list[str]) -> set[int]:
+    """Return the indices of `texts` that FTS5 matches for any of `terms`,
+    using the same tokenizer as transcripts_fts (porter unicode61).
 
-import sqlite3 as _sqlite3
-import threading as _threading
+    This is the issue #192 fix. The main index matches with Porter stemming
+    (happy/happiness both stem to happi), and any Python-side approximation
+    of that (substring checks, shared prefixes, length gates) has false
+    positives: happen/happy, happens/happy, concatenate/cats, runner/run.
+    Instead of approximating, index the candidate texts into a throwaway
+    in-memory FTS5 table and let FTS5 decide, so this pass agrees with the
+    transcript-level MATCH by construction.
 
-_stem_db = _sqlite3.connect(":memory:", check_same_thread=False)
-_stem_db.execute("CREATE TABLE _stems(id INTEGER PRIMARY KEY, token TEXT)")
-_stem_db.execute("CREATE VIRTUAL TABLE _stems_fts USING fts5(token, tokenize=porter, "
-                 "content=_stems, content_rowid=id)")
-_stem_db.execute("CREATE TRIGGER _stems_ai AFTER INSERT ON _stems BEGIN "
-                 "INSERT INTO _stems_fts(rowid, token) VALUES(NEW.id, NEW.token); END")
-_stem_db.execute("CREATE TRIGGER _stems_ad AFTER DELETE ON _stems BEGIN "
-                 "INSERT INTO _stems_fts(_stems_fts, rowid, token) "
-                 "VALUES('delete', OLD.id, OLD.token); END")
-_stem_db.execute("CREATE VIRTUAL TABLE _stems_vocab USING fts5vocab(_stems_fts, row)")
-_stem_lock = _threading.Lock()
+    Terms are OR-ed: a text matches if it contains any query term. That
+    mirrors the previous per-segment behavior (transcript-level matching
+    remains AND across terms via _sanitize_fts5_query).
+    """
+    if not texts or not terms:
+        return set()
+    match_query = " OR ".join(_quote_fts5_term(t) for t in terms)
+    conn = sqlite3.connect(":memory:")
+    try:
+        conn.execute(
+            "CREATE VIRTUAL TABLE texts_fts "
+            "USING fts5(body, tokenize='porter unicode61')"
+        )
+        conn.executemany(
+            "INSERT INTO texts_fts(rowid, body) VALUES (?, ?)",
+            list(enumerate(texts)),
+        )
+        rows = conn.execute(
+            "SELECT rowid FROM texts_fts WHERE texts_fts MATCH ?",
+            (match_query,),
+        ).fetchall()
+        return {r[0] for r in rows}
+    finally:
+        conn.close()
 
 
-def _stem_terms(terms: list[str]) -> set[str]:
-    """Return FTS5 Porter-stemmed forms of `terms` by inserting them into a
-    small in-memory FTS5 table and reading back the tokens via fts5vocab.
-    The result is the set of stems that FTS5 would match against the index."""
-    with _stem_lock:
-        _stem_db.execute("DELETE FROM _stems")
-        for t in terms:
-            _stem_db.execute("INSERT INTO _stems(token) VALUES(?)", (t,))
-        return {row[0] for row in _stem_db.execute("SELECT DISTINCT term FROM _stems_vocab")}
-
-
-def _matches_segment(seg: dict, terms: list[str], stems: set[str] | None = None) -> bool:
-    """True if any term appears in the segment text (case-insensitive).
-
-    For terms that are Porter stems (identified by `stems`), the match
-    additionally requires the containing word to be at most twice the
-    stem's length. This prevents short stems like 'cat' (from 'cats')
-    from matching unrelated long words like 'concatenate'."""
-    text = (seg.get("text") or "").lower()
-    words = text.split()
-    for term in terms:
-        term_lower = term.lower()
-        is_stem = stems is not None and term_lower in stems
-        if not is_stem:
-            if term_lower in text:
-                return True
-        else:
-            for word in words:
-                if term_lower in word and len(word) <= len(term_lower) * 2:
-                    return True
-    return False
+def _matches_segment(seg: dict, terms: list[str]) -> bool:
+    """True if the segment text matches any term under FTS5 porter matching."""
+    return 0 in _fts_match_indices([seg.get("text") or ""], terms)
 
 
 def search_transcripts(db, user_id: int, query: str) -> list[dict]:
@@ -106,12 +92,6 @@ def search_transcripts(db, user_id: int, query: str) -> list[dict]:
     terms = [t for t in query.split() if t]
     if not terms:
         return []
-
-    # Derive Porter-stemmed forms so _matches_segment can find segments
-    # like "happiness" when the query is "happy" (both stem to "happi").
-    stems_raw = _stem_terms(terms)
-    stems = {s.lower() for s in stems_raw}
-    terms = terms + [s for s in stems if s not in terms]
 
     fts5_query = _sanitize_fts5_query(query)
 
@@ -140,6 +120,9 @@ def search_transcripts(db, user_id: int, query: str) -> list[dict]:
     results = []
     for t in transcripts:
         segments = t.segments or []
+        hits = _fts_match_indices(
+            [seg.get("text") or "" for seg in segments], terms
+        )
         matching_segments = [
             {
                 "speaker": seg.get("speaker", ""),
@@ -147,8 +130,8 @@ def search_transcripts(db, user_id: int, query: str) -> list[dict]:
                 "start": seg.get("start"),
                 "end": seg.get("end"),
             }
-            for seg in segments
-            if _matches_segment(seg, terms, stems)
+            for i, seg in enumerate(segments)
+            if i in hits
         ]
         results.append({
             "transcript_id": t.id,
@@ -207,32 +190,31 @@ def search_transcripts_snippets(db, user_id: int, query: str, limit: int = 20) -
     except Exception:
         return []
 
+    terms = [t for t in query.split() if t]
+
     results = []
     for r in rows:
         (transcript_id, rank, title, filename, created_at,
          full_text, corrected_text, segment_text, snippet) = r
         snippet_text = snippet or ""
 
-        # Determine match_source: check which column the query terms appear in.
-        # Checked in this order since a term can legitimately appear in more
-        # than one column (e.g. a corrected transcript keeps its original
-        # full_text too) — first match wins.
-        terms_lower = [t.lower() for t in query.lower().split() if t]
-
-        def _has_term(text_val):
-            text_lower = (text_val or "").lower()
-            return any(t in text_lower for t in terms_lower)
-
-        if title and _has_term(title):
-            match_source = "title"
-        elif _has_term(full_text):
-            match_source = "full_text"
-        elif _has_term(corrected_text):
-            match_source = "corrected_text"
-        elif _has_term(segment_text):
-            match_source = "segment_text"
-        else:
-            match_source = "full_text"
+        # Determine match_source with the same FTS5 porter matching used for
+        # segments, so a stemmed match (query "happy", column text
+        # "happiness") is attributed to the right column. Checked in this
+        # order since a term can legitimately appear in more than one column
+        # (e.g. a corrected transcript keeps its original full_text too) —
+        # first match wins.
+        columns = [
+            ("title", title),
+            ("full_text", full_text),
+            ("corrected_text", corrected_text),
+            ("segment_text", segment_text),
+        ]
+        hits = _fts_match_indices([val or "" for _, val in columns], terms)
+        match_source = next(
+            (name for i, (name, _) in enumerate(columns) if i in hits),
+            "full_text",
+        )
 
         results.append({
             "transcript_id": transcript_id,
