@@ -126,6 +126,26 @@ class DiarizationService:
             ))
             last_end = seg.get("end", 0)
 
+        # If the gap alternation assigned fewer labels than requested,
+        # reassign duplicate segments to unused labels, preserving at
+        # least one segment per existing label.
+        used = set(s.speaker for s in speakers)
+        if len(used) < len(speaker_labels):
+            # Count how many segments each label has so we only reassign
+            # labels that appear more than once.
+            counts = {}
+            for s in speakers:
+                counts[s.speaker] = counts.get(s.speaker, 0) + 1
+            unused = [l for l in speaker_labels if l not in used]
+            ui = 0
+            for s in speakers:
+                if ui >= len(unused):
+                    break
+                if counts.get(s.speaker, 0) > 1:
+                    counts[s.speaker] -= 1
+                    s.speaker = unused[ui]
+                    ui += 1
+
         speaker_set = set(s.speaker for s in speakers)
         return DiarizationResult(
             segments=speakers,
