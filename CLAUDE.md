@@ -22,13 +22,7 @@ Copies `.githooks/*` into `.git/hooks/`, which is shared by every worktree and i
 
 Do **not** install by setting `core.hooksPath=.githooks`. That path resolves against the working tree, and a branch that predates the hook does not contain `.githooks/`, so the hook goes missing at exactly the moment it is needed and the checkout happens in silence. This was verified, and it is why the install script exists.
 
-## Writing style (commits, PRs, docs, comments)
-
-- No em or en dashes; use commas, periods, parentheses, colons.
-- Write plainly. Avoid AI-typical phrasing ("not just X but Y", adjective stacks, "robust/seamless/leverage/delve").
-
 ## Testing
 
 - Match test cost to change blast radius; see AGENTS.md "Testing tiers" — don't run full browser e2e for every small change.
-- Any user-visible UI change (text, control, label, role) changes what e2e tests select by; grep the e2e/test directories for the old text or role and update selectors in the same change.
-- A green local run proves only the layer you ran. Do not claim behavior works from unit tests alone when the change has a runtime surface; drive the affected flow (scope the check to the changed flow, not the full suite).
+- A green local run proves only the layer you ran. Scope any runtime-surface verification to the changed flow, not the full suite.
