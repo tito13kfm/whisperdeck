@@ -183,11 +183,9 @@ investigation, coding, and verification to your worker agents.
 
 **The local-agent cap does not apply to this workflow.** Every worker any
 phase below uses (`explore`, `deep`, `oracle`, `multimodal-looker`) is
-cloud-billed. `atlas` is the only `lemonade/`-mapped entry, and no phase
-here uses it, so don't spend a config read deciding whether the 2-agent cap
-binds. It doesn't. If you ever do hand a phase to `atlas`, re-read
-AGENTS.md's Lemonade section first. Don't infer the rest of the mapping
-from this paragraph — read the config for anything it doesn't state.
+cloud-billed. If a future phase ever hands work to `atlas` (the only
+`lemonade/`-mapped agent), re-read AGENTS.md's Lemonade section first.
+Don't assume this paragraph covers it.
 
 ## Agent assignments per phase
 
@@ -218,7 +216,7 @@ exists in the config; any reference to it elsewhere is stale.
   issue's snippet against real code, enumerating every call site for the
   Complement Rule), don't use `explore`, it's a lightweight locator; use
   `deep` instead. `explore` is the only exploration agent. `explore-hard`
-  does not exist and has never existed.
+  does not exist.
 - **Phase 2 (fix implementation):** use `deep`. Parallelize across call sites
   freely.
 - **Phase 3 (testing):** the static source-level check should use `deep`.
@@ -252,14 +250,12 @@ issue's own proposed fix verbatim. Instead:
    one of them is in scope. Enumerate them explicitly. Missing one is a
    regression, not a partial win.
 3. **Actively search for siblings the issue itself never named**, don't just
-   enumerate what it did name. The recurring miss is a sibling with the
-   identical shape that the issue's author never noticed existed. If the bug
-   is "timer/poller X isn't cleared on event Y," grep for every other
-   timer/poller in the file and check each one against event Y, don't stop at
-   the ones the issue lists. If it's "guard/check missing on code path A,"
-   grep for the same guard's other call sites, not just A. State explicitly
-   in `investigation.md` that you did this sweep and what it turned up (even
-   if "nothing else found").
+   enumerate what it did name. If the bug is "timer/poller X isn't cleared on
+   event Y," grep for every other timer/poller in the file and check each one
+   against event Y, don't stop at the ones the issue lists. If it's
+   "guard/check missing on code path A," grep for the same guard's other call
+   sites, not just A. State explicitly in `investigation.md` that you did
+   this sweep and what it turned up (even if "nothing else found").
 4. Compare the issue's suggested fix/snippet against what the actual
    consuming code (frontend renderers, other backend callers, tests) needs.
    Note anything the issue's snippet is missing or gets wrong.
@@ -401,12 +397,9 @@ filtering, or polling logic.** If the feature needs to remember something
 across a re-render, or filter a list, or survive a poll cycle, another part
 of the same file has almost certainly already solved that exact problem —
 find it and reuse its shape instead of inventing a second, subtly different
-one. Two shapes this repo has already shipped: expand/collapse state tracked
-in a JS `Set` synced right *after* render (which a 3s poll then resets),
-where the correct pattern three lines above read `openIds` from the DOM
-*before* the render; and client-side list narrowing re-implemented over a
-paginated response (so members past `?limit=50` silently vanish) when
-backend endpoints (`?batch_id=`, `/api/batches/{id}`) already narrowed it
+one. Two failure classes already shipped here: state captured at the wrong
+point relative to a render or poll cycle, and client-side filtering
+re-implemented over a response the backend already paginates or filters
 server-side. One search before writing catches both.
 
 ## Phase 3.5: self-audit checklist (mandatory, before Phase 4)
@@ -425,8 +418,7 @@ each concrete promise, write one line:
 
 **Cite a literal identifier, not just prose.** Whenever the item names
 actual code — a function, a state field, a CSS class, a data attribute —
-include it verbatim (backticked) in the `<item>` text: `` `loadQueue()` ``,
-`` `S.batchFilter` ``, `` `.batch-pill` ``, `` `data-bact` ``. Generic words
+include it verbatim (backticked) in the `<item>` text. Generic words
 (batch, action, cancel, open) recur throughout a file, so a wrong line number
 still looks right on a keyword skim. A literal identifier is exact where
 prose isn't.
@@ -505,10 +497,9 @@ and blocks on:
 **`mutation check: N/A` is not accepted, and neither is any other
 exemption.** If the test drives a browser and the function lives in
 `static/rack.js`, the mutation is still mechanical: remove the line, rebuild
-the bundle, re-run, restore, rebuild again. The one run that wrote `mutation
-check: N/A (e2e browser test, not a unit test with replaceable function
-body)` had exempted a test that failed 100% of the time regardless of the
-fix, and had never been executed at all, only syntax-checked with `node -c`.
+the bundle, re-run, restore, rebuild again. This exemption has been used
+before to wave through a test that had never actually run (only
+syntax-checked with `node -c`) and would have failed 100% of the time.
 
 Restore the mutation before moving on, and confirm with `git diff` that only
 your intended change remains.
@@ -543,8 +534,7 @@ found it wrong.
   when the real status value was `"running"`, so a live batch could never
   display a processing count, and which also treated cancelled transcripts
   as completed; a claim that all error paths returned the original audio
-  while `OSError` went uncaught; a documented `failed` status that no code
-  path ever wrote.
+  while `OSError` went uncaught.
 - **Boundary cardinality.** Exercise each criterion at a collection of one
   and against the endpoint's own pagination limit. A one-file batch that
   got no header made every batch-level action unreachable, and grouping
