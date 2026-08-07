@@ -1,6 +1,6 @@
 # WhisperDeck — Claude Code instructions
 
-Read `AGENTS.md` and follow **The Complement Rule** section — it exists because three PRs in a row shipped guards that missed sibling entry points. The Serena Usage and Advisor Escalation sections of AGENTS.md are Opencode-specific; ignore them in Claude Code (use your own configured tools).
+Read `AGENTS.md` and follow **The Complement Rule** section — it exists because three PRs in a row shipped guards that missed sibling entry points. The "Opencode-specific" block at the end of AGENTS.md doesn't apply in Claude Code (use your own configured tools).
 
 ## Git and PR hygiene
 
