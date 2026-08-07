@@ -2,7 +2,7 @@
 import pytest
 
 from database import Transcript, User
-from services.search import search_transcripts, search_transcripts_snippets, _MAX_QUERY_CHARS
+from services.search import search_transcripts, search_transcripts_snippets, _MAX_QUERY_CHARS, _matches_segment, _stem_terms
 from sqlalchemy import text
 
 
@@ -202,6 +202,64 @@ def test_matching_segments_empty_when_match_in_full_text_only(db_session):
     results = search_transcripts(db_session, user.id, "Sandeep")
     assert len(results) == 1
     assert results[0]["matching_segments"] == []
+
+
+def test_matches_segment_with_stemmed_terms():
+    """Literal substring matching with stemmed terms: stems additionally
+    require the containing word to be at most 2x the stem length."""
+    # Stem matches word when ratio allows (happi=5, happiness=9, 9 <= 10)
+    seg = {"text": "The happiness project", "speaker": "Alice"}
+    assert _matches_segment(seg, ["happi"], stems={"happi"}) is True
+
+    # Without the stem flag, "happi" is an original term (unconstrained
+    # substring match) — matches happiness either way
+    assert _matches_segment(seg, ["happi"]) is True
+
+    # Original term "happy" alone does not match "happiness"
+    assert _matches_segment(seg, ["happy"]) is False
+
+    # Original literal substring still works unconstrained
+    seg2 = {"text": "He was happy with the result", "speaker": "Bob"}
+    assert _matches_segment(seg2, ["happy"]) is True
+
+    # Non-matching words are still rejected
+    assert _matches_segment({"text": "The cat sat"}, ["happiness"]) is False
+
+    # Stem "cat" (from "cats") blocked from matching "concatenate"
+    # because cat=3, concatenate=11, 11 > 6 (audit regression)
+    assert _matches_segment({"text": "concatenate"}, ["cats", "cat"],
+                           stems={"cat"}) is False
+
+    # Stem "cat" still matches "cats" (cat=3, cats=4, 4 <= 6)
+    assert _matches_segment({"text": "cats"}, ["cat"], stems={"cat"}) is True
+
+
+def test_stem_terms_returns_porter_stems():
+    """_stem_terms() uses FTS5 Porter tokenizer to get stemmed forms."""
+    assert _stem_terms(["happy"]) == {"happi"}
+    assert _stem_terms(["happiness"]) == {"happi"}
+    assert "run" in _stem_terms(["running"])
+    assert "happi" in _stem_terms(["happy", "running"])
+
+
+def test_matching_segments_with_stems_integration(db_session):
+    """Integration: search_transcripts() appends Porter-stemmed terms
+    so matching_segments includes segments that share a stem with the
+    query even when the literal substring doesn't match."""
+    user = _make_user(db_session)
+    _make_transcript(db_session, user.id,
+                     full_text="Discussing the happiness project",
+                     segments=[
+                         {"speaker": "Alice", "text": "The happiness project",
+                          "start": 0.0, "end": 1.0},
+                         {"speaker": "Bob", "text": "hello world",
+                          "start": 1.0, "end": 2.0},
+                     ])
+
+    results = search_transcripts(db_session, user.id, "happy")
+    assert len(results) == 1
+    assert len(results[0]["matching_segments"]) == 1
+    assert results[0]["matching_segments"][0]["text"] == "The happiness project"
 
 
 # ── User isolation ────────────────────────────────────────────────────────
