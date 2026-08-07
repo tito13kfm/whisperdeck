@@ -197,7 +197,23 @@ no lighter-weight orchestrator agent defined, and `/idea` needs the same
 judgment-call capacity `/issue`'s orchestrator has for the Challenge
 phase.
 
-- [ ] **Step 2: Write the runner-prompt body**
+- [ ] **Step 2: Confirm `.omo/idea-runner-prompt.md` won't be silently gitignored**
+
+`.omo/` is opencode's space and mostly gitignored, with specific tracked
+carve-outs (e.g. `.omo/issue-runner-prompt.md`). Before writing the file,
+run:
+
+```bash
+git check-ignore -v .omo/idea-runner-prompt.md
+```
+
+If it prints a match (the file would be ignored), add a negation for it
+next to the existing `.omo/issue-runner-prompt.md` negation in
+`.gitignore` before proceeding — otherwise Step 4's `git add` will
+silently skip it. If it prints nothing, the file is already trackable;
+continue.
+
+- [ ] **Step 3: Write the runner-prompt body**
 
 Create `.omo/idea-runner-prompt.md`. Same seven-section structure as
 Task 1 Step 2, ported to opencode idiom per
@@ -212,17 +228,17 @@ handling bullets are identical in substance to Task 1 (the spec doesn't
 differ by harness there) — only the *mechanics* of Phase 2's delegation
 differ.
 
-- [ ] **Step 3: Live dry run (opencode)**
+- [ ] **Step 4: Live dry run (opencode)**
 
 Same dry run as Task 1 Step 3, run through opencode's `/idea` instead.
 Confirm the same four checkpoints (follow-up question asked, two
 searches dispatched, Phase 4 shows a draft and stops, abort leaves no
 new GitHub issue).
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
-git add .opencode/command/idea.md .omo/idea-runner-prompt.md
+git add .opencode/command/idea.md .omo/idea-runner-prompt.md .gitignore
 git commit -m "feat: add opencode /idea intake command"
 ```
 
@@ -247,12 +263,15 @@ work landed under a different issue number" step, insert:
 **Check for a fresh, self-authored prior-art check first.** If the
 target issue's body contains a `## Prior-art check (<date>, filed via
 /idea)` heading: parse `<date>`. If it is within the last 30 days AND
-`gh issue view <N> --json author --jq .author.login` matches the
-repository's configured git user, trust it — log "trusting /idea's
-prior-art check from `<date>`" and skip the prior-work search below
-entirely. Otherwise (missing, stale, or not self-authored), run the
-search below unchanged; a non-owner-filed issue cannot switch off dedup
-by forging this section.
+`gh issue view <N> --json author --jq .author.login` equals
+`gh api user --jq .login` (the currently authenticated gh user — i.e.
+whoever is running this session filed it via /idea), trust it — record
+"trusting /idea's prior-art check from `<date>`" in both your first
+status update to the user AND in `investigation.md`, and skip the
+prior-work search below entirely. Otherwise (missing, stale, or the
+issue author's login doesn't match), run the search below unchanged; an
+issue filed by anyone else cannot switch off dedup by forging this
+section.
 ```
 
 This is additive only — do not remove or restructure the existing
@@ -331,11 +350,13 @@ duplicate silently.
 - [ ] **Step 3: Confirm the handoff actually works**
 
 Run `/issue <N>` or `/issue-claude <N>` against the issue filed in Step
-1. Confirm Phase 0's first status update (or `investigation.md`)
-contains the line `trusting /idea's prior-art check from <date>` rather
-than re-running the prior-work search. If it instead runs the full
-search, that's a bug in Task 3 or 4 — fix the parsing/matching logic in
-the relevant runner-prompt file and re-run this step.
+1. Confirm the line `trusting /idea's prior-art check from <date>`
+appears in BOTH Phase 0's first status update AND `investigation.md`
+(the edited paragraph requires both), rather than re-running the
+prior-work search. If it instead runs the full search, or the line is
+missing from either location, that's a bug in Task 3 or 4 — fix the
+parsing/matching logic or the logging instruction in the relevant
+runner-prompt file and re-run this step.
 
 - [ ] **Step 4: Clean up the test issue**
 
