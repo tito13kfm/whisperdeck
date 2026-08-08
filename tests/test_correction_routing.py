@@ -41,11 +41,15 @@ def _chat_response(content):
     return _FakeResponse(200, {"choices": [{"message": {"content": content}}]})
 
 
+def _json_records(*id_text_pairs):
+    return json.dumps([{"id": rid, "text": text} for rid, text in id_text_pairs])
+
+
 # ── provider routing ──────────────────────────────────────────────────────
 
 def test_openrouter_hits_openrouter_base_url(db_session):
     user, transcript = _make_user_and_transcript(db_session)
-    fake_post = AsyncMock(return_value=_chat_response("fixed"))
+    fake_post = AsyncMock(return_value=_chat_response(_json_records(("L0000", "fixed"))))
     with patch("httpx.AsyncClient.post", fake_post):
         asyncio.run(correct_transcript(
             db_session, transcript, api_key="sk-or-key",
@@ -69,7 +73,7 @@ def test_unknown_provider_records_clear_error_not_groq_fallback(db_session):
 
 def test_local_provider_uses_saved_api_url(db_session):
     user, transcript = _make_user_and_transcript(db_session)
-    fake_post = AsyncMock(return_value=_chat_response("fixed"))
+    fake_post = AsyncMock(return_value=_chat_response(_json_records(("L0000", "fixed"))))
     with patch("httpx.AsyncClient.post", fake_post):
         asyncio.run(correct_transcript(
             db_session, transcript, api_key="", provider_name="local", model="llama3",
@@ -80,7 +84,7 @@ def test_local_provider_uses_saved_api_url(db_session):
 
 def test_local_provider_omits_auth_header_when_no_key(db_session):
     user, transcript = _make_user_and_transcript(db_session)
-    fake_post = AsyncMock(return_value=_chat_response("fixed"))
+    fake_post = AsyncMock(return_value=_chat_response(_json_records(("L0000", "fixed"))))
     with patch("httpx.AsyncClient.post", fake_post):
         asyncio.run(correct_transcript(
             db_session, transcript, api_key="", provider_name="local", model="llama3",
@@ -94,7 +98,7 @@ def test_local_llm_provider_uses_its_own_saved_api_url(db_session):
     """local_llm is a separate slot from local (transcription) — different
     port, e.g. Ollama on 11434 while the STT server sits on 8080."""
     user, transcript = _make_user_and_transcript(db_session)
-    fake_post = AsyncMock(return_value=_chat_response("fixed"))
+    fake_post = AsyncMock(return_value=_chat_response(_json_records(("L0000", "fixed"))))
     with patch("httpx.AsyncClient.post", fake_post):
         asyncio.run(correct_transcript(
             db_session, transcript, api_key="", provider_name="local_llm", model="llama3",
@@ -107,7 +111,7 @@ def test_local_llm_provider_uses_its_own_saved_api_url(db_session):
 
 def test_local_llm_provider_defaults_to_ollama_port_when_unset(db_session):
     user, transcript = _make_user_and_transcript(db_session)
-    fake_post = AsyncMock(return_value=_chat_response("fixed"))
+    fake_post = AsyncMock(return_value=_chat_response(_json_records(("L0000", "fixed"))))
     with patch("httpx.AsyncClient.post", fake_post):
         asyncio.run(correct_transcript(
             db_session, transcript, api_key="", provider_name="local_llm", model="llama3",
@@ -123,48 +127,41 @@ def test_prompt_carries_speaker_labels_and_preserve_instruction(db_session):
         {"start": 5, "end": 9, "speaker": "Raj Patel", "text": "vendor sync after the first"},
     ]
     user, transcript = _make_user_and_transcript(db_session, segments=segs)
-    fake_post = AsyncMock(return_value=_chat_response(
-        "Sarah Chen: NetSuite cutover is on track\n\nRaj Patel: Vendor sync after the first"))
+    fake_post = AsyncMock(return_value=_chat_response(_json_records(
+        ("L0000", "Sarah Chen: NetSuite cutover is on track"),
+        ("L0001", "Raj Patel: Vendor sync after the first"))))
     with patch("httpx.AsyncClient.post", fake_post):
         asyncio.run(correct_transcript(db_session, transcript, api_key="k"))
     prompt = fake_post.await_args.kwargs["json"]["messages"][1]["content"]
     assert "Sarah Chen: netsweet cutover is on track" in prompt
-    assert "reproduce each 'Speaker Name:' prefix exactly" in prompt
+    assert "never rename, merge, or drop speakers" in prompt
     assert transcript.corrected_text.startswith("Sarah Chen: NetSuite")
 
 
 def test_long_transcripts_are_chunked_into_multiple_calls(db_session):
-    segs = [
-        {"start": i, "end": i + 1, "speaker": f"Speaker {i % 3}", "text": "word " * 60}
-        for i in range(40)
-    ]
+    """Multi-batch correction with overlapping IDs: dedup keeps first occurrence,
+    output is sorted by ID regardless of LLM reordering within batches."""
+    from services.correction import _BATCH_OVERLAP_LINES, _batch_lines, _id_line
+    segs = [{"start": i, "end": i + 1, "speaker": f"S{i}", "text": "word " * 60} for i in range(40)]
     user, transcript = _make_user_and_transcript(db_session, segments=segs)
-    # Return multiple lines per batch so the overlap dedup doesn't strip everything.
-    N = 8
-    fake_post = AsyncMock(side_effect=[
-        _chat_response("\n\n".join(f"batch {i} line {j}" for j in range(N)))
-        for i in range(10)])
+    id_lines = [_id_line(i, s["speaker"] + ": " + s["text"]) for i, s in enumerate(segs)]
+    batches = _batch_lines(id_lines, overlap=_BATCH_OVERLAP_LINES)
+    records: dict[str, str] = {}
+    mock_responses = []
+    for batch in batches:
+        batch_ids = [line[:6] for line in batch]
+        batch_pairs = [(rid, f"out: {rid}") for rid in batch_ids]
+        for rid, text in batch_pairs:
+            if rid not in records:
+                records[rid] = text
+        mock_responses.append(_chat_response(_json_records(*batch_pairs)))
+    fake_post = AsyncMock(side_effect=mock_responses)
     with patch("httpx.AsyncClient.post", fake_post):
         asyncio.run(correct_transcript(db_session, transcript, api_key="k"))
     assert fake_post.await_count > 1
     assert transcript.correction_error is None
-    # Each batch after the first has its overlap share stripped, scaled to the
-    # N output lines it produced. Build the expected stitched output from the
-    # same batch split the service uses.
-    from services.correction import _BATCH_OVERLAP_LINES, _batch_lines
-    batches = _batch_lines(
-        [f"Speaker {i % 3}: " + "word " * 60 for i in range(40)],
-        overlap=_BATCH_OVERLAP_LINES,
-    )
-    parts = []
-    for i, batch in enumerate(batches):
-        lines = [f"batch {i} line {j}" for j in range(N)]
-        if i > 0:
-            share = _BATCH_OVERLAP_LINES / max(1, len(batch))
-            keep_from = min(int(share * N), N)
-            lines = lines[keep_from:]
-        parts.append("\n\n".join(lines))
-    assert transcript.corrected_text == "\n\n".join(p for p in parts if p)
+    sorted_texts = [text for _, text in sorted(records.items())]
+    assert transcript.corrected_text == "\n\n".join(sorted_texts)
 
 
 def test_batch_lines_respects_budget():
