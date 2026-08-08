@@ -241,7 +241,8 @@ prompt instructing it to:
    change affects a function with more than one caller, or a pattern with
    more than one instance (a guard, an enum, a UI element repeated across
    pages), every one of them is in scope. Enumerate them explicitly.
-   Missing one is a regression, not a partial win (the Complement Rule).
+   Missing one is a regression, not a partial win (AGENTS.md's Complement
+   Rule).
 3. **Actively search for siblings the issue itself never named**, not just
    what it did name. If the bug is "timer/poller X isn't cleared on event
    Y," grep for every other timer/poller in the file and check each one
@@ -283,12 +284,11 @@ block or handler, dispatch a fresh `Agent(model: "fable", subagent_type:
 "general-purpose")`, once, before writing the fix: hand it the specific
 function/state-machine and ask it to check whether a guard later in that
 path checks only `"cancelled"` and not `"completed"`, which lets the side
-effect fire after the job already finished successfully. This is a
-confirmed recurring bug class in this codebase — every prior instance was
-reasoned about at the sibling-sweep step and still missed, so a genuinely
-different model's second opinion is worth the one extra call. This check
-has exactly one designated use in this workflow; don't reuse the Fable
-call budget elsewhere in this run.
+effect fire after the job already finished successfully. The sibling-sweep
+step in Phase 1 does not reliably catch this class, so get a genuinely
+different model's second opinion. This check has exactly one designated
+use in this workflow; don't reuse the Fable call budget elsewhere in this
+run.
 
 If the Fable call fails: one retry on a transient error (429, 5xx,
 timeout). If it keeps failing, fall back to reviewing the same question
@@ -299,7 +299,7 @@ the check.
 
 Implement against what Phase 1 actually found, not the issue's snippet. If
 Phase 1 found multiple call sites in scope, the fix must touch all of them
-(the Complement Rule). Do this inline, yourself — you're the one who can
+(AGENTS.md's Complement Rule). Do this inline, yourself — you're the one who can
 weigh design tradeoffs across the whole change.
 
 **Batch edits, don't re-verify after every single one.** If
@@ -388,6 +388,8 @@ reuse its shape instead of inventing a second, subtly different one.
 
 ## Phase 3.5: self-audit checklist (mandatory, before Phase 4)
 
+### Writing the checklist
+
 Before opening/pushing anything, create
 `.omo/runs/issue-<N>/<your-branch-name>/self-audit.md` (main repo absolute
 path). Re-read your own `investigation.md` — every promise you made there
@@ -402,6 +404,8 @@ promise, write one line:
 **Cite a literal identifier, not just prose.** Whenever the item names
 actual code — a function, a state field, a CSS class, a data attribute —
 include it verbatim (backticked) in the `<item>` text.
+
+### The mechanical checker
 
 **Run the mechanical checker before Phase 4, not after:**
 `python scripts/verify_self_audit.py .omo/runs/issue-<N>/<branch>/self-audit.md`
@@ -418,6 +422,8 @@ a clean `origin/master` checkout. If it does reproduce there, it is
 pre-existing and belongs in `wrong-directions.md`. If it does not, it is
 yours.
 
+### Confirming before you check a box
+
 **Only mark `[x]` after re-confirming the artifact actually exists** —
 open the file and check the test/route/page is really there, don't mark
 from memory of what you intended to do.
@@ -425,15 +431,14 @@ from memory of what you intended to do.
 **Citations are verified against the branch's final head, not against the
 tree you wrote them on.** If you rebase, amend, or force-push after
 writing `self-audit.md`, every `file:line` in it is suspect: re-open each
-one at the new head and re-run `verify_self_audit.py` before Phase 4. Line
-drift after a rebase is the second most common self-audit escape in this
-repo, and re-verifying settles it instead of leaving reviewers to argue
-over whether the offsets are stale or the claim is false.
+one at the new head and re-run `verify_self_audit.py` before Phase 4.
 
 **Disclose any threshold or edge-case decision the issue didn't ask for.**
 Narrowing scope silently is the same class of self-report failure as
 overclaiming. Add one line per such decision: `[decision] <what you
 excluded/added> — not specified by the issue, because <reason>`.
+
+### Mutation checks
 
 **Every new or changed test gets a mutation-check transcript, not a
 mutation-check claim.** A predicted outcome is not evidence. Actually run
@@ -460,9 +465,8 @@ Requirements, each of which `verify_self_audit.py` checks mechanically:
 **`mutation check: N/A` is not accepted, and neither is any other
 exemption.** If the test drives a browser and the function lives in
 `static/rack.js`, the mutation is still mechanical: remove the line, rebuild
-the bundle, re-run, restore, rebuild again. This exemption has been used
-before to wave through a test that had never actually run (only
-syntax-checked with `node -c`) and would have failed 100% of the time.
+the bundle, re-run, restore, rebuild again. `node -c` (syntax check only) is
+not a substitute for actually running the test.
 
 Restore the mutation before moving on, and confirm with `git diff` that only
 your intended change remains.
@@ -473,8 +477,9 @@ is vacuous for that function: fix the test before checking any test-related
 box. Watch for assertions that read through a proxy. On an external-content
 FTS5 table, `SELECT COUNT(*)` counts the content table, not the index, so
 assert against the real artifact (`_docsize` rows, MATCH results) rather
-than a lookalike. Tests have passed against a function that was a complete
-no-op for exactly this reason.
+than a lookalike.
+
+### The six checks
 
 **Six checks that honest boxes still miss.** Every one escaped a self-audit
 a reviewer then scored as fully honest, no false `[x]` found. They are not
@@ -518,6 +523,8 @@ found it wrong.
   a number as the full suite, it must come from an unfiltered run. One run
   labelled 101 targeted tests "Full test suite" when the repository suite
   was 760.
+
+### Before Phase 4
 
 **A `[x]` that turns out false on review is a serious self-report
 violation, worse than an honest `[ ]`.** You may still ship with open
@@ -600,15 +607,14 @@ Use `.omo/runs/issue-<N>/<your-branch-name>/` (main repo absolute path):
   still holds, and don't read a failed tool call as proof the thing does
   not exist. A stale finding recorded as fresh propagates into the next
   retrospective as if it were current.
-- `token-usage.md` — list every `Agent()` call this run made, and which
-  model backed each one (Sonnet, Haiku, Fable) — name the model, not "an
-  investigate agent." Cross-check the list against the session's own cost
-  data: a mismatch is a transparency gap, not a rounding error. **Your own
-  turns count too.** Write one line for the orchestrator's consumption even
-  if the number is an estimate, and label it `Orchestrator`. Treating the
-  orchestrator as free is how a run that did the work inline reports
-  near-zero for work a model did. `verify_self_audit.py` reports a missing
-  orchestrator line as advisory.
+- `token-usage.md` — list every `Agent()` call this run made: which model
+  backed it (Sonnet, Haiku, Fable) and the exact token count from that
+  call's own result. Don't estimate it -- the Agent tool result already
+  carries the real number, use it. **Your own turns count too.** Write one
+  line for the orchestrator's consumption, labeled `Orchestrator`, even if
+  that one has to be an estimate. Treating the orchestrator as free is how
+  a run that did the work inline reports near-zero for work a model did.
+  `verify_self_audit.py` reports a missing orchestrator line as advisory.
 
 Report back to the user: which issue you actually targeted (Phase 0), the
 PR link, and pointers to all four `.omo/runs/issue-<N>/<your-branch-name>/*.md`
