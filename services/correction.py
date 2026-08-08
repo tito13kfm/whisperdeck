@@ -17,7 +17,16 @@ _DEFAULT_MODEL = "llama-3.3-70b-versatile"
 # output comfortably inside max_tokens instead of silently truncating long
 # transcripts at 8192 output tokens.
 _CHUNK_CHAR_BUDGET = 6000
-_CONTEXT_TAIL_LINES = 2
+# Number of raw input lines shared between consecutive batches so the LLM
+# sees the same text on both sides of the boundary and corrects consistently.
+# Deduplication uses line IDs, not positional stripping — see the prompt
+# and stitch logic in correct_transcript.
+_BATCH_OVERLAP_LINES = 4
+
+
+def _id_line(idx: int, text: str) -> str:
+    """Return a line prefixed with a stable, sortable ID for ID-based dedup."""
+    return f"[L{idx:04d}] {text}"
 
 
 async def _chat_completion(
@@ -46,14 +55,19 @@ def _transcript_lines(transcript) -> list[str]:
     return lines if lines else [(transcript.full_text or "").strip()]
 
 
-def _batch_lines(lines: list[str], budget: int = _CHUNK_CHAR_BUDGET) -> list[list[str]]:
+def _batch_lines(lines: list[str], budget: int = _CHUNK_CHAR_BUDGET, overlap: int = 0) -> list[list[str]]:
     batches: list[list[str]] = []
     current: list[str] = []
     size = 0
     for line in lines:
         if current and size + len(line) > budget:
             batches.append(current)
-            current, size = [], 0
+            if overlap:
+                overlap_lines = current[-overlap:]
+                current = list(overlap_lines)
+                size = sum(len(l) + 2 for l in overlap_lines)
+            else:
+                current, size = [], 0
         current.append(line)
         size += len(line) + 2
     if current:
@@ -70,10 +84,15 @@ async def correct_transcript(
     success, or transcript.correction_error on failure. Never raises.
     full_text and segments are never modified.
 
-    The transcript is handed to the LLM as speaker-labeled lines
-    ('Speaker Name: text'), batched to stay inside output-token limits;
-    the model is instructed to preserve labels and line structure so the
-    corrected text renders with the same speakers.
+    Each line gets a stable ID ([L0000]) before batching. The LLM returns
+    one JSON record per line, keyed by ID. Records are validated against the
+    IDs of the batch they were returned for: valid IDs keep the first
+    occurrence (overlapping batches produce duplicates, later ones are
+    discarded), valid-but-out-of-batch IDs are logged as misplaced, and IDs
+    not in the input set are logged as invented. Input IDs missing from every
+    batch response fall back to their original raw text and are logged.
+    Stitching sorts by ID so the output order matches the input order, even
+    if the LLM reorders, merges, or splits lines.
 
     progress_cb(done, total) fires after each batch; cancel_cb() is checked
     before each batch — returning True stops cleanly without touching the
@@ -85,48 +104,105 @@ async def correct_transcript(
         f"see a close phonetic match): {', '.join(glossary)}\n\n"
         if glossary else ""
     )
-    batches = _batch_lines(_transcript_lines(transcript))
-    corrected_parts: list[str] = []
+    raw_lines = _transcript_lines(transcript)
+    id_lines = [_id_line(i, text) for i, text in enumerate(raw_lines)]
+    input_ids = {line[1:6] for line in id_lines}
+    batches = _batch_lines(id_lines, overlap=_BATCH_OVERLAP_LINES)
+
+    records: dict[str, str] = {}
+    parse_errors: list[str] = []
+    invented_ids: list[str] = []
+    misplaced_ids: list[str] = []
 
     try:
         for i, batch in enumerate(batches):
             if cancel_cb and cancel_cb():
                 return "cancelled"
-            context_block = ""
-            if corrected_parts:
-                tail = "\n".join(corrected_parts[-1].splitlines()[-_CONTEXT_TAIL_LINES:])
-                context_block = (
-                    "For context, the previous part of the transcript ended "
-                    f"with these already-corrected lines (do NOT repeat them):\n{tail}\n\n"
-                )
             part_note = f" (part {i + 1} of {len(batches)})" if len(batches) > 1 else ""
+            overlap_note = ""
+            if i > 0:
+                overlap_note = (
+                    f" The first {_BATCH_OVERLAP_LINES} "
+                    "lines overlap with the previous batch so you see "
+                    "duplicate line IDs — correct them consistently.\n\n"
+                )
             prompt = (
                 f"Below is a raw speech-to-text transcript{part_note}. Each "
-                "line has the form 'Speaker Name: text' (some lines may have "
-                "no speaker prefix). It may contain misheard words, awkward "
-                "grammar, or missing punctuation. Rewrite it to fix likely "
+                "line is prefixed with a stable line ID in brackets "
+                "(e.g. [L0001]). The text after the ID has the form "
+                "'Speaker Name: text' (some lines may have no speaker "
+                "prefix). It may contain misheard words, awkward grammar, "
+                "or missing punctuation. Rewrite it to fix likely "
                 "transcription errors and improve readability, WITHOUT "
-                "changing its meaning or adding any new content. Keep exactly "
-                "one output line per input line, in the same order, and "
-                "reproduce each 'Speaker Name:' prefix exactly as given — "
-                "never rename, merge, or drop speakers. Separate lines with "
-                "blank lines. Return only the corrected transcript lines, "
-                "nothing else.\n\n"
+                "changing its meaning or adding any new content. Reproduce "
+                "each 'Speaker Name:' prefix exactly as given — never "
+                "rename, merge, or drop speakers. Return one output record "
+                "per input line.\n\n"
                 f"{glossary_block}"
-                f"{context_block}"
-                f"TRANSCRIPT:\n" + "\n\n".join(batch)
+                f"{overlap_note}"
+                "Return a JSON array of objects, one per input line, in "
+                "this format: [{\"id\":\"L0001\",\"text\":\"corrected "
+                "text\"},...]. Include every ID from the input lines above. "
+                "Return only the JSON array, nothing else.\n\n"
+                f"TRANSCRIPT:\n" + "\n".join(batch)
             )
             part = await _chat_completion(
-                prompt, api_key, provider_name, model, json_mode=False,
+                prompt, api_key, provider_name, model, json_mode=True,
                 provider_config=provider_config,
             )
-            corrected_parts.append(part.strip())
+            try:
+                items = json.loads(part)
+                if not isinstance(items, list):
+                    parse_errors.append(
+                        f"Batch {i + 1}: response is not a JSON array "
+                        f"(type: {type(items).__name__})")
+                    items = []
+                batch_input_ids = {line[1:6] for line in batch}
+                for item in items:
+                    rid = item.get("id", "")
+                    text = item.get("text", "")
+                    if not rid or not text:
+                        continue
+                    if rid not in batch_input_ids:
+                        if rid in input_ids:
+                            misplaced_ids.append(rid)
+                        else:
+                            invented_ids.append(rid)
+                        continue
+                    if rid not in records:
+                        records[rid] = text
+            except (json.JSONDecodeError, TypeError) as e:
+                parse_errors.append(f"Batch {i + 1}: {e}")
+
             if progress_cb:
                 progress_cb(i + 1, len(batches))
 
-        transcript.corrected_text = "\n\n".join(corrected_parts)
+        # Fall back to original text for any input IDs the LLM never returned.
+        missing_ids = sorted(input_ids - set(records.keys()))
+        for mid in missing_ids:
+            try:
+                idx = int(mid[1:])
+                records[mid] = raw_lines[idx]
+            except (ValueError, IndexError):
+                pass
+        if missing_ids:
+            parse_errors.append(
+                f"Missing response for {len(missing_ids)} line(s): "
+                f"{', '.join(missing_ids)}")
+        if misplaced_ids:
+            parse_errors.append(
+                f"Ignored {len(misplaced_ids)} misplaced ID(s): "
+                f"{', '.join(misplaced_ids)}")
+        if invented_ids:
+            parse_errors.append(
+                f"Ignored {len(invented_ids)} invented ID(s): "
+                f"{', '.join(invented_ids)}")
+
+        if records:
+            sorted_texts = [text for _, text in sorted(records.items())]
+            transcript.corrected_text = "\n\n".join(sorted_texts)
         transcript.correction_model = f"{provider_name}/{model}"
-        transcript.correction_error = None
+        transcript.correction_error = "; ".join(parse_errors) if parse_errors else None
         result = "ok"
     except Exception as e:
         transcript.correction_error = str(e)

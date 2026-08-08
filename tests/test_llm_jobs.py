@@ -160,7 +160,7 @@ def test_run_llm_job_correction_uses_local_llm_url_independent_of_stt(db_session
     job.status = "running"
     db_session.commit()
 
-    fake_post = AsyncMock(return_value=_FakeResponse("fixed"))
+    fake_post = AsyncMock(return_value=_FakeResponse('[{"id":"L0000","text":"fixed"}]'))
     factory = lambda: _NoCloseSession(db_session)
     with patch("httpx.AsyncClient.post", fake_post):
         asyncio.run(run_llm_job(factory, job.id, transcription_service=None))
@@ -177,7 +177,7 @@ def test_run_llm_job_correction_completes_with_progress(db_session):
     job.status = "running"
     db_session.commit()
 
-    fake_post = AsyncMock(return_value=_FakeResponse("S: fixed"))
+    fake_post = AsyncMock(return_value=_FakeResponse('[{"id":"L0000","text":"S: fixed"}]'))
     factory = lambda: _NoCloseSession(db_session)
     with patch("httpx.AsyncClient.post", fake_post):
         asyncio.run(run_llm_job(factory, job.id, transcription_service=None))
@@ -197,7 +197,7 @@ def test_run_llm_job_correction_saves_result_snapshot(db_session):
     job.status = "running"
     db_session.commit()
 
-    fake_post = AsyncMock(return_value=_FakeResponse("S: fixed hello"))
+    fake_post = AsyncMock(return_value=_FakeResponse('[{"id":"L0000","text":"S: fixed hello"}]'))
     factory = lambda: _NoCloseSession(db_session)
     with patch("httpx.AsyncClient.post", fake_post):
         asyncio.run(run_llm_job(factory, job.id, transcription_service=None))
@@ -267,7 +267,7 @@ def test_cancel_between_batches_stops_cleanly(db_session):
             # cancel lands while the first batch is in flight
             job.status = "cancelled"
             db_session.commit()
-        return _FakeResponse("S: fixed")
+        return _FakeResponse('[{"id":"L0000","text":"S: fixed"}]')
 
     factory = lambda: _NoCloseSession(db_session)
     with patch("httpx.AsyncClient.post", AsyncMock(side_effect=flip_then_respond)):
@@ -362,7 +362,7 @@ def test_progress_callback_no_op_after_cancel(db_session):
             # Cancel lands while the second batch is in flight.
             # cancel_llm_job zeroes counters and sets status='cancelled'.
             cancel_llm_job(db_session, user.id, job.id)
-        return _FakeResponse("S: fixed")
+        return _FakeResponse('[{"id":"L0000","text":"S: fixed"}]')
 
     factory = lambda: _NoCloseSession(db_session)
     with patch("httpx.AsyncClient.post", AsyncMock(side_effect=cancel_during_second_batch)):
@@ -444,7 +444,7 @@ def test_worker_tick_claims_pending_jobs(db_session):
     job = enqueue_llm_job(db_session, user.id, t.id, "correction", "groq", "llama-3.3-70b-versatile")
 
     factory = lambda: _NoCloseSession(db_session)
-    with patch("httpx.AsyncClient.post", AsyncMock(return_value=_FakeResponse("fixed"))):
+    with patch("httpx.AsyncClient.post", AsyncMock(return_value=_FakeResponse('[{"id":"L0000","text":"fixed"}]'))):
         asyncio.run(llm_worker_tick(factory, transcription_service=None))
 
     db_session.refresh(job)
@@ -539,7 +539,7 @@ def test_run_llm_job_correction_completion_triggers_pipeline_classify_when_pendi
     job.status = "running"
     db_session.commit()
 
-    fake_post = AsyncMock(return_value=_FakeResponse("S: fixed"))
+    fake_post = AsyncMock(return_value=_FakeResponse('[{"id":"L0000","text":"S: fixed"}]'))
     factory = lambda: _NoCloseSession(db_session)
     with patch("httpx.AsyncClient.post", fake_post):
         asyncio.run(run_llm_job(factory, job.id, transcription_service=None))
@@ -562,7 +562,7 @@ def test_run_llm_job_correction_completion_skips_pipeline_classify_when_override
     job.status = "running"
     db_session.commit()
 
-    fake_post = AsyncMock(return_value=_FakeResponse("S: fixed"))
+    fake_post = AsyncMock(return_value=_FakeResponse('[{"id":"L0000","text":"S: fixed"}]'))
     factory = lambda: _NoCloseSession(db_session)
     with patch("httpx.AsyncClient.post", fake_post):
         asyncio.run(run_llm_job(factory, job.id, transcription_service=None))
@@ -933,7 +933,7 @@ def test_worker_tick_full_cpu_pool_does_not_block_io_dispatch(db_session):
     io_job = enqueue_llm_job(db_session, user3.id, t3.id, "correction", "groq", "m")
 
     factory = lambda: _NoCloseSession(db_session)
-    fake_post = AsyncMock(return_value=_FakeResponse("S: fixed"))
+    fake_post = AsyncMock(return_value=_FakeResponse('[{"id":"L0000","text":"S: fixed"}]'))
     with patch("httpx.AsyncClient.post", fake_post):
         asyncio.run(llm_worker_tick(factory, transcription_service=None))
 
@@ -953,7 +953,7 @@ def test_worker_tick_increments_attempts_on_claim(db_session):
     assert job.attempts == 0
 
     factory = lambda: _NoCloseSession(db_session)
-    with patch("httpx.AsyncClient.post", AsyncMock(return_value=_FakeResponse("S: fixed"))):
+    with patch("httpx.AsyncClient.post", AsyncMock(return_value=_FakeResponse('[{"id":"L0000","text":"S: fixed"}]'))):
         asyncio.run(llm_worker_tick(factory, transcription_service=None))
 
     db_session.refresh(job)
@@ -971,7 +971,7 @@ def test_worker_tick_resurrects_failed_job_past_backoff_window(db_session):
     db_session.commit()
 
     factory = lambda: _NoCloseSession(db_session)
-    with patch("httpx.AsyncClient.post", AsyncMock(return_value=_FakeResponse("S: fixed"))):
+    with patch("httpx.AsyncClient.post", AsyncMock(return_value=_FakeResponse('[{"id":"L0000","text":"S: fixed"}]'))):
         asyncio.run(llm_worker_tick(factory, transcription_service=None))
 
     db_session.refresh(job)
@@ -1128,7 +1128,7 @@ def test_worker_tick_skips_resurrection_when_a_fresh_job_already_active(db_sessi
     assert fresh.status == "pending"
 
     factory = lambda: _NoCloseSession(db_session)
-    with patch("httpx.AsyncClient.post", AsyncMock(return_value=_FakeResponse("S: fixed"))):
+    with patch("httpx.AsyncClient.post", AsyncMock(return_value=_FakeResponse('[{"id":"L0000","text":"S: fixed"}]'))):
         asyncio.run(llm_worker_tick(factory, transcription_service=None))
 
     db_session.refresh(stale)
