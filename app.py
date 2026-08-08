@@ -3107,19 +3107,23 @@ async def list_voice_dump_items(
 
 @app.post("/api/voice-dump-items/mark-seen")
 async def mark_voice_dump_items_seen(
+    ids: list[int] = Body(..., embed=True),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Mark all unseen voice-dump items for the current user as seen.
+    """Mark the listed voice-dump items as seen for the current user.
     Called when the Dump Notes board loads, so the nav badge reflects
     only items created after that visit."""
+    if not ids:
+        return {"marked_seen": 0}
     updated = (
         db.query(VoiceDumpItem)
         .filter(
+            VoiceDumpItem.id.in_(ids),
             VoiceDumpItem.user_id == current_user.id,
             VoiceDumpItem.seen_at == None,  # noqa: E711
         )
-        .update({VoiceDumpItem.seen_at: utcnow_naive()})
+        .update({VoiceDumpItem.seen_at: utcnow_naive()}, synchronize_session=False)
     )
     db.commit()
     return {"marked_seen": updated}

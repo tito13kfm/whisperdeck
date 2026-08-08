@@ -392,19 +392,20 @@ def test_runs_endpoint_accepts_voice_dump_kind(client):
 
 def test_mark_seen_sets_seen_at_on_unseen(client, db_session):
     user, t = _make_voice_dump_transcript(db_session)
-    db_session.add(VoiceDumpItem(
+    item1 = VoiceDumpItem(
         user_id=user.id, transcript_id=t.id, sequence_index=0,
         note_type="bug", title="Bug", body="desc",
         structured={}, model="m", provider="p",
-    ))
-    db_session.add(VoiceDumpItem(
+    )
+    item2 = VoiceDumpItem(
         user_id=user.id, transcript_id=t.id, sequence_index=1,
         note_type="idea", title="Idea", body="desc",
         structured={}, model="m", provider="p",
-    ))
+    )
+    db_session.add_all([item1, item2])
     db_session.commit()
 
-    r = client.post("/api/voice-dump-items/mark-seen")
+    r = client.post("/api/voice-dump-items/mark-seen", json={"ids": [item1.id, item2.id]})
     assert r.status_code == 200
     assert r.json()["marked_seen"] == 2
 
@@ -415,7 +416,7 @@ def test_mark_seen_sets_seen_at_on_unseen(client, db_session):
 
 
 def test_mark_seen_no_unseen_returns_zero(client):
-    r = client.post("/api/voice-dump-items/mark-seen")
+    r = client.post("/api/voice-dump-items/mark-seen", json={"ids": []})
     assert r.status_code == 200
     assert r.json()["marked_seen"] == 0
 
@@ -431,19 +432,20 @@ def test_mark_seen_is_user_scoped(client, db_session):
     )
     db_session.add(t2)
     db_session.commit()
-    db_session.add(VoiceDumpItem(
+    other_item = VoiceDumpItem(
         user_id=other.id, transcript_id=t2.id, sequence_index=0,
         note_type="bug", title="Other's", body="desc",
         structured={}, model="m", provider="p",
-    ))
-    db_session.add(VoiceDumpItem(
+    )
+    my_item = VoiceDumpItem(
         user_id=user.id, transcript_id=t.id, sequence_index=0,
         note_type="bug", title="Mine", body="desc",
         structured={}, model="m", provider="p",
-    ))
+    )
+    db_session.add_all([other_item, my_item])
     db_session.commit()
 
-    r = client.post("/api/voice-dump-items/mark-seen")
+    r = client.post("/api/voice-dump-items/mark-seen", json={"ids": [my_item.id]})
     assert r.status_code == 200
     assert r.json()["marked_seen"] == 1
 
@@ -462,17 +464,18 @@ def test_mark_seen_is_user_scoped(client, db_session):
 
 def test_mark_seen_idempotent(client, db_session):
     user, t = _make_voice_dump_transcript(db_session)
-    db_session.add(VoiceDumpItem(
+    item = VoiceDumpItem(
         user_id=user.id, transcript_id=t.id, sequence_index=0,
         note_type="bug", title="Bug", body="desc",
         structured={}, model="m", provider="p",
-    ))
+    )
+    db_session.add(item)
     db_session.commit()
 
-    r1 = client.post("/api/voice-dump-items/mark-seen")
+    r1 = client.post("/api/voice-dump-items/mark-seen", json={"ids": [item.id]})
     assert r1.json()["marked_seen"] == 1
 
-    r2 = client.post("/api/voice-dump-items/mark-seen")
+    r2 = client.post("/api/voice-dump-items/mark-seen", json={"ids": [item.id]})
     assert r2.json()["marked_seen"] == 0
 
 
@@ -481,14 +484,14 @@ def test_mark_seen_idempotent(client, db_session):
 
 def test_status_includes_voice_dump_unseen_zero(client, db_session):
     user, t = _make_voice_dump_transcript(db_session)
-    db_session.add(VoiceDumpItem(
+    item = VoiceDumpItem(
         user_id=user.id, transcript_id=t.id, sequence_index=0,
         note_type="bug", title="Bug", body="desc",
         structured={}, model="m", provider="p",
-    ))
+    )
+    db_session.add(item)
     db_session.commit()
-    # Mark all seen
-    client.post("/api/voice-dump-items/mark-seen")
+    client.post("/api/voice-dump-items/mark-seen", json={"ids": [item.id]})
 
     r = client.get("/api/status")
     assert r.status_code == 200
@@ -531,6 +534,6 @@ def test_serialize_voice_dump_item_includes_seen_at(client, db_session):
     assert items[0]["seen_at"] is None
 
     # Mark seen and verify the field updates
-    client.post("/api/voice-dump-items/mark-seen")
+    client.post("/api/voice-dump-items/mark-seen", json={"ids": [vdi.id]})
     r2 = client.get("/api/voice-dump-items")
     assert r2.json()["items"][0]["seen_at"] is not None

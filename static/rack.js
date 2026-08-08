@@ -2719,17 +2719,21 @@ async function loadVoiceDumpItems() {
   // long stream-of-consciousness capture split into many items) and that
   // there is no per-item discard here: reviewing, editing and discarding
   // happen before finalize, on the transcript's own Dump Review tab.
-const root = $('page-dumpnotes');
+  const root = $('page-dumpnotes');
   refreshRailChrome();
   let data;
   try { data = await api('/api/voice-dump-items'); } catch (e) { toast(e.message, 'error'); return; }
   const items = data.items || [];
-  // Mark all currently-listed items as seen so the badge reflects only
-  // items created after this visit. Best-effort: a failure here should
-  // not block the board from rendering.
-  api('/api/voice-dump-items/mark-seen', { method: 'POST' }).then(
-    () => refreshRailChrome(),
-  ).catch(() => {});
+  // Mark only the displayed items as seen so the badge reflects items
+  // created after this visit. Scoped to loaded ids so items beyond the
+  // pagination limit aren't silently hidden (issue #374).
+  if (items.length) {
+    api('/api/voice-dump-items/mark-seen', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids: items.map(i => i.id) }),
+    }).then(() => refreshRailChrome()).catch(() => {});
+  }
   if (!items.length) {
     root.innerHTML =
       '<div class="page-head">' +
