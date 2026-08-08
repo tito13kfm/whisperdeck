@@ -274,11 +274,17 @@ def _cleanup_completed_chunk_files(db, jobs: list) -> None:
         except (OSError, ValueError):
             continue
     transcript_reals = set()
-    for (path,) in db.query(Transcript.audio_path).filter(Transcript.audio_path.isnot(None)).all():
-        try:
-            transcript_reals.add(os.path.realpath(path))
-        except (OSError, ValueError):
-            continue
+    for t in db.query(Transcript).filter(
+        (Transcript.audio_path.isnot(None)) | (Transcript.video_path.isnot(None)) | (Transcript.stereo_audio_path.isnot(None))
+    ).all():
+        for field in ("audio_path", "video_path", "stereo_audio_path"):
+            path = getattr(t, field)
+            if not path:
+                continue
+            try:
+                transcript_reals.add(os.path.realpath(path))
+            except (OSError, ValueError):
+                continue
     for job in completed:
         try:
             real = os.path.realpath(job.audio_path)

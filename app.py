@@ -1943,11 +1943,18 @@ async def delete_transcript(transcript_id: int, db: Session = Depends(get_db), c
             except (OSError, ValueError):
                 continue
         other_transcript_reals = set()
-        for (path,) in db.query(Transcript).filter(Transcript.id != t.id, Transcript.audio_path.isnot(None)).all():
-            try:
-                other_transcript_reals.add(os.path.realpath(path))
-            except (OSError, ValueError):
-                continue
+        for other in db.query(Transcript).filter(
+            Transcript.id != t.id,
+            ((Transcript.audio_path.isnot(None)) | (Transcript.video_path.isnot(None)) | (Transcript.stereo_audio_path.isnot(None))),
+        ).all():
+            for field in ("audio_path", "video_path", "stereo_audio_path"):
+                path = getattr(other, field)
+                if not path:
+                    continue
+                try:
+                    other_transcript_reals.add(os.path.realpath(path))
+                except (OSError, ValueError):
+                    continue
         for job in chunk_jobs:
             if not job.audio_path or not os.path.exists(job.audio_path):
                 continue

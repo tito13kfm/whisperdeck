@@ -170,3 +170,83 @@ def test_delete_transcript_removes_chunk_files_even_for_failed_jobs(client, db_s
     assert r.status_code == 200
     assert not chunk_ok.exists()
     assert not chunk_fail.exists()
+
+
+@pytest.mark.asyncio
+async def test_finalize_keeps_chunk_when_referenced_by_sibling_video_path(db_session, tmp_path):
+    shared = tmp_path / "shared_chunk_video.mp3"
+    shared.write_bytes(b"shared")
+    user = _make_user(db_session, username="alice_vp")
+    holder = Transcript(
+        user_id=user.id, title="holder", filename="h.mp4", status="completed",
+        full_text="x", video_path=str(shared),
+    )
+    target = Transcript(user_id=user.id, title="target", filename="t.mp3", status="processing")
+    db_session.add_all([holder, target])
+    db_session.commit()
+    db_session.add(TranscriptionJob(
+        transcript_id=target.id, chunk_index=0, start_time=0, end_time=10,
+        audio_path=str(shared), status="completed",
+        result_json={"segments": [{"start": 0, "end": 10, "text": "hello", "speaker": None, "confidence": None}], "language": "en", "model": "whisper-large-v3"},
+    ))
+    db_session.commit()
+    await _finalize_if_done(db_session, target.id, DiarizationService())
+    assert shared.exists()
+
+
+@pytest.mark.asyncio
+async def test_finalize_keeps_chunk_when_referenced_by_sibling_stereo_path(db_session, tmp_path):
+    shared = tmp_path / "shared_chunk_stereo.flac"
+    shared.write_bytes(b"shared")
+    user = _make_user(db_session, username="alice_sp")
+    holder = Transcript(
+        user_id=user.id, title="holder", filename="h.mp3", status="completed",
+        full_text="x", stereo_audio_path=str(shared),
+    )
+    target = Transcript(user_id=user.id, title="target", filename="t.mp3", status="processing")
+    db_session.add_all([holder, target])
+    db_session.commit()
+    db_session.add(TranscriptionJob(
+        transcript_id=target.id, chunk_index=0, start_time=0, end_time=10,
+        audio_path=str(shared), status="completed",
+        result_json={"segments": [{"start": 0, "end": 10, "text": "hello", "speaker": None, "confidence": None}], "language": "en", "model": "whisper-large-v3"},
+    ))
+    db_session.commit()
+    await _finalize_if_done(db_session, target.id, DiarizationService())
+    assert shared.exists()
+
+
+def test_delete_transcript_keeps_chunk_referenced_by_sibling_video_path(client, db_session, tmp_path):
+    shared = tmp_path / "shared_chunk_v2.mp3"
+    shared.write_bytes(b"shared")
+    user = db_session.query(User).filter(User.username == "testuser").first()
+    holder = Transcript(user_id=user.id, title="holder", filename="h.mp4", status="completed", full_text="x", video_path=str(shared))
+    db_session.add(holder)
+    db_session.commit()
+    victim = Transcript(user_id=user.id, title="victim", filename="t.mp3", status="completed", full_text="y")
+    db_session.add(victim)
+    db_session.commit()
+    db_session.add(TranscriptionJob(transcript_id=victim.id, chunk_index=0, start_time=0, end_time=10, audio_path=str(shared), status="completed", result_json={"segments": [{"start": 0, "end": 10, "text": "y", "speaker": None, "confidence": None}], "language": "en", "model": "whisper-large-v3"}))
+    db_session.commit()
+    r = client.delete(f"/api/transcripts/{victim.id}")
+    assert r.status_code == 200
+    assert shared.exists()
+    assert db_session.query(Transcript).filter(Transcript.id == holder.id).first() is not None
+
+
+def test_delete_transcript_keeps_chunk_referenced_by_sibling_stereo_path(client, db_session, tmp_path):
+    shared = tmp_path / "shared_chunk_s2.flac"
+    shared.write_bytes(b"shared")
+    user = db_session.query(User).filter(User.username == "testuser").first()
+    holder = Transcript(user_id=user.id, title="holder", filename="h.mp3", status="completed", full_text="x", stereo_audio_path=str(shared))
+    db_session.add(holder)
+    db_session.commit()
+    victim = Transcript(user_id=user.id, title="victim", filename="t.mp3", status="completed", full_text="y")
+    db_session.add(victim)
+    db_session.commit()
+    db_session.add(TranscriptionJob(transcript_id=victim.id, chunk_index=0, start_time=0, end_time=10, audio_path=str(shared), status="completed", result_json={"segments": [{"start": 0, "end": 10, "text": "y", "speaker": None, "confidence": None}], "language": "en", "model": "whisper-large-v3"}))
+    db_session.commit()
+    r = client.delete(f"/api/transcripts/{victim.id}")
+    assert r.status_code == 200
+    assert shared.exists()
+    assert db_session.query(Transcript).filter(Transcript.id == holder.id).first() is not None
