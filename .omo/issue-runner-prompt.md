@@ -652,10 +652,10 @@ Independent review: Oracle (Phase 3.75) - <APPROVE|BLOCK|NEEDS-DISCUSSION>, <one
 and if the call failed and you fell back to a manual pass, say that on the
 same line, still starting with `Independent review:`. `verify_self_audit.py`
 blocks when the line is missing, because nothing else distinguishes a
-skipped Oracle pass from a clean one. The line must also appear in
-`token-usage.md` as an `oracle` row; the checker cross-checks the two files,
-since the verdict has been recorded here while the largest paid call was
-left out of the table.
+skipped Oracle pass from a clean one. The word `oracle` must also appear
+somewhere in `token-usage.md`'s Role column; the checker cross-checks the
+two files, since the verdict has been recorded here while the largest paid
+call was left out of the table.
 
 **If Oracle's response is BLOCK or NEEDS-DISCUSSION**, fix it before
 proceeding to Phase 4 (or resolve the discussion point), then re-run the
@@ -688,17 +688,24 @@ in Setup, not the bare `.omo/runs/issue-<N>/` path:
   stopping point. Before logging something as wrong, actually re-check it
   against the live config/current doc, don't assume a past run's finding
   still holds or that a tool-call failure means the thing doesn't exist.
-- `.omo/runs/issue-<N>/<your-branch-name>/token-usage.md` — **list every
-  sub-session/agent this run spawned, including which model backed each
-  one, cloud or local.** Name the model, not "an explore agent."
-  Cross-checked against usage-panel cost data — a mismatch is a
-  transparency gap, not a rounding error. **Your own turns count too.**
-  Write one line for the orchestrator's consumption even if the number is
-  an estimate, and label it `Orchestrator`. Treating the orchestrator as
-  free is how a run that implemented inline reports near-zero for work a
-  model did. `verify_self_audit.py` reports a missing orchestrator line as
-  advisory, and a missing `oracle` row as blocking when `self-audit.md`
-  claims an Oracle pass.
+- `.omo/runs/issue-<N>/<your-branch-name>/token-usage.md` — one row per
+  sub-session/agent spawned, exact column order:
+
+  ```
+  | Role | Session ID | Model | Cloud/Local | Notes |
+  ```
+
+  `Role` = literal lowercase dispatch name (`deep`, `oracle`, `explore`),
+  not a description. `Session ID` = the `ses_...` id the dispatch returns;
+  always record it. Never estimate or guess a token count here.
+
+  Never shell out to `opencode session list`/`export`/`stats` during this
+  run, on any session, to get a number — can kill a live session in this
+  directory.
+
+  Include a row labeled `orchestrator` for your own turns (Session ID
+  optional). `verify_self_audit.py` flags a missing `orchestrator` row as
+  advisory, a missing `oracle` row as blocking when Oracle ran.
 
 Report back to the human: which issue you actually targeted (Phase 0), the
 PR link, and pointers to the four `.omo/runs/issue-<N>/<your-branch-name>/*.md`
