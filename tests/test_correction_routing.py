@@ -148,16 +148,20 @@ def test_long_transcripts_are_chunked_into_multiple_calls(db_session):
         asyncio.run(correct_transcript(db_session, transcript, api_key="k"))
     assert fake_post.await_count > 1
     assert transcript.correction_error is None
-    # Each batch after the first has its first _BATCH_OVERLAP_LINES lines
-    # stripped (positional dedup). Build the expected stitched output: batch 0
-    # gets all N lines, batch i>0 gets N - overlap lines.
-    from services.correction import _BATCH_OVERLAP_LINES
-    overlap = _BATCH_OVERLAP_LINES
+    # Each batch after the first has its overlap share stripped, scaled to the
+    # N output lines it produced. Build the expected stitched output from the
+    # same batch split the service uses.
+    from services.correction import _BATCH_OVERLAP_LINES, _batch_lines
+    batches = _batch_lines(
+        [f"Speaker {i % 3}: " + "word " * 60 for i in range(40)],
+        overlap=_BATCH_OVERLAP_LINES,
+    )
     parts = []
-    for i in range(fake_post.await_count):
+    for i, batch in enumerate(batches):
         lines = [f"batch {i} line {j}" for j in range(N)]
         if i > 0:
-            keep_from = min(overlap, len(lines))
+            share = _BATCH_OVERLAP_LINES / max(1, len(batch))
+            keep_from = min(int(share * N), N)
             lines = lines[keep_from:]
         parts.append("\n\n".join(lines))
     assert transcript.corrected_text == "\n\n".join(p for p in parts if p)

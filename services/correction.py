@@ -8,6 +8,7 @@ docs/superpowers/specs/2026-07-02-hotword-glossary-and-correction-pass-design.md
 for why a same-audio pre-pass was rejected in favor of this approach.
 """
 import json
+import re
 
 from services.hotwords import list_hotwords, add_hotword
 from services.llm_client import chat_completion, JSON_MODE_PROVIDERS
@@ -131,8 +132,16 @@ async def correct_transcript(
             )
             corrected_text = part.strip()
             if i > 0:
-                content_lines = corrected_text.split("\n\n")
-                keep_from = min(_BATCH_OVERLAP_LINES, len(content_lines))
+                content_lines = [ln for ln in re.split(r"\n\s*\n", corrected_text) if ln.strip()]
+                prev = batches[i - 1]
+                actual_overlap = 0
+                max_k = min(_BATCH_OVERLAP_LINES, len(batch), len(prev))
+                for k in range(max_k, 0, -1):
+                    if batch[:k] == prev[-k:]:
+                        actual_overlap = k
+                        break
+                overlap_share = actual_overlap / max(1, len(batch))
+                keep_from = min(int(overlap_share * len(content_lines)), len(content_lines))
                 corrected_text = "\n\n".join(content_lines[keep_from:])
             corrected_parts.append(corrected_text)
             if progress_cb:

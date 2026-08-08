@@ -137,8 +137,9 @@ def test_batch_lines_overlap_never_drops_only_batch():
 
 
 def test_correction_dedup_strips_overlap_lines(db_session):
-    """Multi-batch correction strips _BATCH_OVERLAP_LINES lines from the start
-    of each batch 2+ output via '\n\n' split (the separator the LLM is told to use)."""
+    """Multi-batch correction strips the overlap from the start of each batch
+    2+ output. The strip is proportional to the overlap share of the input
+    batch, so fewer output lines (LLM merging) strips fewer lines."""
     segs = [
         {"start": i, "end": i + 1, "speaker": f"Sp {i % 3}", "text": "word " * 60}
         for i in range(30)
@@ -160,14 +161,105 @@ def test_correction_dedup_strips_overlap_lines(db_session):
     db_session.refresh(transcript)
     assert fake_post.await_count > 1
     assert transcript.correction_error is None
-    # Build expected: batch 0 gets all N lines, batch i>0 drops first overlap.
+    batches = _batch_lines(
+        [f"Sp {i % 3}: " + "word " * 60 for i in range(30)],
+        overlap=_BATCH_OVERLAP_LINES,
+    )
     parts = []
-    for i in range(fake_post.await_count):
+    for i, batch in enumerate(batches):
         lines = [f"batch {i} line {j}" for j in range(N)]
         if i > 0:
-            lines = lines[_BATCH_OVERLAP_LINES:]
+            share = _BATCH_OVERLAP_LINES / max(1, len(batch))
+            keep_from = min(int(share * N), N)
+            lines = lines[keep_from:]
         parts.append("\n\n".join(lines))
     assert transcript.corrected_text == "\n\n".join(parts)
+
+
+def test_correction_dedup_keeps_new_content_when_overlap_merges(db_session, monkeypatch):
+    """Regression: when the LLM merges the overlap region into fewer output
+    lines, proportional dedup must not strip content beyond the overlap.
+    A one-line overlap followed by a new line keeps the new line."""
+    user, transcript = _make_user_and_transcript(db_session)
+    transcript.full_text = ""
+    transcript.segments = [
+        {"start": i, "end": i + 1, "speaker": f"Sp{i}", "text": f"line {i}"}
+        for i in range(8)
+    ]
+    db_session.commit()
+
+    def fake_batch_lines(lines, budget=6000, overlap=0):
+        return [lines[:8], lines[4:8] + ["unique new content"]]
+    monkeypatch.setattr("services.correction._batch_lines", fake_batch_lines)
+
+    fake_post = AsyncMock(side_effect=[
+        _chat_completion_response("\n\n".join(f"out {j}" for j in range(5))),
+        _chat_completion_response("merged overlap\n\nunique new content"),
+    ])
+    with patch("httpx.AsyncClient.post", fake_post):
+        import asyncio
+        asyncio.run(correct_transcript(db_session, transcript, api_key="k"))
+
+    db_session.refresh(transcript)
+    assert "unique new content" in transcript.corrected_text
+    assert "merged overlap" not in transcript.corrected_text
+
+
+def test_correction_dedup_single_newline_separator_keeps_content(db_session, monkeypatch):
+    """Regression: output that separates lines with single '\n' instead of the
+    instructed blank line must not be stripped wholesale."""
+    user, transcript = _make_user_and_transcript(db_session)
+    transcript.full_text = ""
+    transcript.segments = [
+        {"start": i, "end": i + 1, "speaker": f"Sp{i}", "text": f"line {i}"}
+        for i in range(8)
+    ]
+    db_session.commit()
+
+    def fake_batch_lines(lines, budget=6000, overlap=0):
+        return [lines[:8], lines[4:8] + ["new line here"]]
+    monkeypatch.setattr("services.correction._batch_lines", fake_batch_lines)
+
+    fake_post = AsyncMock(side_effect=[
+        _chat_completion_response("\n".join(f"out {j}" for j in range(5))),
+        _chat_completion_response("merged\nnew line here"),
+    ])
+    with patch("httpx.AsyncClient.post", fake_post):
+        import asyncio
+        asyncio.run(correct_transcript(db_session, transcript, api_key="k"))
+
+    db_session.refresh(transcript)
+    assert "new line here" in transcript.corrected_text
+    assert transcript.correction_error is None
+
+
+def test_correction_dedup_keeps_content_when_actual_overlap_is_short(db_session, monkeypatch):
+    """Regression: when a batch has fewer actual overlap lines than
+    _BATCH_OVERLAP_LINES (a huge single line forces a 1-line batch), the dedup
+    must scale to the actual overlap count, not the nominal one."""
+    user, transcript = _make_user_and_transcript(db_session)
+    transcript.full_text = ""
+    transcript.segments = [
+        {"start": 0, "end": 1, "speaker": "A", "text": "x" * 7000},
+        {"start": 1, "end": 2, "speaker": "B", "text": "second segment"},
+    ]
+    db_session.commit()
+
+    def fake_batch_lines(lines, budget=6000, overlap=0):
+        return [lines[:1], lines[:1] + lines[1:]]
+    monkeypatch.setattr("services.correction._batch_lines", fake_batch_lines)
+
+    fake_post = AsyncMock(side_effect=[
+        _chat_completion_response("huge corrected"),
+        _chat_completion_response("merged-overlap\n\nsecond segment corrected"),
+    ])
+    with patch("httpx.AsyncClient.post", fake_post):
+        import asyncio
+        asyncio.run(correct_transcript(db_session, transcript, api_key="k"))
+
+    db_session.refresh(transcript)
+    assert "second segment corrected" in transcript.corrected_text
+    assert transcript.correction_error is None
 
 
 def test_correction_single_batch_no_dedup(db_session):
