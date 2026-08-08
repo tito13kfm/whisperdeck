@@ -652,10 +652,10 @@ Independent review: Oracle (Phase 3.75) - <APPROVE|BLOCK|NEEDS-DISCUSSION>, <one
 and if the call failed and you fell back to a manual pass, say that on the
 same line, still starting with `Independent review:`. `verify_self_audit.py`
 blocks when the line is missing, because nothing else distinguishes a
-skipped Oracle pass from a clean one. The line must also appear in
-`token-usage.md` as an `oracle` row; the checker cross-checks the two files,
-since the verdict has been recorded here while the largest paid call was
-left out of the table.
+skipped Oracle pass from a clean one. The word `oracle` must also appear
+somewhere in `token-usage.md`'s Role column; the checker cross-checks the
+two files, since the verdict has been recorded here while the largest paid
+call was left out of the table.
 
 **If Oracle's response is BLOCK or NEEDS-DISCUSSION**, fix it before
 proceeding to Phase 4 (or resolve the discussion point), then re-run the
@@ -688,17 +688,40 @@ in Setup, not the bare `.omo/runs/issue-<N>/` path:
   stopping point. Before logging something as wrong, actually re-check it
   against the live config/current doc, don't assume a past run's finding
   still holds or that a tool-call failure means the thing doesn't exist.
-- `.omo/runs/issue-<N>/<your-branch-name>/token-usage.md` — **list every
-  sub-session/agent this run spawned, including which model backed each
-  one, cloud or local.** Name the model, not "an explore agent."
-  Cross-checked against usage-panel cost data — a mismatch is a
-  transparency gap, not a rounding error. **Your own turns count too.**
-  Write one line for the orchestrator's consumption even if the number is
-  an estimate, and label it `Orchestrator`. Treating the orchestrator as
-  free is how a run that implemented inline reports near-zero for work a
-  model did. `verify_self_audit.py` reports a missing orchestrator line as
-  advisory, and a missing `oracle` row as blocking when `self-audit.md`
-  claims an Oracle pass.
+- `.omo/runs/issue-<N>/<your-branch-name>/token-usage.md` — **one row per
+  sub-session/agent this run spawned**, fixed columns, in this exact order:
+
+  ```
+  | Role | Session ID | Model | Cloud/Local | Notes |
+  ```
+
+  `Role` is the literal dispatch name, lowercase, the same word you passed
+  to the dispatch call (`deep`, `oracle`, `explore`) — this is the field a
+  later rollup groups by, so don't paraphrase it into a description. `Model`
+  names the actual model, not "an explore agent." `Session ID` is the
+  `ses_...` id the dispatch call returns — record it, every time, even
+  though you have no use for it yourself; a separate out-of-band process
+  joins it against real token counts later. Do not guess or omit a token
+  count in this table — past runs that tried almost never filled it in
+  accurately (or at all), so this file no longer asks for one.
+
+  **Never shell out to `opencode session list`, `opencode export`, or
+  `opencode stats` during this run, on your own session or any dispatched
+  one, to try to get a real number here.** A second `opencode` CLI call
+  against a directory that already has a live session running in it has
+  silently killed that session before (issue #171's MiniMax round). Real
+  numbers get reconciled later, out-of-band, once this directory is
+  confirmed idle — recording the session ID now is the only thing this
+  phase needs to do.
+
+  **Your own turns count too.** Write one line for the orchestrator's own
+  consumption, labeled `orchestrator` in the Role column — leave Session ID
+  blank if you don't know it, that's fine, your own top-level session is
+  exactly what `session list` already sees out-of-band. Treating the
+  orchestrator as free is how a run that implemented inline reports
+  near-zero for work a model did. `verify_self_audit.py` reports a missing
+  orchestrator line as advisory, and a missing `oracle` row as blocking
+  when `self-audit.md` claims an Oracle pass.
 
 Report back to the human: which issue you actually targeted (Phase 0), the
 PR link, and pointers to the four `.omo/runs/issue-<N>/<your-branch-name>/*.md`
