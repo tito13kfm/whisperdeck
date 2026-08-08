@@ -87,8 +87,11 @@ async def correct_transcript(
     Each line gets a stable ID ([L0000]) before batching. The LLM returns
     one JSON record per line, keyed by ID. Overlapping batches produce
     duplicate IDs — the first occurrence is kept, later ones are discarded.
-    Stitching sorts by ID so the output order matches the input order,
-    even if the LLM reorders, merges, or splits lines.
+    Invented IDs not in the input set are discarded and logged in
+    correction_error. Input IDs missing from every batch response fall back
+    to their original raw text and are logged. Stitching sorts by ID so
+    the output order matches the input order, even if the LLM reorders,
+    merges, or splits lines.
 
     progress_cb(done, total) fires after each batch; cancel_cb() is checked
     before each batch — returning True stops cleanly without touching the
@@ -102,10 +105,12 @@ async def correct_transcript(
     )
     raw_lines = _transcript_lines(transcript)
     id_lines = [_id_line(i, text) for i, text in enumerate(raw_lines)]
+    input_ids = {line[1:6] for line in id_lines}
     batches = _batch_lines(id_lines, overlap=_BATCH_OVERLAP_LINES)
 
     records: dict[str, str] = {}
     parse_errors: list[str] = []
+    invented_ids: list[str] = []
 
     try:
         for i, batch in enumerate(batches):
@@ -146,17 +151,42 @@ async def correct_transcript(
             try:
                 items = json.loads(part)
                 if not isinstance(items, list):
+                    parse_errors.append(
+                        f"Batch {i + 1}: response is not a JSON array "
+                        f"(type: {type(items).__name__})")
                     items = []
                 for item in items:
                     rid = item.get("id", "")
                     text = item.get("text", "")
-                    if rid and text and rid not in records:
-                        records[rid] = text
+                    if not rid or not text:
+                        continue
+                    if rid in input_ids:
+                        if rid not in records:
+                            records[rid] = text
+                    else:
+                        invented_ids.append(rid)
             except (json.JSONDecodeError, TypeError) as e:
                 parse_errors.append(f"Batch {i + 1}: {e}")
 
             if progress_cb:
                 progress_cb(i + 1, len(batches))
+
+        # Fall back to original text for any input IDs the LLM never returned.
+        missing_ids = sorted(input_ids - set(records.keys()))
+        for mid in missing_ids:
+            try:
+                idx = int(mid[1:])
+                records[mid] = raw_lines[idx]
+            except (ValueError, IndexError):
+                pass
+        if missing_ids:
+            parse_errors.append(
+                f"Missing response for {len(missing_ids)} line(s): "
+                f"{', '.join(missing_ids)}")
+        if invented_ids:
+            parse_errors.append(
+                f"Ignored {len(invented_ids)} invented ID(s): "
+                f"{', '.join(invented_ids)}")
 
         if records:
             sorted_texts = [text for _, text in sorted(records.items())]

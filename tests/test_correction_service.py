@@ -39,6 +39,17 @@ def _json_records(*id_text_pairs):
     return json.dumps([{"id": rid, "text": text} for rid, text in id_text_pairs])
 
 
+def _make_multi_segments_transcript(db_session, count=6):
+    user = User(username=f"multi-{count}", password_hash="x", password_salt="y")
+    db_session.add(user)
+    db_session.commit()
+    segs = [{"start": i, "end": i + 1, "speaker": "S", "text": f"line {i}"} for i in range(count)]
+    t = Transcript(user_id=user.id, title="t", filename="f.mp3", status="completed", segments=segs)
+    db_session.add(t)
+    db_session.commit()
+    return user, t
+
+
 # ── basic success / error ────────────────────────────────────────────────
 
 def test_correct_transcript_sets_corrected_text_on_success(db_session):
@@ -158,8 +169,7 @@ def test_batch_lines_overlap_does_not_drop_final_batch():
 def test_correction_dedup_first_occurrence_wins(db_session, monkeypatch):
     """Overlapping batches return duplicate IDs. The first occurrence is kept,
     later duplicates are discarded. Sorted by ID to restore input order."""
-    user, transcript = _make_user_and_transcript(db_session)
-    db_session.commit()
+    user, transcript = _make_multi_segments_transcript(db_session, count=6)
 
     monkeypatch.setattr(
         "services.correction._batch_lines",
@@ -187,8 +197,7 @@ def test_correction_dedup_first_occurrence_wins(db_session, monkeypatch):
 def test_correction_dedup_stable_against_reordering(db_session, monkeypatch):
     """Even when the LLM returns records in a different order, the stitch
     sorts by ID so the output matches the original transcript order."""
-    user, transcript = _make_user_and_transcript(db_session)
-    db_session.commit()
+    user, transcript = _make_multi_segments_transcript(db_session, count=5)
 
     monkeypatch.setattr(
         "services.correction._batch_lines",
@@ -210,10 +219,9 @@ def test_correction_dedup_stable_against_reordering(db_session, monkeypatch):
 
 
 def test_correction_json_parse_error_keeps_other_batches(db_session, monkeypatch):
-    """When one batch returns non-JSON, other batches' records are preserved
-    and the error is recorded. Never discard valid output from other batches."""
-    user, transcript = _make_user_and_transcript(db_session)
-    db_session.commit()
+    """When one batch returns non-JSON, other batches' records are kept
+    and the error is recorded. Missing IDs fall back to original text."""
+    user, transcript = _make_multi_segments_transcript(db_session, count=3)
 
     monkeypatch.setattr(
         "services.correction._batch_lines",
@@ -237,8 +245,7 @@ def test_correction_json_parse_error_keeps_other_batches(db_session, monkeypatch
 
 def test_correction_missing_id_does_not_lose_other_records(db_session, monkeypatch):
     """A record without an 'id' key is skipped; all other records survive."""
-    user, transcript = _make_user_and_transcript(db_session)
-    db_session.commit()
+    user, transcript = _make_multi_segments_transcript(db_session, count=3)
 
     monkeypatch.setattr(
         "services.correction._batch_lines",
@@ -261,11 +268,10 @@ def test_correction_missing_id_does_not_lose_other_records(db_session, monkeypat
     assert transcript.correction_error is None
 
 
-def test_correction_invented_id_is_sorted_in(db_session, monkeypatch):
-    """An ID the LLM invented (not present in the input) is included in the
-    sorted output. The corrected text is preserved, not discarded."""
-    user, transcript = _make_user_and_transcript(db_session)
-    db_session.commit()
+def test_correction_invented_id_is_excluded(db_session, monkeypatch):
+    """An ID the LLM invented (not present in the input) is excluded from
+    the output and logged in correction_error."""
+    user, transcript = _make_multi_segments_transcript(db_session, count=3)
 
     monkeypatch.setattr(
         "services.correction._batch_lines",
@@ -274,7 +280,6 @@ def test_correction_invented_id_is_sorted_in(db_session, monkeypatch):
 
     fake_post = AsyncMock(side_effect=[
         _chat_completion_response(_json_records(("L0000", "A"), ("L0001", "B"))),
-        # LLM invents L0999 that wasn't in any batch
         _chat_completion_response(_json_records(("L0002", "C"), ("L0999", "extra"))),
     ])
     with patch("httpx.AsyncClient.post", fake_post):
@@ -283,14 +288,40 @@ def test_correction_invented_id_is_sorted_in(db_session, monkeypatch):
 
     db_session.refresh(transcript)
     assert "A" in transcript.corrected_text
-    assert "extra" in transcript.corrected_text
-    assert transcript.correction_error is None
+    assert "C" in transcript.corrected_text
+    assert "extra" not in transcript.corrected_text
+    assert "invented" in transcript.correction_error
+    assert "L0999" in transcript.correction_error
+
+
+def test_correction_missing_id_falls_back_to_original(db_session, monkeypatch):
+    """An input line whose ID never appears in any batch response falls back
+    to the original raw transcript text instead of being silently dropped."""
+    user, transcript = _make_multi_segments_transcript(db_session, count=3)
+
+    monkeypatch.setattr(
+        "services.correction._batch_lines",
+        lambda *a, **kw: [["batch 0"]],
+    )
+
+    fake_post = AsyncMock(return_value=_chat_completion_response(
+        _json_records(("L0000", "first corrected"), ("L0002", "third corrected"))))
+    with patch("httpx.AsyncClient.post", fake_post):
+        import asyncio
+        asyncio.run(correct_transcript(db_session, transcript, api_key="k"))
+
+    db_session.refresh(transcript)
+    assert "first corrected" in transcript.corrected_text
+    assert "third corrected" in transcript.corrected_text
+    assert "line 1" in transcript.corrected_text  # fallback for missing L0001
+    assert "Missing response" in transcript.correction_error
+    assert "L0001" in transcript.correction_error
 
 
 def test_correction_non_list_json_is_treated_as_empty(db_session, monkeypatch):
-    """A JSON object (not an array) produces no records but does not crash."""
-    user, transcript = _make_user_and_transcript(db_session)
-    db_session.commit()
+    """A JSON object (not an array) is recorded as an error and produces
+    no records; missing-ID fallback fills in the original text."""
+    user, transcript = _make_multi_segments_transcript(db_session, count=1)
 
     monkeypatch.setattr(
         "services.correction._batch_lines",
@@ -304,8 +335,8 @@ def test_correction_non_list_json_is_treated_as_empty(db_session, monkeypatch):
         asyncio.run(correct_transcript(db_session, transcript, api_key="k"))
 
     db_session.refresh(transcript)
-    assert transcript.corrected_text is None
-    assert transcript.correction_error is None
+    assert "line 0" in transcript.corrected_text
+    assert "not a JSON array" in transcript.correction_error
 
 
 def test_correction_single_batch_no_dedup(db_session):

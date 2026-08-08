@@ -149,7 +149,7 @@ def test_long_transcripts_are_chunked_into_multiple_calls(db_session):
     records: dict[str, str] = {}
     mock_responses = []
     for batch in batches:
-        batch_ids = [line[:6] for line in batch]
+        batch_ids = [line[1:6] for line in batch]
         batch_pairs = [(rid, f"out: {rid}") for rid in batch_ids]
         for rid, text in batch_pairs:
             if rid not in records:
