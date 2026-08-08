@@ -537,10 +537,19 @@ async def _finalize_if_done(db, transcript_id: int, diarization_service) -> None
     else:
         new_status = "partial"
 
+    # A failed chunk contributes no segments, so a retry that fails again
+    # yields byte-identical merged text. Re-running diarization, wiping
+    # relabel history, or enqueuing LLM jobs on that identical text would
+    # duplicate paid calls and destroy user edits for no benefit. Gate
+    # those expensive/destructive side effects on content actually changing
+    # (issue #328). The transcript row update itself still lands so the
+    # status reflects reality, but the volley is skipped.
+    should_fire_side_effects = (full_text != (transcript.full_text or ""))
+
     speaker_count = None
     diarization_method = None
     diarization_error = None
-    if transcript.diarize_requested and segments and transcript.audio_path:
+    if should_fire_side_effects and transcript.diarize_requested and segments and transcript.audio_path:
         # IMPORTANT: nothing above this point may leave a dirty write on
         # `transcript` — diarization result, segments, and the new status
         # are all kept in local variables only. If `transcript.status` (or
@@ -592,23 +601,26 @@ async def _finalize_if_done(db, transcript_id: int, diarization_service) -> None
             transcript.error = diarization_error
             transcript.diarization_method = "failed"
 
-    # Finalize replaces segments wholesale. Normally there is no relabel
-    # history yet (first completion), but on a resume/retry re-finalize any
-    # entries recorded against the previous segmentation are index-stale —
-    # clear them so undo can't stamp old labels onto the new lines.
     from services.relabel import clear_relabel_history, count_distinct_speakers
-    clear_relabel_history(db, transcript.id)
-    transcript.segments = segments
-    transcript.full_text = full_text
-    transcript.duration_seconds = duration_seconds
+    if should_fire_side_effects:
+        # Finalize replaces segments wholesale. Normally there is no relabel
+        # history yet (first completion), but on a resume/retry re-finalize any
+        # entries recorded against the previous segmentation are index-stale —
+        # clear them so undo can't stamp old labels onto the new lines.
+        # Skip the wipe when the merged text is unchanged (issue #328) — wiping
+        # would destroy user edits made between re-finalizations for no benefit.
+        clear_relabel_history(db, transcript.id)
+        transcript.segments = segments
+        transcript.full_text = full_text
+        transcript.duration_seconds = duration_seconds
+        if speaker_count is not None:
+            transcript.speaker_count = count_distinct_speakers(merged)
+            transcript.diarization_method = diarization_method
     transcript.status = new_status
-    if speaker_count is not None:
-        transcript.speaker_count = count_distinct_speakers(merged)
-        transcript.diarization_method = diarization_method
     transcript.updated_at = utcnow_naive()
     db.commit()
 
-    if new_status in ("completed", "partial"):
+    if new_status in ("completed", "partial") and should_fire_side_effects:
         from services.settings import get_user_settings  # local import avoids a module-load cycle with app.py
         user_settings = get_user_settings(db, transcript.user_id)
         # Mirror the inline-path branch in app.py:_run_transcription_pipeline
@@ -745,10 +757,21 @@ async def queue_worker_tick(SessionLocal, diarization_service) -> None:
             .filter(TranscriptionJob.status.in_(["pending", "failed"]))
             .all()
         )
+        resurrected_transcript_ids = set()
         for job in pending_or_retry:
             if job.status == "failed" and _retry_eligible(job):
                 job.status = "pending"
                 job.error = None
+                resurrected_transcript_ids.add(job.transcript_id)
+        for tid in resurrected_transcript_ids:
+            transcript = db.query(Transcript).filter(Transcript.id == tid).first()
+            if transcript and transcript.status != "cancelled":
+                # Cancel always wins (services/queue.py:516 guard) — a
+                # user-cancelled transcript must stay cancelled even if a
+                # failed chunk is retry-eligible; resume is explicit via
+                # resume_cancelled_chunks, not automatic.
+                transcript.status = "processing"
+                transcript.queue_dismissed = False
         db.commit()
 
         pending = db.query(TranscriptionJob).filter(TranscriptionJob.status == "pending").all()
