@@ -208,11 +208,23 @@ conversation's framing bias.
    numbers are known — don't ship a draft's placeholder cross-reference as
    literal issue text.
 4. **On abandonment:** if the user says to stop instead of confirming or
-   requesting changes, stop. No issue gets filed, and there's nothing left
-   on disk to clean up — `/idea` has no run-artifact directory.
+   requesting changes, stop. No issue gets filed, nothing gets written to
+   disk — the report in step 5 below only gets written on a successful
+   filing.
 5. Report the filed issue number(s) and URL(s) back to the user as your
-   final message. This is the entire durable output of a successful
-   `/idea` run.
+   final message. Then write that same report to
+   `.omo/runs/idea-<N>/report.md`, using the **main checkout's absolute
+   path** (not the current worktree's, if you're running from one) so it
+   survives regardless of which worktree `/idea` happened to run from;
+   `<N>` is the first filed issue's number. Create the directory if
+   needed. Contents: the original idea text, each filed issue's
+   number/title/URL, one line on the Phase 1 challenge outcome (clean, or
+   conflict overridden — quote the override reason), and one line on the
+   Phase 2 prior-art outcome (nothing found, or found #N). This is a
+   single end-of-run log, not a phase-by-phase artifact trail — Phases
+   0-3 still write nothing to disk. Small-scale mirror of
+   `/issue-claude`'s `investigation.md`/`self-audit.md`, kept for later
+   inspection when tuning this command.
 
 ## Error handling
 
@@ -225,8 +237,8 @@ conversation's framing bias.
   open-ended questions. Summarize current understanding and ask for
   explicit yes/no confirmation instead of interrogating indefinitely.
 - **User abandons mid-flow (any phase):** stop cleanly. No issue gets
-  filed and nothing is left on disk to clean up — `/idea` has no
-  run-artifact directory, unlike `/issue-claude`.
+  filed and nothing gets written to disk — the Phase 4 step 5 report is
+  only written on a successful filing.
 - **Challenge conflict overridden by the user (Phase 1):** record the
   override verbatim and carry it into the filed issue's `## Problem`
   section (Phase 3 step 6) — don't let `/issue-claude`'s Phase 1
