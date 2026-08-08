@@ -571,6 +571,9 @@ def _build_status_payload(db: Session, current_user: User) -> dict:
     total_minutes = sum(d[0] for d in total_duration if d[0]) / 60
     voice_count = db.query(VoiceProfile).filter(VoiceProfile.user_id == current_user.id).count()
     voice_note_count = db.query(VoiceNote).filter(VoiceNote.user_id == current_user.id).count()
+    voice_dump_unseen = db.query(VoiceDumpItem).filter(
+        VoiceDumpItem.user_id == current_user.id, VoiceDumpItem.seen_at == None  # noqa: E711
+    ).count()
 
     active_prov = db.query(ProviderConfig).filter(
         ProviderConfig.user_id == current_user.id, ProviderConfig.is_active == True  # noqa: E712
@@ -584,6 +587,7 @@ def _build_status_payload(db: Session, current_user: User) -> dict:
         "total_minutes": round(total_minutes, 1),
         "voice_profiles": voice_count,
         "voice_notes": voice_note_count,
+        "voice_dump_unseen": voice_dump_unseen,
         "diarization_available": diarization_service._check_pyannote(),
         "voice_id_backend": voice_id_service._backend,
         "backend_name": voice_id_service.backend_name,
@@ -2839,6 +2843,7 @@ def _serialize_voice_dump_item(item) -> dict:
         "model": item.model or "",
         "provider": item.provider or "",
         "created_at": item.created_at.isoformat() if item.created_at else None,
+        "seen_at": item.seen_at.isoformat() if item.seen_at else None,
     }
 
 
@@ -3098,6 +3103,26 @@ async def list_voice_dump_items(
         }
         for item, t in rows
     ]}
+
+
+@app.post("/api/voice-dump-items/mark-seen")
+async def mark_voice_dump_items_seen(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Mark all unseen voice-dump items for the current user as seen.
+    Called when the Dump Notes board loads, so the nav badge reflects
+    only items created after that visit."""
+    updated = (
+        db.query(VoiceDumpItem)
+        .filter(
+            VoiceDumpItem.user_id == current_user.id,
+            VoiceDumpItem.seen_at == None,  # noqa: E711
+        )
+        .update({VoiceDumpItem.seen_at: utcnow_naive()})
+    )
+    db.commit()
+    return {"marked_seen": updated}
 
 
 @app.get("/api/transcripts/{transcript_id}/versions")

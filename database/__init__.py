@@ -212,6 +212,7 @@ class VoiceDumpItem(Base):
     model = Column(String(128), default="")
     provider = Column(String(64), default="")
     created_at = Column(DateTime, default=utcnow_naive)
+    seen_at = Column(DateTime, nullable=True)  # NULL = unseen; set when user visits Dump Notes board
 
     transcript = relationship("Transcript", back_populates="voice_dump_items")
 
@@ -684,6 +685,20 @@ def init_db(db_path: str = "data/whisperdesk.db") -> tuple:
     ensure_columns(engine, "users", {"is_admin": "BOOLEAN DEFAULT 0", "reset_token": "TEXT", "reset_token_expires_at": "TEXT"})
     ensure_columns(engine, "users", {"local_device_token_hash": "TEXT", "local_device_token_created_at": "TEXT"})
     ensure_columns(engine, "voice_clips", {"embedding_model": "TEXT"})
+    # Capture whether the seen_at column existed right before ensure_columns adds it,
+    # so the backfill runs exactly once — not on every startup (issue #374).
+    _vd_seen_at_was_absent = (
+        "voice_dump_items" in inspect(engine).get_table_names()
+        and "seen_at" not in {c["name"] for c in inspect(engine).get_columns("voice_dump_items")}
+    )
+    ensure_columns(engine, "voice_dump_items", {"seen_at": "DATETIME"})
+    if _vd_seen_at_was_absent:
+        # Backfill existing dump-note rows as seen so deploy day doesn't spike
+        # the badge with every historical item.
+        with engine.begin() as conn:
+            conn.execute(text(
+                "UPDATE voice_dump_items SET seen_at = datetime('now')"
+            ))
     # Brand-new table for issue #171; create_all() above handles fresh DBs,
     # this idempotent CREATE handles DBs that pre-date the model.
     with engine.begin() as conn:

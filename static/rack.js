@@ -437,6 +437,8 @@ async function refreshRailChrome() {
     $('nav-badge-voices').textContent = String(st.voice_profiles ?? 0).padStart(2, '0');
     const vnBadge = $('nav-badge-voicenotes');
     if (vnBadge) vnBadge.textContent = String(st.voice_notes ?? 0).padStart(2, '0');
+    const vdBadge = $('nav-badge-dumpnotes');
+    if (vdBadge) vdBadge.textContent = String(st.voice_dump_unseen ?? 0).padStart(2, '0');
     updateRailStorage(st.total_minutes ?? 0);
   } catch { /* chrome refresh is best-effort */ }
 }
@@ -2717,12 +2719,17 @@ async function loadVoiceDumpItems() {
   // long stream-of-consciousness capture split into many items) and that
   // there is no per-item discard here: reviewing, editing and discarding
   // happen before finalize, on the transcript's own Dump Review tab.
-  const root = $('page-dumpnotes');
+const root = $('page-dumpnotes');
   refreshRailChrome();
   let data;
   try { data = await api('/api/voice-dump-items'); } catch (e) { toast(e.message, 'error'); return; }
-  // The list route's envelope key is `items`, not `voice_dump_items`.
   const items = data.items || [];
+  // Mark all currently-listed items as seen so the badge reflects only
+  // items created after this visit. Best-effort: a failure here should
+  // not block the board from rendering.
+  api('/api/voice-dump-items/mark-seen', { method: 'POST' }).then(
+    () => refreshRailChrome(),
+  ).catch(() => {});
   if (!items.length) {
     root.innerHTML =
       '<div class="page-head">' +
