@@ -85,13 +85,14 @@ async def correct_transcript(
     full_text and segments are never modified.
 
     Each line gets a stable ID ([L0000]) before batching. The LLM returns
-    one JSON record per line, keyed by ID. Overlapping batches produce
-    duplicate IDs — the first occurrence is kept, later ones are discarded.
-    Invented IDs not in the input set are discarded and logged in
-    correction_error. Input IDs missing from every batch response fall back
-    to their original raw text and are logged. Stitching sorts by ID so
-    the output order matches the input order, even if the LLM reorders,
-    merges, or splits lines.
+    one JSON record per line, keyed by ID. Records are validated against the
+    IDs of the batch they were returned for: valid IDs keep the first
+    occurrence (overlapping batches produce duplicates, later ones are
+    discarded), valid-but-out-of-batch IDs are logged as misplaced, and IDs
+    not in the input set are logged as invented. Input IDs missing from every
+    batch response fall back to their original raw text and are logged.
+    Stitching sorts by ID so the output order matches the input order, even
+    if the LLM reorders, merges, or splits lines.
 
     progress_cb(done, total) fires after each batch; cancel_cb() is checked
     before each batch — returning True stops cleanly without touching the
@@ -111,6 +112,7 @@ async def correct_transcript(
     records: dict[str, str] = {}
     parse_errors: list[str] = []
     invented_ids: list[str] = []
+    misplaced_ids: list[str] = []
 
     try:
         for i, batch in enumerate(batches):
@@ -155,16 +157,20 @@ async def correct_transcript(
                         f"Batch {i + 1}: response is not a JSON array "
                         f"(type: {type(items).__name__})")
                     items = []
+                batch_input_ids = {line[1:6] for line in batch}
                 for item in items:
                     rid = item.get("id", "")
                     text = item.get("text", "")
                     if not rid or not text:
                         continue
-                    if rid in input_ids:
-                        if rid not in records:
-                            records[rid] = text
-                    else:
-                        invented_ids.append(rid)
+                    if rid not in batch_input_ids:
+                        if rid in input_ids:
+                            misplaced_ids.append(rid)
+                        else:
+                            invented_ids.append(rid)
+                        continue
+                    if rid not in records:
+                        records[rid] = text
             except (json.JSONDecodeError, TypeError) as e:
                 parse_errors.append(f"Batch {i + 1}: {e}")
 
@@ -183,6 +189,10 @@ async def correct_transcript(
             parse_errors.append(
                 f"Missing response for {len(missing_ids)} line(s): "
                 f"{', '.join(missing_ids)}")
+        if misplaced_ids:
+            parse_errors.append(
+                f"Ignored {len(misplaced_ids)} misplaced ID(s): "
+                f"{', '.join(misplaced_ids)}")
         if invented_ids:
             parse_errors.append(
                 f"Ignored {len(invented_ids)} invented ID(s): "

@@ -173,7 +173,11 @@ def test_correction_dedup_first_occurrence_wins(db_session, monkeypatch):
 
     monkeypatch.setattr(
         "services.correction._batch_lines",
-        lambda *a, **kw: [["batch 0"], ["batch 1"], ["batch 2"]],
+        lambda *a, **kw: [
+            ["[L0000] line 0", "[L0001] line 1", "[L0002] line 2"],
+            ["[L0002] line 2", "[L0003] line 3", "[L0004] line 4"],
+            ["[L0004] line 4", "[L0005] line 5"],
+        ],
     )
 
     fake_post = AsyncMock(side_effect=[
@@ -201,14 +205,17 @@ def test_correction_dedup_stable_against_reordering(db_session, monkeypatch):
 
     monkeypatch.setattr(
         "services.correction._batch_lines",
-        lambda *a, **kw: [["batch 0"], ["batch 1"]],
+        lambda *a, **kw: [
+            ["[L0000] line 0", "[L0001] line 1", "[L0002] line 2"],
+            ["[L0002] line 2", "[L0003] line 3", "[L0004] line 4"],
+        ],
     )
 
     fake_post = AsyncMock(side_effect=[
         _chat_completion_response(
-            _json_records(("L0003", "D"), ("L0001", "B"), ("L0000", "A"))),
+            _json_records(("L0002", "C"), ("L0001", "B"), ("L0000", "A"))),
         _chat_completion_response(
-            _json_records(("L0004", "E"), ("L0002", "C"))),
+            _json_records(("L0004", "E"), ("L0003", "D"), ("L0002", "dup C"))),
     ])
     with patch("httpx.AsyncClient.post", fake_post):
         import asyncio
@@ -225,7 +232,11 @@ def test_correction_json_parse_error_keeps_other_batches(db_session, monkeypatch
 
     monkeypatch.setattr(
         "services.correction._batch_lines",
-        lambda *a, **kw: [["batch 0"], ["batch 1"], ["batch 2"]],
+        lambda *a, **kw: [
+            ["[L0000] line 0", "[L0001] line 1"],
+            ["[L0001] line 1", "[L0002] line 2"],
+            ["[L0002] line 2"],
+        ],
     )
 
     fake_post = AsyncMock(side_effect=[
@@ -249,7 +260,7 @@ def test_correction_missing_id_does_not_lose_other_records(db_session, monkeypat
 
     monkeypatch.setattr(
         "services.correction._batch_lines",
-        lambda *a, **kw: [["batch 0"]],
+        lambda *a, **kw: [["[L0000] line 0", "[L0001] line 1", "[L0002] line 2"]],
     )
 
     fake_post = AsyncMock(return_value=_chat_completion_response(
@@ -275,7 +286,10 @@ def test_correction_invented_id_is_excluded(db_session, monkeypatch):
 
     monkeypatch.setattr(
         "services.correction._batch_lines",
-        lambda *a, **kw: [["batch 0"], ["batch 1"]],
+        lambda *a, **kw: [
+            ["[L0000] line 0", "[L0001] line 1"],
+            ["[L0001] line 1", "[L0002] line 2"],
+        ],
     )
 
     fake_post = AsyncMock(side_effect=[
@@ -301,7 +315,7 @@ def test_correction_missing_id_falls_back_to_original(db_session, monkeypatch):
 
     monkeypatch.setattr(
         "services.correction._batch_lines",
-        lambda *a, **kw: [["batch 0"]],
+        lambda *a, **kw: [["[L0000] line 0", "[L0001] line 1", "[L0002] line 2"]],
     )
 
     fake_post = AsyncMock(return_value=_chat_completion_response(
@@ -325,7 +339,7 @@ def test_correction_non_list_json_is_treated_as_empty(db_session, monkeypatch):
 
     monkeypatch.setattr(
         "services.correction._batch_lines",
-        lambda *a, **kw: [["batch 0"]],
+        lambda *a, **kw: [["[L0000] line 0"]],
     )
 
     fake_post = AsyncMock(return_value=_chat_completion_response(
@@ -353,3 +367,44 @@ def test_correction_single_batch_no_dedup(db_session):
     assert transcript.corrected_text == "Correction works."
     assert fake_post.await_count == 1
     assert transcript.correction_error is None
+
+
+def test_correction_rejects_valid_id_from_wrong_batch(db_session, monkeypatch):
+    """A valid ID that appears in a batch it does not belong to is rejected
+    as misplaced, while the same ID in its owning batch is accepted."""
+    user, transcript = _make_multi_segments_transcript(db_session, count=3)
+
+    monkeypatch.setattr(
+        "services.correction._batch_lines",
+        lambda *args, **kwargs: [
+            ["[L0000] line 0"],
+            ["[L0001] line 1", "[L0002] line 2"],
+        ],
+    )
+
+    fake_post = AsyncMock(side_effect=[
+        _chat_completion_response(
+            _json_records(
+                ("L0000", "zero corrected"),
+                ("L0002", "wrong early response"),
+            )
+        ),
+        _chat_completion_response(
+            _json_records(
+                ("L0001", "one corrected"),
+                ("L0002", "right response"),
+            )
+        ),
+    ])
+
+    with patch("httpx.AsyncClient.post", fake_post):
+        import asyncio
+        asyncio.run(correct_transcript(db_session, transcript, api_key="k"))
+
+    db_session.refresh(transcript)
+    assert "zero corrected" in transcript.corrected_text
+    assert "one corrected" in transcript.corrected_text
+    assert "right response" in transcript.corrected_text
+    assert "wrong early response" not in transcript.corrected_text
+    assert "misplaced" in transcript.correction_error
+    assert "L0002" in transcript.correction_error
