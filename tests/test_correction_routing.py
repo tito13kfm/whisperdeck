@@ -139,13 +139,28 @@ def test_long_transcripts_are_chunked_into_multiple_calls(db_session):
         for i in range(40)
     ]
     user, transcript = _make_user_and_transcript(db_session, segments=segs)
-    fake_post = AsyncMock(side_effect=[_chat_response(f"part {i}") for i in range(10)])
+    # Return multiple lines per batch so the overlap dedup doesn't strip everything.
+    N = 8
+    fake_post = AsyncMock(side_effect=[
+        _chat_response("\n\n".join(f"batch {i} line {j}" for j in range(N)))
+        for i in range(10)])
     with patch("httpx.AsyncClient.post", fake_post):
         asyncio.run(correct_transcript(db_session, transcript, api_key="k"))
     assert fake_post.await_count > 1
     assert transcript.correction_error is None
-    assert transcript.corrected_text == "\n\n".join(
-        f"part {i}" for i in range(fake_post.await_count))
+    # Each batch after the first has its first _BATCH_OVERLAP_LINES lines
+    # stripped (positional dedup). Build the expected stitched output: batch 0
+    # gets all N lines, batch i>0 gets N - overlap lines.
+    from services.correction import _BATCH_OVERLAP_LINES
+    overlap = _BATCH_OVERLAP_LINES
+    parts = []
+    for i in range(fake_post.await_count):
+        lines = [f"batch {i} line {j}" for j in range(N)]
+        if i > 0:
+            keep_from = min(overlap, len(lines))
+            lines = lines[keep_from:]
+        parts.append("\n\n".join(lines))
+    assert transcript.corrected_text == "\n\n".join(p for p in parts if p)
 
 
 def test_batch_lines_respects_budget():

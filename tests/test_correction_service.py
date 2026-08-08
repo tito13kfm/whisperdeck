@@ -2,7 +2,10 @@ import json
 from unittest.mock import AsyncMock, patch
 
 from database import Transcript, User
-from services.correction import correct_transcript, extract_hotwords_from_doc
+from services.correction import (
+    _BATCH_OVERLAP_LINES, _batch_lines, correct_transcript,
+    extract_hotwords_from_doc,
+)
 from services.hotwords import list_hotwords
 
 
@@ -114,3 +117,79 @@ def test_extract_hotwords_from_doc_raises_on_failure(db_session):
 
     # Function raises before persisting — no hotwords should exist
     assert list_hotwords(db_session, user.id) == []
+
+
+def test_batch_lines_with_overlap():
+    """_batch_lines with overlap=N shares the last N lines of each batch
+    with the start of the next batch."""
+    lines = ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j"]
+    batches = _batch_lines(lines, budget=20, overlap=3)
+    assert len(batches) >= 2
+    for idx in range(1, len(batches)):
+        assert batches[idx][:3] == batches[idx - 1][-3:]
+
+
+def test_batch_lines_overlap_never_drops_only_batch():
+    """A single batch with fewer lines than overlap must still be emitted."""
+    lines = ["a", "b"]
+    batches = _batch_lines(lines, budget=100, overlap=4)
+    assert batches == [["a", "b"]]
+
+
+def test_correction_dedup_strips_overlap_lines(db_session):
+    """Multi-batch correction strips _BATCH_OVERLAP_LINES lines from the start
+    of each batch 2+ output via '\n\n' split (the separator the LLM is told to use)."""
+    segs = [
+        {"start": i, "end": i + 1, "speaker": f"Sp {i % 3}", "text": "word " * 60}
+        for i in range(30)
+    ]
+    user, transcript = _make_user_and_transcript(db_session)
+    # Override full_text with segments so _transcript_lines uses them.
+    transcript.full_text = ""
+    transcript.segments = segs
+    db_session.commit()
+
+    N = 8  # lines per batch response
+    fake_post = AsyncMock(side_effect=[
+        _chat_completion_response("\n\n".join(f"batch {i} line {j}" for j in range(N)))
+        for i in range(10)])
+    with patch("httpx.AsyncClient.post", fake_post):
+        import asyncio
+        asyncio.run(correct_transcript(db_session, transcript, api_key="k"))
+
+    db_session.refresh(transcript)
+    assert fake_post.await_count > 1
+    assert transcript.correction_error is None
+    # Build expected: batch 0 gets all N lines, batch i>0 drops first overlap.
+    parts = []
+    for i in range(fake_post.await_count):
+        lines = [f"batch {i} line {j}" for j in range(N)]
+        if i > 0:
+            lines = lines[_BATCH_OVERLAP_LINES:]
+        parts.append("\n\n".join(lines))
+    assert transcript.corrected_text == "\n\n".join(parts)
+
+
+def test_correction_single_batch_no_dedup(db_session):
+    """Single-batch transcripts should not apply overlap dedup."""
+    user, transcript = _make_user_and_transcript(db_session)
+    fake_post = AsyncMock(return_value=_chat_completion_response("Correction works."))
+    with patch("httpx.AsyncClient.post", fake_post):
+        import asyncio
+        asyncio.run(correct_transcript(db_session, transcript, api_key="k"))
+
+    db_session.refresh(transcript)
+    assert transcript.corrected_text == "Correction works."
+    assert fake_post.await_count == 1
+    assert transcript.correction_error is None
+
+
+def test_batch_lines_overlap_does_not_drop_final_batch():
+    """When segments are long enough that batch_size < overlap, the final
+    batch must still be emitted even though len(current) <= overlap."""
+    lines = ["x" * 4000, "y" * 4000]
+    batches = _batch_lines(lines, budget=6000, overlap=4)
+    # Both original lines must appear (overlap may duplicate them; that's fine)
+    all_lines = [ln for b in batches for ln in b]
+    assert "x" * 4000 in all_lines
+    assert "y" * 4000 in all_lines

@@ -17,7 +17,10 @@ _DEFAULT_MODEL = "llama-3.3-70b-versatile"
 # output comfortably inside max_tokens instead of silently truncating long
 # transcripts at 8192 output tokens.
 _CHUNK_CHAR_BUDGET = 6000
-_CONTEXT_TAIL_LINES = 2
+# Number of raw input lines shared between consecutive batches so the LLM
+# sees the same text on both sides of the boundary and corrects consistently.
+# Post-processing strips the overlap from the start of batch N+1's output.
+_BATCH_OVERLAP_LINES = 4
 
 
 async def _chat_completion(
@@ -46,14 +49,19 @@ def _transcript_lines(transcript) -> list[str]:
     return lines if lines else [(transcript.full_text or "").strip()]
 
 
-def _batch_lines(lines: list[str], budget: int = _CHUNK_CHAR_BUDGET) -> list[list[str]]:
+def _batch_lines(lines: list[str], budget: int = _CHUNK_CHAR_BUDGET, overlap: int = 0) -> list[list[str]]:
     batches: list[list[str]] = []
     current: list[str] = []
     size = 0
     for line in lines:
         if current and size + len(line) > budget:
             batches.append(current)
-            current, size = [], 0
+            if overlap:
+                overlap_lines = current[-overlap:]
+                current = list(overlap_lines)
+                size = sum(len(l) + 2 for l in overlap_lines)
+            else:
+                current, size = [], 0
         current.append(line)
         size += len(line) + 2
     if current:
@@ -72,8 +80,9 @@ async def correct_transcript(
 
     The transcript is handed to the LLM as speaker-labeled lines
     ('Speaker Name: text'), batched to stay inside output-token limits;
-    the model is instructed to preserve labels and line structure so the
-    corrected text renders with the same speakers.
+    batches overlap by _BATCH_OVERLAP_LINES raw lines so the LLM sees
+    consistent context on both sides of each boundary. The overlap is
+    stripped from batch N+1's output before stitching to avoid duplicates.
 
     progress_cb(done, total) fires after each batch; cancel_cb() is checked
     before each batch — returning True stops cleanly without touching the
@@ -85,21 +94,21 @@ async def correct_transcript(
         f"see a close phonetic match): {', '.join(glossary)}\n\n"
         if glossary else ""
     )
-    batches = _batch_lines(_transcript_lines(transcript))
+    batches = _batch_lines(_transcript_lines(transcript), overlap=_BATCH_OVERLAP_LINES)
     corrected_parts: list[str] = []
 
     try:
         for i, batch in enumerate(batches):
             if cancel_cb and cancel_cb():
                 return "cancelled"
-            context_block = ""
-            if corrected_parts:
-                tail = "\n".join(corrected_parts[-1].splitlines()[-_CONTEXT_TAIL_LINES:])
-                context_block = (
-                    "For context, the previous part of the transcript ended "
-                    f"with these already-corrected lines (do NOT repeat them):\n{tail}\n\n"
-                )
             part_note = f" (part {i + 1} of {len(batches)})" if len(batches) > 1 else ""
+            overlap_note = ""
+            if i > 0:
+                overlap_note = (
+                    f" The first {_BATCH_OVERLAP_LINES} "
+                    "lines overlap with the previous batch so you see both "
+                    "sides of the boundary — correct them consistently.\n\n"
+                )
             prompt = (
                 f"Below is a raw speech-to-text transcript{part_note}. Each "
                 "line has the form 'Speaker Name: text' (some lines may have "
@@ -113,18 +122,23 @@ async def correct_transcript(
                 "blank lines. Return only the corrected transcript lines, "
                 "nothing else.\n\n"
                 f"{glossary_block}"
-                f"{context_block}"
+                f"{overlap_note}"
                 f"TRANSCRIPT:\n" + "\n\n".join(batch)
             )
             part = await _chat_completion(
                 prompt, api_key, provider_name, model, json_mode=False,
                 provider_config=provider_config,
             )
-            corrected_parts.append(part.strip())
+            corrected_text = part.strip()
+            if i > 0:
+                content_lines = corrected_text.split("\n\n")
+                keep_from = min(_BATCH_OVERLAP_LINES, len(content_lines))
+                corrected_text = "\n\n".join(content_lines[keep_from:])
+            corrected_parts.append(corrected_text)
             if progress_cb:
                 progress_cb(i + 1, len(batches))
 
-        transcript.corrected_text = "\n\n".join(corrected_parts)
+        transcript.corrected_text = "\n\n".join(p for p in corrected_parts if p)
         transcript.correction_model = f"{provider_name}/{model}"
         transcript.correction_error = None
         result = "ok"
