@@ -437,6 +437,8 @@ async function refreshRailChrome() {
     $('nav-badge-voices').textContent = String(st.voice_profiles ?? 0).padStart(2, '0');
     const vnBadge = $('nav-badge-voicenotes');
     if (vnBadge) vnBadge.textContent = String(st.voice_notes ?? 0).padStart(2, '0');
+    const vdBadge = $('nav-badge-dumpnotes');
+    if (vdBadge) vdBadge.textContent = String(st.voice_dump_unseen ?? 0).padStart(2, '0');
     updateRailStorage(st.total_minutes ?? 0);
   } catch { /* chrome refresh is best-effort */ }
 }
@@ -2721,8 +2723,17 @@ async function loadVoiceDumpItems() {
   refreshRailChrome();
   let data;
   try { data = await api('/api/voice-dump-items'); } catch (e) { toast(e.message, 'error'); return; }
-  // The list route's envelope key is `items`, not `voice_dump_items`.
   const items = data.items || [];
+  // Mark only the displayed items as seen so the badge reflects items
+  // created after this visit. Scoped to loaded ids so items beyond the
+  // pagination limit aren't silently hidden (issue #374).
+  if (items.length) {
+    api('/api/voice-dump-items/mark-seen', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids: items.map(i => i.id) }),
+    }).then(() => refreshRailChrome()).catch(() => {});
+  }
   if (!items.length) {
     root.innerHTML =
       '<div class="page-head">' +
