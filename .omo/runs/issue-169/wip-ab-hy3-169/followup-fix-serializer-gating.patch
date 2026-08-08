@@ -1,0 +1,46 @@
+diff --git a/app.py b/app.py
+index 2815636..c12072c 100644
+--- a/app.py
++++ b/app.py
+@@ -340,12 +340,14 @@ def _serialize_transcript(db: Session, t: Transcript, *, jobs_map: dict[tuple[in
+         "summary_job": serialize_llm_job(jobs_map[(t.id, "summary")]) if (t.id, "summary") in jobs_map else None,
+         "voice_match_job": serialize_llm_job(jobs_map[(t.id, "voice_match")]) if (t.id, "voice_match") in jobs_map else None,
+         **_dictation_job_fields(jobs_map, t),
+-        "voice_note": _serialize_voice_note(t.voice_note),
+-        "voice_note_job": (
++    }
++    if t.kind == "voice_note":
++        # Kind-specific: only on voice_note transcripts, so meeting/dictation key sets stay stable (contract test).
++        data["voice_note"] = _serialize_voice_note(t.voice_note)
++        data["voice_note_job"] = (
+             serialize_llm_job(jobs_map[(t.id, "voice_note")])
+             if (t.id, "voice_note") in jobs_map else None
+-        ),
+-    }
++        )
+     if include_relabel:
+         last = latest_relabel(db, t.id)
+         data["last_relabel"] = (
+diff --git a/tests/test_serialize_transcript_contract.py b/tests/test_serialize_transcript_contract.py
+index ff97587..e5deef9 100644
+--- a/tests/test_serialize_transcript_contract.py
++++ b/tests/test_serialize_transcript_contract.py
+@@ -49,6 +49,18 @@ def test_dictation_transcript_key_set_matches_expected(db_session):
+     assert set(out.keys()) == EXPECTED_KEYS
+ 
+ 
++VOICE_NOTE_KEYS = EXPECTED_KEYS | {"voice_note", "voice_note_job"}
++
++
++def test_voice_note_transcript_key_set_matches_expected(db_session):
++    user, t = _build_transcript(db_session, kind="voice_note")
++    out = _serialize_transcript(db_session, t, jobs_map=_batch_latest_jobs(db_session, [t.id]))
++    assert set(out.keys()) == VOICE_NOTE_KEYS, (
++        f"missing: {VOICE_NOTE_KEYS - set(out.keys())}, "
++        f"extra: {set(out.keys()) - VOICE_NOTE_KEYS}"
++    )
++
++
+ def test_meeting_and_dictation_have_same_job_field_names(db_session):
+     """The dictation-only fields are always present (null for meeting);
+     the always-fetched fields are always present. No key is kind-gated."""
