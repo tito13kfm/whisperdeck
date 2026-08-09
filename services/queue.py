@@ -8,6 +8,7 @@ import asyncio
 import datetime
 import logging
 import os
+import subprocess
 from typing import Optional
 
 from database import Transcript, TranscriptionJob, utcnow_naive
@@ -485,14 +486,15 @@ async def _run_chunk_job(db, job, provider_config: dict, provider_name: str, lan
     try:
         try:
             from services.audio_prep import is_silent_audio
-            if job.audio_path and os.path.exists(job.audio_path) and is_silent_audio(job.audio_path):
-                job.result_json = {"segments": [], "full_text": "", "language": language, "model": ""}
-                job.status = "completed"
-                job.error = None
-                db.commit()
-                return
-        except Exception:
-            pass
+            _is_silent = bool(job.audio_path and os.path.exists(job.audio_path) and is_silent_audio(job.audio_path))
+        except (OSError, subprocess.SubprocessError, ValueError, ImportError):
+            _is_silent = False
+        if _is_silent:
+            job.result_json = {"segments": [], "full_text": "", "language": language, "model": ""}
+            job.status = "completed"
+            job.error = None
+            db.commit()
+            return
 
         provider = get_provider(provider_name, provider_config)
         from backends import LOCAL_PROVIDERS

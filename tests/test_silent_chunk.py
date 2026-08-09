@@ -106,32 +106,11 @@ def test_chunk_audio_filters_silent_chunks(tmp_path):
     assert len(chunks) == 1
     assert chunks[0]["index"] == 0
     assert "chunk0" in chunks[0]["path"]
-    # Silent chunk file should have been deleted
-    assert not os.path.exists(str(tmp_path / "input_chunk1.mp3")) or not any("chunk1" in c["path"] for c in chunks)
+    assert not os.path.exists(str(tmp_path / "input_chunk1.mp3"))
 
 
 def test_chunk_audio_keeps_all_when_none_silent(tmp_path):
     import services.audio_prep as ap
-
-    with patch("services.audio_prep.get_audio_duration", return_value=600.0), \
-         patch("services.audio_prep.detect_silence_midpoints", return_value=[150.0]), \
-         patch("services.audio_prep.ffmpeg_available", return_value=True), \
-         patch("services.audio_prep.subprocess.run", side_effect=lambda *a, **k: _FakeResult("")), \
-         patch("os.path.getsize", return_value=600_000), \
-         patch("services.audio_prep.is_silent_audio", return_value=False), \
-         patch("os.path.exists", return_value=True), \
-         patch("os.remove"):
-
-        # Need to actually create files for is_silent path check? chunk_audio creates via _cut_one
-        # Mock _cut_one indirectly via subprocess — but we also need os.path.getsize etc.
-        # Easiest: patch the whole _run_all behavior via direct is_silent mock = False keeps all chunks
-        target = int(600_000 / 600.0 * 300)
-        # We need _cut_one to succeed: mock subprocess for cut
-        with patch("services.audio_prep.subprocess.run", return_value=_FakeResult("")):
-            # This path is tricky — just verify is_silent=False keeps chunks
-            pass
-
-    # Simpler: verify non-silent chunk count directly
     with patch("services.audio_prep.get_audio_duration", return_value=600.0), \
          patch("services.audio_prep.detect_silence_midpoints", return_value=[]), \
          patch("services.audio_prep.ffmpeg_available", return_value=True), \
@@ -207,6 +186,26 @@ def test_run_chunk_job_non_silent_still_calls_provider(db_session):
     fake_provider.transcribe.assert_awaited_once()
     db_session.refresh(job)
     assert job.status == "completed"
+
+
+def test_all_silent_chunks_returns_completed_transcript(client):
+    """All-silent upload must return HTTP 200 completed transcript, not TypeError from missing jobs_map."""
+    import io
+    from unittest.mock import AsyncMock
+
+    with patch("app.get_audio_duration", return_value=1800.0), \
+         patch("app.transcode_for_upload", AsyncMock(side_effect=lambda path, *a, **k: path)), \
+         patch("app.chunk_audio", AsyncMock(return_value=[])), \
+         patch("os.path.getsize", return_value=1_000_000):
+        r = client.post(
+            "/api/transcribe",
+            files={"file": ("long.mp3", io.BytesIO(b"fake"), "audio/mpeg")},
+            data={"provider": "moonshine"},
+        )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["status"] == "completed"
+    assert body["full_text"] == ""
 
 
 def test_merge_chunk_results_handles_empty_silent_job(db_session):

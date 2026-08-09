@@ -1337,7 +1337,7 @@ async def _run_transcription_pipeline(
             transcript.duration_seconds = duration_seconds
             db.commit()
             stereo_persisted = True
-            return _serialize_transcript(db, transcript)
+            return _serialize_transcript(db, transcript, jobs_map={})
 
         try:
             transcript = transcription_service.create_transcript_stub(
