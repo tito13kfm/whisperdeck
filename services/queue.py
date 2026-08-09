@@ -483,6 +483,17 @@ async def _run_chunk_job(db, job, provider_config: dict, provider_name: str, lan
         hallu_no_speech_cutoff = settings.get("cleanup_hallu_no_speech_cutoff", 0.6)
 
     try:
+        try:
+            from services.audio_prep import is_silent_audio
+            if job.audio_path and os.path.exists(job.audio_path) and is_silent_audio(job.audio_path):
+                job.result_json = {"segments": [], "full_text": "", "language": language, "model": ""}
+                job.status = "completed"
+                job.error = None
+                db.commit()
+                return
+        except Exception:
+            pass
+
         provider = get_provider(provider_name, provider_config)
         from backends import LOCAL_PROVIDERS
         if provider_name in LOCAL_PROVIDERS:

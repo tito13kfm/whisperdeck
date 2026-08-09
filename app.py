@@ -1308,6 +1308,37 @@ async def _run_transcription_pipeline(
             _discard_stereo_copy()
             raise
 
+        if not chunks:
+            transcript = transcription_service.create_transcript_stub(
+                db,
+                current_user.id,
+                filename=filename,
+                provider_name=provider,
+                model=model or provider_config.get("default_model") or "",
+                language=language,
+                audio_path=str(save_path),
+                diarize_requested=diarize,
+                title=title or filename,
+                num_speakers=num_speakers,
+                video_path=video_path,
+                kind=kind,
+            )
+            transcript.segments = []
+            transcript.full_text = ""
+            transcript.status = "completed"
+            transcript.processed_size_bytes = file_size
+            transcript.source_transcript_id = source_transcript_id
+            transcript.batch_id = batch_id
+            transcript.kind = kind
+            if classification_status is not None:
+                transcript.classification_status = classification_status
+            transcript.num_speakers = num_speakers
+            transcript.stereo_audio_path = stereo_audio_path
+            transcript.duration_seconds = duration_seconds
+            db.commit()
+            stereo_persisted = True
+            return _serialize_transcript(db, transcript)
+
         try:
             transcript = transcription_service.create_transcript_stub(
                 db,
