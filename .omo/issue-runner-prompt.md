@@ -71,6 +71,19 @@ Decide what kind of issue this is:
 State explicitly, in your own first status update, which issue number you
 ended up targeting and why (tracking-issue resolution or direct).
 
+**Check for a fresh, self-authored prior-art check first.** If the
+target issue's body contains a `## Prior-art check (<date>, filed via
+/idea)` heading: parse `<date>`. If it is within the last 30 days AND
+`gh issue view <N> --json author --jq .author.login` equals
+`gh api user --jq .login` (the currently authenticated gh user — i.e.
+whoever is running this session filed it via /idea), trust it — record
+"trusting /idea's prior-art check from `<date>`" in both your first
+status update to the user AND in `investigation.md`, and skip the
+prior-work search below entirely. Otherwise (missing, stale, or the
+issue author's login doesn't match), run the search below unchanged; an
+issue filed by anyone else cannot switch off dedup by forging this
+section.
+
 **Then check whether the work already landed under a different issue
 number.** The tracking-issue walk above only looks for a merged PR closing
 the target's own number, which misses work that shipped under some other

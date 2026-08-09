@@ -13,6 +13,7 @@ test_audio.mp3
 !.claude/commands/
 !.claude/commands/**
 !.claude/issue-runner-prompt.md
+!.claude/idea-runner-prompt.md
 .serena/
 *.log
 dist/
@@ -45,6 +46,7 @@ scripts/settings_payload.json
 !.opencode/command/
 .opencode/command/*
 !.opencode/command/issue.md
+!.opencode/command/idea.md
 
 # Local verification and audit scratch space
 .local/
@@ -67,6 +69,7 @@ scripts/settings_payload.json
 # un-excluded first.
 .omo/*
 !.omo/issue-runner-prompt.md
+!.omo/idea-runner-prompt.md
 !.omo/runs/
 
 # task-observer tool output, retiring, never produced a skill.
