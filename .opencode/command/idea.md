@@ -10,7 +10,7 @@ Idea given (may be empty): $ARGUMENTS
 Canonical workflow (single source of truth lives at `.omo/idea-runner-prompt.md`,
 inlined below so this command never drifts out of sync with it):
 
-!`cat "C:/Claude/whisperdesk/.omo/idea-runner-prompt.md"`
+!`cat "$(git rev-parse --show-toplevel)/.omo/idea-runner-prompt.md"`
 
 If the idea given above is non-empty, treat it as the seed input for
 Phase 0's intake and start there. If empty, start Phase 0 by asking the
