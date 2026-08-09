@@ -1932,6 +1932,43 @@ async def delete_transcript(transcript_id: int, db: Session = Depends(get_db), c
             except OSError as e:
                 logging.warning(f" OSError removing transcript file {path!r}: {e} ")
                 pass
+    # Chunk files live on TranscriptionJob.audio_path, not on Transcript.
+    # The cascade deletes the rows but not the files — clean them here.
+    chunk_jobs = db.query(TranscriptionJob).filter(TranscriptionJob.transcript_id == t.id).all()
+    if chunk_jobs:
+        other_job_reals = set()
+        for j in db.query(TranscriptionJob).filter(TranscriptionJob.transcript_id != t.id, TranscriptionJob.audio_path.isnot(None)).all():
+            try:
+                other_job_reals.add(os.path.realpath(j.audio_path))
+            except (OSError, ValueError):
+                continue
+        other_transcript_reals = set()
+        for other in db.query(Transcript).filter(
+            Transcript.id != t.id,
+            ((Transcript.audio_path.isnot(None)) | (Transcript.video_path.isnot(None)) | (Transcript.stereo_audio_path.isnot(None))),
+        ).all():
+            for field in ("audio_path", "video_path", "stereo_audio_path"):
+                path = getattr(other, field)
+                if not path:
+                    continue
+                try:
+                    other_transcript_reals.add(os.path.realpath(path))
+                except (OSError, ValueError):
+                    continue
+        for job in chunk_jobs:
+            if not job.audio_path or not os.path.exists(job.audio_path):
+                continue
+            try:
+                real = os.path.realpath(job.audio_path)
+            except (OSError, ValueError):
+                continue
+            if real in other_job_reals or real in other_transcript_reals:
+                continue
+            try:
+                os.remove(job.audio_path)
+            except OSError as e:
+                logging.warning(f" OSError removing chunk file {job.audio_path!r}: {e} ")
+                pass
     db.delete(t)
     db.commit()
     return {"ok": True}

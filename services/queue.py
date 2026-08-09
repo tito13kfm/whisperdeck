@@ -6,6 +6,8 @@ functions below.
 """
 import asyncio
 import datetime
+import logging
+import os
 from typing import Optional
 
 from database import Transcript, TranscriptionJob, utcnow_naive
@@ -256,6 +258,46 @@ def create_chunk_jobs(db, transcript_id: int, chunks: list) -> None:
             audio_path=chunk["path"],
         ))
     db.commit()
+
+
+def _cleanup_completed_chunk_files(db, jobs: list) -> None:
+    completed = [j for j in jobs if j.status == "completed" and j.audio_path]
+    if not completed:
+        return
+    completed_ids = {j.id for j in completed}
+    other_job_reals = set()
+    for j in db.query(TranscriptionJob).filter(TranscriptionJob.audio_path.isnot(None)).all():
+        if j.id in completed_ids:
+            continue
+        try:
+            other_job_reals.add(os.path.realpath(j.audio_path))
+        except (OSError, ValueError):
+            continue
+    transcript_reals = set()
+    for t in db.query(Transcript).filter(
+        (Transcript.audio_path.isnot(None)) | (Transcript.video_path.isnot(None)) | (Transcript.stereo_audio_path.isnot(None))
+    ).all():
+        for field in ("audio_path", "video_path", "stereo_audio_path"):
+            path = getattr(t, field)
+            if not path:
+                continue
+            try:
+                transcript_reals.add(os.path.realpath(path))
+            except (OSError, ValueError):
+                continue
+    for job in completed:
+        try:
+            real = os.path.realpath(job.audio_path)
+        except (OSError, ValueError):
+            continue
+        if real in other_job_reals or real in transcript_reals:
+            continue
+        if not os.path.exists(job.audio_path):
+            continue
+        try:
+            os.remove(job.audio_path)
+        except OSError as e:
+            logging.warning(f" OSError removing chunk file {job.audio_path!r}: {e} ")
 
 
 def retry_failed_chunks(db, transcript_id: int) -> int:
@@ -652,6 +694,8 @@ async def _finalize_if_done(db, transcript_id: int, diarization_service) -> None
         # with app.py:_run_transcription_pipeline (issue #171).
         from services.llm_jobs import enqueue_auto_tagging
         enqueue_auto_tagging(db, transcript, user_settings)
+
+    _cleanup_completed_chunk_files(db, jobs)
 
 
 async def _process_transcript_jobs(db, transcript_id: int, jobs: list, diarization_service,
