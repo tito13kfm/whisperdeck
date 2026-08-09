@@ -12,9 +12,14 @@ Two harness defects, both of which make other tests lie rather than fail:
    a test that stubs a failure response silently gets the real success
    response instead and can still pass. Fixed by the `page_no_sw` fixture.
 
-The first two tests here are deliberately order-dependent: cross-test
-leakage is the thing under test, so one test has to make a mess and the
-next one has to find it cleaned up. pytest runs them in source order.
+Cross-test leakage is the thing under test, so one test has to make a mess
+and the next has to find it cleaned up -- pytest runs them in source order.
+But neither test may *depend* on that order to pass: both must also pass
+when selected on their own with `pytest <file>::<test>`, which is how
+anybody debugging one of them will run it. So each registers under its own
+username and asserts a result that holds either way. What running them in
+order adds is the red side: with the reset removed, the second test finds a
+full bucket left by the first.
 """
 import http.cookiejar
 import json
@@ -37,7 +42,10 @@ REGISTER_OK = 200
 REGISTER_DUPLICATE = 400
 REGISTER_LIMITED = 429
 
+# One username per test, so no test's outcome depends on whether another
+# one ran first (see the module docstring).
 _PROBE_USER = "e2e_harness_isolation_probe"
+_RESET_PROBE_USER = "e2e_harness_isolation_reset_probe"
 _PROBE_PASS = "e2e_harness_isolation_pass_123"
 
 
@@ -78,21 +86,26 @@ def test_register_bucket_really_fills_at_the_limit(live_server):
 def test_rate_limit_buckets_are_cleared_between_e2e_tests(live_server):
     """The fix for issue #316's defect 1.
 
-    The previous test left `register:127.0.0.1` full. Every e2e test must
-    start from an empty bucket, otherwise the ninth module in the directory
-    can never register its user and `pytest tests/e2e` cannot pass as a
-    whole. Asserted twice: on the limiter's own state, and on the observable
-    HTTP behaviour, because the second is what actually breaks other tests.
+    In source order the previous test leaves `register:127.0.0.1` full, and
+    this one has to find it empty again: every e2e test must start from an
+    empty bucket, otherwise the ninth module in the directory can never
+    register its user and `pytest tests/e2e` cannot pass as a whole.
+
+    Asserted twice, on the limiter's own state and on observable HTTP
+    behaviour, because the second is what actually breaks other tests. Both
+    assertions hold when this test is selected on its own -- it registers a
+    username no other test uses, so a fresh registration is a success either
+    way, and only a 429 (the leak) can make it fail.
     """
     from services.security import rate_limiter
 
     assert rate_limiter._buckets == {}, (
         f"rate-limit buckets leaked into this test: {sorted(rate_limiter._buckets)}"
     )
-    assert _post_register(live_server, _PROBE_USER, _PROBE_PASS) == REGISTER_DUPLICATE, (
-        "a registration at the start of a fresh e2e test did not reach the "
-        "duplicate-username check (a 429 here means the per-test reset in "
-        "tests/e2e/conftest.py is not running)"
+    assert _post_register(live_server, _RESET_PROBE_USER, _PROBE_PASS) == REGISTER_OK, (
+        "a registration at the start of a fresh e2e test did not succeed "
+        "(a 429 here means the per-test reset in tests/e2e/conftest.py is "
+        "not running)"
     )
 
 
