@@ -164,6 +164,43 @@ def has_video_stream(path: str) -> bool:
 
 _SILENCE_END_RE = re.compile(r"silence_end:\s*([\d.]+)\s*\|\s*silence_duration:\s*([\d.]+)")
 
+_MAX_VOLUME_RE = re.compile(r"max_volume:\s*([-\d.]+|n/a|-?inf)\s*dB", re.IGNORECASE)
+
+
+def is_silent_audio(audio_path: str, threshold_db: float = -50.0) -> bool:
+    """Return True if audio_path is silent (peak volume below threshold).
+
+    Uses ffmpeg's volumedetect filter — decodes the file and measures peak
+    volume. Pure digital silence reports -91 dB or 'n/a' (treated as silent).
+    Speech typically peaks around -20 to -10 dB, so -50 dB cleanly separates.
+
+    On any ffmpeg failure (missing binary, unreadable file) returns False
+    (fail-open) so a transient tool error never silently drops content.
+    """
+    try:
+        result = subprocess.run(
+            [_ffmpeg_bin(), "-i", audio_path, "-af", "volumedetect", "-vn", "-sn", "-f", "null", "-"],
+            capture_output=True, text=True,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    # volumedetect writes to stderr; non-zero exit for some containers is
+    # still ok — the stderr may contain the measurement.
+    output = result.stderr or ""
+    match = _MAX_VOLUME_RE.search(output)
+    if not match:
+        # No measurement produced (e.g. ffmpeg couldn't decode) — don't
+        # assume silence, let the provider decide.
+        return False
+    raw = match.group(1).strip().lower()
+    if raw == "n/a":
+        return True
+    try:
+        peak_db = float(raw)
+    except ValueError:
+        return False
+    return peak_db < threshold_db
+
 
 def detect_silence_midpoints(audio_path: str, noise_db: str = "-30dB", min_duration: float = 0.5) -> list[float]:
     """Return timestamps (seconds) at the midpoint of each detected silence
@@ -339,4 +376,15 @@ async def chunk_audio(
         return result
 
     chunks = await asyncio.to_thread(_run_all)
-    return chunks
+    filtered = []
+    for c in chunks:
+        if is_silent_audio(c["path"]):
+            try:
+                os.remove(c["path"])
+            except OSError:
+                pass
+            continue
+        filtered.append(c)
+    for new_idx, c in enumerate(filtered):
+        c["index"] = new_idx
+    return filtered
