@@ -44,9 +44,14 @@ CPU_KINDS = ("rediarize", "voice_match")
 _MAX_CONCURRENT_IO_JOBS = 2
 _MAX_CONCURRENT_CPU_JOBS = 1
 
+# One threshold for both the identify_detailed call and the similarity summary
+# reported back to the user — the reported min/mean/max are only interpretable
+# against the cutoff they were selected by, so the two must never drift apart.
+VOICE_MATCH_THRESHOLD = 0.65
 
-def serialize_llm_job(job: LlmJob) -> dict:
-    return {
+
+def serialize_llm_job(job: LlmJob, include_result: bool = False) -> dict:
+    data = {
         "id": job.id,
         "kind": job.kind,
         "transcript_id": job.transcript_id,
@@ -68,6 +73,14 @@ def serialize_llm_job(job: LlmJob) -> dict:
         "created_at": job.created_at.isoformat() if job.created_at else None,
         "updated_at": job.updated_at.isoformat() if job.updated_at else None,
     }
+    # Opt-in, not default: this serializer also backs /api/jobs and every
+    # transcript row in the list payload, and result_json for correction /
+    # summary / voice_dump carries whole documents. Only callers that need a
+    # small, renderable result (voice_match's similarity summary) ask for it.
+    # Key name matches the /runs/{kind} endpoint's own "result" field.
+    if include_result:
+        data["result"] = job.result_json
+    return data
 
 
 def get_active_job(db, transcript_id: int | None, kind: str) -> LlmJob | None:
@@ -741,6 +754,11 @@ async def run_llm_job(SessionLocal, job_id: int, transcription_service, diarizat
             degraded = 0
             unmatchable = 0
             changed = []
+            # Per matched profile name -> every similarity that picked it, kept
+            # so the job can report how confident each relabel was. Without it
+            # an over-matching backend that collapses distinct speakers onto one
+            # profile is indistinguishable from a good match (issue #311).
+            match_sims: dict[str, list[float]] = {}
             new_segments = list(segments)
             for i, seg in enumerate(segments):
                 # cancel_llm_job only flips the row, it can't signal this
@@ -767,7 +785,8 @@ async def run_llm_job(SessionLocal, job_id: int, transcription_service, diarizat
                         # sqlite is opened with check_same_thread=False.
                         loop = asyncio.get_event_loop()
                         def _identify():
-                            return voice_id_service.identify_detailed(db, job.user_id, clip_path, threshold=0.65,
+                            return voice_id_service.identify_detailed(db, job.user_id, clip_path,
+                                                                      threshold=VOICE_MATCH_THRESHOLD,
                                                                       hf_token=user_settings.get("hf_token"))
                         outcome = await loop.run_in_executor(None, _identify)
                     finally:
@@ -789,6 +808,9 @@ async def run_llm_job(SessionLocal, job_id: int, transcription_service, diarizat
                     if matches:
                         changed.append((i, seg.get("speaker") or ""))
                         new_segments[i] = {**seg, "speaker": matches[0]["name"]}
+                        match_sims.setdefault(matches[0]["name"], []).append(
+                            float(matches[0]["similarity"])
+                        )
                 job.progress_done = i + 1
                 db.commit()
             # The loop guard can't catch a cancel that lands during the final
@@ -812,6 +834,32 @@ async def run_llm_job(SessionLocal, job_id: int, transcription_service, diarizat
             # (count rises). Recount, never decrement.
             transcript.speaker_count = count_distinct_speakers(new_segments)
             transcript.updated_at = utcnow_naive()
+            # Persisted here rather than immediately before _finish: _finish
+            # opens with db.refresh(job), which would reload the row and discard
+            # an uncommitted result_json. The existing commit below covers it.
+            # min matters more than mean for the failure this reports: one
+            # profile matching many lines at barely-over-threshold is what an
+            # over-matching backend looks like.
+            job.result_json = {
+                "threshold": VOICE_MATCH_THRESHOLD,
+                "considered": len(segments),
+                "matched": len(changed),
+                "skipped": skipped,
+                "degraded": degraded,
+                "unmatchable": unmatchable,
+                "speakers": [
+                    {
+                        "name": name,
+                        "segments": len(sims),
+                        "min_similarity": round(min(sims), 4),
+                        "mean_similarity": round(sum(sims) / len(sims), 4),
+                        "max_similarity": round(max(sims), 4),
+                    }
+                    # Most-matched first, name as tiebreak so the order is
+                    # stable across runs rather than dict-insertion order.
+                    for name, sims in sorted(match_sims.items(), key=lambda kv: (-len(kv[1]), kv[0]))
+                ],
+            }
             db.commit()
             notes = []
             if skipped:

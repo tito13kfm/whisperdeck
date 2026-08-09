@@ -4,8 +4,10 @@ import asyncio
 import numpy as np
 from unittest.mock import patch
 
-from database import RelabelHistory, Transcript, User, VoiceProfile
-from services.llm_jobs import cancel_llm_job, enqueue_llm_job, run_llm_job
+from database import LlmJob, RelabelHistory, Transcript, User, VoiceProfile
+from services.llm_jobs import (
+    VOICE_MATCH_THRESHOLD, cancel_llm_job, enqueue_llm_job, run_llm_job, serialize_llm_job,
+)
 from services.voice_id import voice_id_service, _MFCC_MODEL_ID
 
 
@@ -504,6 +506,77 @@ def test_transcript_serialization_includes_voice_match_job(client, db_session, t
     assert r.json()["voice_match_job"]["kind"] == "voice_match"
 
 
+def test_transcript_serialization_voice_match_job_carries_result(client, db_session, tmp_path):
+    """The opt-in itself (issue #311): voice_match_job's serialized dict
+    includes a "result" key equal to the persisted result_json."""
+    from database import User as _User
+    user = db_session.query(_User).filter(_User.username == "testuser").first()
+    if not user:
+        user = _User(username="testuser", password_hash="x", password_salt="y")
+        db_session.add(user)
+        db_session.commit()
+    t = _transcript_with_segments(db_session, user, tmp_path,
+                                   [{"start": 0, "end": 1, "text": "hi", "speaker": "S"}])
+    client.post(f"/api/transcripts/{t.id}/voice-match")
+    job = db_session.query(LlmJob).filter(
+        LlmJob.transcript_id == t.id, LlmJob.kind == "voice_match"
+    ).one()
+    job.status = "completed"
+    job.result_json = {
+        "threshold": 0.65, "considered": 1, "matched": 1, "skipped": 0,
+        "degraded": 0, "unmatchable": 0,
+        "speakers": [
+            {"name": "Alice", "segments": 1, "min_similarity": 0.9, "mean_similarity": 0.9, "max_similarity": 0.9},
+        ],
+    }
+    db_session.commit()
+
+    r = client.get(f"/api/transcripts/{t.id}")
+    body = r.json()
+    assert "result" in body["voice_match_job"]
+    assert body["voice_match_job"]["result"] == job.result_json
+
+
+def test_transcript_serialization_other_job_kinds_do_not_carry_result(client, db_session, tmp_path):
+    """Negative side of the opt-in: correction_job (and every *_job field
+    besides voice_match_job) must NOT carry a "result" key -- their
+    result_json can hold whole documents, which don't belong on the
+    transcript list/detail payload."""
+    from database import User as _User
+    user = db_session.query(_User).filter(_User.username == "testuser").first()
+    if not user:
+        user = _User(username="testuser", password_hash="x", password_salt="y")
+        db_session.add(user)
+        db_session.commit()
+    t = _transcript_with_segments(db_session, user, tmp_path,
+                                   [{"start": 0, "end": 1, "text": "hi", "speaker": "S"}])
+    corr = LlmJob(
+        user_id=user.id, transcript_id=t.id, kind="correction",
+        status="completed", provider="groq", model="m",
+        result_json={"corrected_text": "hi there"},
+    )
+    db_session.add(corr)
+    db_session.commit()
+
+    r = client.get(f"/api/transcripts/{t.id}")
+    body = r.json()
+    assert body["correction_job"]["kind"] == "correction"
+    assert "result" not in body["correction_job"]
+
+
+def test_serialize_llm_job_include_result_parameter(db_session):
+    """Unit test of the include_result parameter itself, independent of the
+    HTTP layer: default False omits "result" entirely, True includes it and
+    it equals job.result_json exactly."""
+    user = _user(db_session)
+    job = enqueue_llm_job(db_session, user.id, None, "correction", "groq", "m")
+    job.result_json = {"corrected_text": "hi"}
+    db_session.commit()
+
+    assert "result" not in serialize_llm_job(job)
+    assert serialize_llm_job(job, include_result=True)["result"] == job.result_json
+
+
 def test_voice_match_recomputes_speaker_count_on_merge(db_session, tmp_path):
     """Issue #111: three distinct diarization labels all confidently match
     the same enrolled name, merging into one speaker. speaker_count must be
@@ -670,3 +743,260 @@ def test_voice_match_stays_error_free_when_the_probe_model_matches(db_session, t
     assert job.status == "completed"
     assert t.segments[0]["speaker"] == "Alice"
     assert job.error is None
+
+
+# ── issue #311: per-speaker similarity summary in job.result_json ────────
+
+
+def test_voice_match_result_json_aggregates_similarities_per_speaker_most_matched_first(db_session, tmp_path):
+    """Four segments, two enrolled speakers, one segment unmatched. Pins both
+    the per-speaker min/mean/max aggregation and the most-matched-first
+    ordering (Alice has 2 matched segments, Bob has 1) in a single test."""
+    user = _user(db_session)
+    _enrolled_profile(db_session, user, name="Alice")
+    _enrolled_profile(db_session, user, name="Bob")
+    segments = [
+        {"start": 0.0, "end": 1.0, "text": "a", "speaker": "SPEAKER_00"},
+        {"start": 1.0, "end": 2.0, "text": "b", "speaker": "SPEAKER_01"},
+        {"start": 2.0, "end": 3.0, "text": "c", "speaker": "SPEAKER_02"},
+        {"start": 3.0, "end": 4.0, "text": "d", "speaker": "SPEAKER_03"},
+    ]
+    t = _transcript_with_segments(db_session, user, tmp_path, segments)
+    job = enqueue_llm_job(db_session, user.id, t.id, "voice_match", "", "")
+    job.status = "running"
+    db_session.commit()
+
+    async def fake_extract(audio_path, clips, output_dir):
+        return str(tmp_path / "clip.wav")
+
+    def fake_identify(db, user_id, audio_path, threshold=0.65, hf_token=None):
+        # seg0 -> Alice 0.9, seg1 -> Bob 0.82, seg2 -> Alice 0.7, seg3 -> no match
+        fake_identify.calls += 1
+        call = fake_identify.calls
+        if call == 1:
+            return _outcome([{"id": 1, "name": "Alice", "similarity": 0.9, "sample_count": 1}])
+        if call == 2:
+            return _outcome([{"id": 2, "name": "Bob", "similarity": 0.82, "sample_count": 1}])
+        if call == 3:
+            return _outcome([{"id": 1, "name": "Alice", "similarity": 0.7, "sample_count": 1}])
+        return _outcome()
+    fake_identify.calls = 0
+
+    factory = lambda: _NoCloseSession(db_session)
+    with patch("services.llm_jobs.extract_clips_concat", fake_extract), \
+         patch("services.llm_jobs.voice_id_service.identify_detailed", fake_identify):
+        asyncio.run(run_llm_job(factory, job.id, transcription_service=None))
+
+    db_session.refresh(job)
+    assert job.status == "completed"
+    assert job.result_json == {
+        "threshold": 0.65,
+        "considered": 4,
+        "matched": 3,
+        "skipped": 0,
+        "degraded": 0,
+        "unmatchable": 0,
+        "speakers": [
+            {"name": "Alice", "segments": 2, "min_similarity": 0.7, "mean_similarity": 0.8, "max_similarity": 0.9},
+            {"name": "Bob", "segments": 1, "min_similarity": 0.82, "mean_similarity": 0.82, "max_similarity": 0.82},
+        ],
+    }
+
+
+def test_voice_match_result_json_speaker_order_tiebreak_by_name(db_session, tmp_path):
+    """Two speakers with equal segment counts (1 each): the sort's tiebreak
+    is the speaker name, not dict insertion order. Zoe matches first
+    (segment 0) and Alice matches second (segment 1), so if the `sorted(...,
+    key=...)` name tiebreak were dropped, plain dict insertion order would
+    leak through as ["Zoe", "Alice"] instead of the alphabetical
+    ["Alice", "Zoe"] asserted here."""
+    user = _user(db_session)
+    _enrolled_profile(db_session, user, name="Zoe")
+    _enrolled_profile(db_session, user, name="Alice")
+    segments = [
+        {"start": 0.0, "end": 1.0, "text": "a", "speaker": "SPEAKER_00"},
+        {"start": 1.0, "end": 2.0, "text": "b", "speaker": "SPEAKER_01"},
+    ]
+    t = _transcript_with_segments(db_session, user, tmp_path, segments)
+    job = enqueue_llm_job(db_session, user.id, t.id, "voice_match", "", "")
+    job.status = "running"
+    db_session.commit()
+
+    async def fake_extract(audio_path, clips, output_dir):
+        return str(tmp_path / "clip.wav")
+
+    def fake_identify(db, user_id, audio_path, threshold=0.65, hf_token=None):
+        fake_identify.calls += 1
+        if fake_identify.calls == 1:
+            return _outcome([{"id": 1, "name": "Zoe", "similarity": 0.9, "sample_count": 1}])
+        return _outcome([{"id": 2, "name": "Alice", "similarity": 0.8, "sample_count": 1}])
+    fake_identify.calls = 0
+
+    factory = lambda: _NoCloseSession(db_session)
+    with patch("services.llm_jobs.extract_clips_concat", fake_extract), \
+         patch("services.llm_jobs.voice_id_service.identify_detailed", fake_identify):
+        asyncio.run(run_llm_job(factory, job.id, transcription_service=None))
+
+    db_session.refresh(job)
+    assert job.status == "completed"
+    assert [s["name"] for s in job.result_json["speakers"]] == ["Alice", "Zoe"]
+
+
+def test_voice_match_result_json_single_segment_single_match(db_session, tmp_path):
+    """Boundary: a collection of exactly one relabeled segment. min/mean/max
+    must all collapse to the same value."""
+    user = _user(db_session)
+    _enrolled_profile(db_session, user)
+    segments = [{"start": 0.0, "end": 1.0, "text": "hi", "speaker": "SPEAKER_00"}]
+    t = _transcript_with_segments(db_session, user, tmp_path, segments)
+    job = enqueue_llm_job(db_session, user.id, t.id, "voice_match", "", "")
+    job.status = "running"
+    db_session.commit()
+
+    async def fake_extract(audio_path, clips, output_dir):
+        return str(tmp_path / "clip.wav")
+
+    factory = lambda: _NoCloseSession(db_session)
+    with patch("services.llm_jobs.extract_clips_concat", fake_extract), \
+         patch("services.llm_jobs.voice_id_service.identify_detailed",
+               lambda db, user_id, audio_path, threshold=0.65, hf_token=None: _outcome([{"id": 1, "name": "Alice", "similarity": 0.9, "sample_count": 1}])):
+        asyncio.run(run_llm_job(factory, job.id, transcription_service=None))
+
+    db_session.refresh(job)
+    assert job.status == "completed"
+    assert job.result_json == {
+        "threshold": 0.65,
+        "considered": 1,
+        "matched": 1,
+        "skipped": 0,
+        "degraded": 0,
+        "unmatchable": 0,
+        "speakers": [
+            {"name": "Alice", "segments": 1, "min_similarity": 0.9, "mean_similarity": 0.9, "max_similarity": 0.9},
+        ],
+    }
+
+
+def test_voice_match_result_json_when_nothing_matched(db_session, tmp_path):
+    """The case issue #311 is really about: a run that matches nothing must
+    still leave a real, inspectable result_json (not None, not skipped),
+    with an empty speakers list rather than the field being absent."""
+    user = _user(db_session)
+    _enrolled_profile(db_session, user)
+    segments = [
+        {"start": 0.0, "end": 1.0, "text": "hi", "speaker": "SPEAKER_00"},
+        {"start": 1.0, "end": 2.0, "text": "there", "speaker": "SPEAKER_01"},
+    ]
+    t = _transcript_with_segments(db_session, user, tmp_path, segments)
+    job = enqueue_llm_job(db_session, user.id, t.id, "voice_match", "", "")
+    job.status = "running"
+    db_session.commit()
+
+    async def fake_extract(audio_path, clips, output_dir):
+        return str(tmp_path / "clip.wav")
+
+    factory = lambda: _NoCloseSession(db_session)
+    with patch("services.llm_jobs.extract_clips_concat", fake_extract), \
+         patch("services.llm_jobs.voice_id_service.identify_detailed",
+               lambda db, user_id, audio_path, threshold=0.65, hf_token=None: _outcome()):
+        asyncio.run(run_llm_job(factory, job.id, transcription_service=None))
+
+    db_session.refresh(job)
+    assert job.status == "completed"
+    assert job.result_json == {
+        "threshold": 0.65,
+        "considered": 2,
+        "matched": 0,
+        "skipped": 0,
+        "degraded": 0,
+        "unmatchable": 0,
+        "speakers": [],
+    }
+
+
+def test_voice_match_result_json_counts_skipped_degraded_unmatchable(db_session, tmp_path):
+    """skipped/degraded/unmatchable each count SEGMENTS, not profiles. Three
+    segments: the first fails extraction (skipped), the second returns a
+    degraded probe (degraded), the third returns a model-mismatch outcome
+    with nothing compared (unmatchable)."""
+    user = _user(db_session)
+    _enrolled_profile(db_session, user)
+    segments = [
+        {"start": 0.0, "end": 1.0, "text": "a", "speaker": "SPEAKER_00"},
+        {"start": 1.0, "end": 2.0, "text": "b", "speaker": "SPEAKER_01"},
+        {"start": 2.0, "end": 3.0, "text": "c", "speaker": "SPEAKER_02"},
+    ]
+    t = _transcript_with_segments(db_session, user, tmp_path, segments)
+    job = enqueue_llm_job(db_session, user.id, t.id, "voice_match", "", "")
+    job.status = "running"
+    db_session.commit()
+
+    async def flaky_extract(audio_path, clips, output_dir):
+        flaky_extract.calls += 1
+        if flaky_extract.calls == 1:
+            raise ValueError("boom")
+        return str(tmp_path / "clip.wav")
+    flaky_extract.calls = 0
+
+    def fake_identify(db, user_id, audio_path, threshold=0.65, hf_token=None):
+        # Only reached for segments 1 and 2 -- segment 0's extraction raised
+        # before identify_detailed would ever be called.
+        fake_identify.calls += 1
+        if fake_identify.calls == 1:
+            return _outcome(degraded=True)
+        return _outcome(skipped_model_mismatch=2, compared=0)
+    fake_identify.calls = 0
+
+    factory = lambda: _NoCloseSession(db_session)
+    with patch("services.llm_jobs.extract_clips_concat", flaky_extract), \
+         patch("services.llm_jobs.voice_id_service.identify_detailed", fake_identify):
+        asyncio.run(run_llm_job(factory, job.id, transcription_service=None))
+
+    db_session.refresh(job)
+    assert job.status == "completed"
+    assert job.result_json == {
+        "threshold": 0.65,
+        "considered": 3,
+        "matched": 0,
+        "skipped": 1,
+        "degraded": 1,
+        "unmatchable": 1,
+        "speakers": [],
+    }
+
+
+def test_voice_match_cancel_leaves_no_result_json(db_session, tmp_path):
+    """A cancel landing during the only (last) segment's identify() call has
+    no further loop iteration to catch it via the loop-top check -- only the
+    guard immediately before the dependent writes
+    (test_voice_match_cancel_during_final_segment_still_skips_the_writes'
+    guard) stands between it and a persisted result_json. A single-segment
+    transcript is deliberate: with 2+ segments and a cancel on an earlier
+    one, the NEXT iteration's loop-top check would return before this
+    function's post-loop section ever runs, and the assertion below would
+    pass regardless of whether the post-loop guard also covers result_json --
+    which is exactly the gap a mutation check caught while writing this
+    test (see PR notes)."""
+    user = _user(db_session)
+    _enrolled_profile(db_session, user)
+    segments = [{"start": 0.0, "end": 1.0, "text": "hi", "speaker": "SPEAKER_00"}]
+    t = _transcript_with_segments(db_session, user, tmp_path, segments)
+    job = enqueue_llm_job(db_session, user.id, t.id, "voice_match", "", "")
+    job.status = "running"
+    db_session.commit()
+
+    async def fake_extract(audio_path, clips, output_dir):
+        return str(tmp_path / "clip.wav")
+
+    def cancel_then_match(db, user_id, audio_path, threshold=0.65, hf_token=None):
+        cancel_llm_job(db_session, user.id, job.id)
+        return _outcome([{"id": 1, "name": "Alice", "similarity": 0.9, "sample_count": 1}])
+
+    factory = lambda: _NoCloseSession(db_session)
+    with patch("services.llm_jobs.extract_clips_concat", fake_extract), \
+         patch("services.llm_jobs.voice_id_service.identify_detailed", cancel_then_match):
+        asyncio.run(run_llm_job(factory, job.id, transcription_service=None))
+
+    db_session.refresh(job)
+    assert job.status == "cancelled"
+    assert job.result_json is None

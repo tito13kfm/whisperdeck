@@ -396,7 +396,10 @@ def _serialize_transcript(db: Session, t: Transcript, *, jobs_map: dict[tuple[in
         "queue_status": compute_queue_status(db, t),
         "correction_job": serialize_llm_job(jobs_map[(t.id, "correction")]) if (t.id, "correction") in jobs_map else None,
         "summary_job": serialize_llm_job(jobs_map[(t.id, "summary")]) if (t.id, "summary") in jobs_map else None,
-        "voice_match_job": serialize_llm_job(jobs_map[(t.id, "voice_match")]) if (t.id, "voice_match") in jobs_map else None,
+        # include_result: the voice-match similarity summary is small and the
+        # detail view renders it after the job finishes (issue #311). No other
+        # kind opts in — their result_json holds whole documents.
+        "voice_match_job": serialize_llm_job(jobs_map[(t.id, "voice_match")], include_result=True) if (t.id, "voice_match") in jobs_map else None,
         "classify_pipeline_job": serialize_llm_job(jobs_map[(t.id, "classify_pipeline")]) if (t.id, "classify_pipeline") in jobs_map else None,
         "cost": transcript_cost(db, t),
         "tags": _tags_for_transcript(db, t.id),

@@ -4319,6 +4319,58 @@ function jobRunningUnit(job, label) {
   </div>`;
 }
 
+// Same convention as the manual-identify result box (runIdentify) — one way to
+// spell a similarity in this app, not two.
+function similarityPct(x) {
+  return Math.round((x || 0) * 100) + '%';
+}
+
+// How close to the cutoff a match has to sit before it's flagged as thin.
+// Not a server-side rule: the backend still applies its own threshold, this
+// only decides what gets highlighted.
+const LOW_MATCH_MARGIN = 0.05;
+
+// Terminal-state companion to jobRunningUnit for voice match. jobRunningUnit is
+// gated on llmJobActive, so it vanishes the moment the job finishes and the
+// relabeled speaker names were left with no indication of how confident any of
+// them were — a backend that over-matches, collapsing distinct speakers onto
+// one profile, looked exactly like a good match (issue #311).
+function voiceMatchSummaryUnit(job) {
+  if (!job || job.status !== 'completed') return '';
+  const r = job.result;
+  if (!r || typeof r.considered !== 'number') return '';
+  const threshold = typeof r.threshold === 'number' ? r.threshold : 0;
+  const speakers = Array.isArray(r.speakers) ? r.speakers : [];
+  const chips = speakers.map(s => {
+    const thin = s.min_similarity != null && s.min_similarity < threshold + LOW_MATCH_MARGIN;
+    // A single-line match has no spread to report, so mean IS the value.
+    const detail = s.segments > 1
+      ? similarityPct(s.mean_similarity) + ' avg · ' + similarityPct(s.min_similarity) + '–' + similarityPct(s.max_similarity)
+      : similarityPct(s.mean_similarity);
+    const tip = s.segments + ' line' + (s.segments !== 1 ? 's' : '') + ' relabeled to ' + s.name +
+      (thin ? ' — weakest match sits within ' + Math.round(LOW_MATCH_MARGIN * 100) + ' points of the ' + similarityPct(threshold) + ' threshold' : '');
+    return '<span title="' + escapeHtml(tip) + '" style="display:inline-flex;align-items:center;gap:7px;font-family:var(--f-mono);font-size:10px;' +
+      'padding:3px 9px;border:1px solid ' + (thin ? AMBER : 'var(--panel-lo)') + ';border-radius:10px;background:var(--panel-lo);' +
+      'color:' + (thin ? AMBER : 'var(--label)') + '">' +
+      '<span>' + escapeHtml(s.name) + '</span>' +
+      '<span>' + detail + '</span>' +
+      '<span style="color:var(--label-dim)">×' + s.segments + '</span></span>';
+  }).join('');
+  const headline = r.matched + ' of ' + r.considered + ' line' + (r.considered !== 1 ? 's' : '') +
+    ' matched at ' + similarityPct(threshold) + ' or better';
+  return '<div class="unit" style="padding:12px 32px;margin-bottom:10px;display:flex;align-items:center;gap:10px;flex-wrap:wrap">' +
+    ledDot(r.matched ? GREEN : AMBER, false, 9) +
+    '<span style="font-family:var(--f-mono);font-size:10px;text-transform:uppercase;letter-spacing:0.08em;color:var(--label-dim)">Voice match</span>' +
+    '<span style="font-size:12.5px;color:var(--body)">' + escapeHtml(headline) + '</span>' +
+    chips +
+    // job.error doubles as a success-path notes field for this kind (skipped /
+    // degraded / unmatchable counts). It reaches the Queue screen already; the
+    // detail view had nowhere to show it once the running unit disappeared.
+    (job.error ? '<span style="flex-basis:100%;font-family:var(--f-mono);font-size:10px;color:var(--label-dim)">' +
+      escapeHtml(humanizeJobError(job.error)) + '</span>' : '') +
+    '</div>';
+}
+
 /* ══════════════════ run history + diff ══════════════════ */
 
 // Generic LCS-based diff over an array of tokens (words or lines).
@@ -5090,6 +5142,9 @@ async function renderDetailBody() {
   const body = $('detail-body');
   if (S.detailTab === 'transcript') {
     const vm = llmJobActive(t.voice_match_job) ? '<div id="job-voice-match">' + jobRunningUnit(t.voice_match_job, 'Voice match') + '</div>' : '';
+    // Deliberately not folded into `vm`: the nudge below is gated on `!vm`, and
+    // a finished run that matched nothing must still offer "Match now".
+    const vmDone = vm ? '' : voiceMatchSummaryUnit(t.voice_match_job);
     let nudge = '';
     if (!vm && t.kind !== 'dictation' && t.has_audio && hasUnlabeledSpeakers(t)) {
       try {
@@ -5108,7 +5163,7 @@ async function renderDetailBody() {
         tags.map(tag => `<span style="display:inline-block;font-family:var(--f-mono);font-size:10px;padding:3px 9px;border:1px solid var(--panel-lo);border-radius:10px;background:var(--panel-lo);color:var(--label);text-transform:lowercase;letter-spacing:0.02em">${escapeHtml(tag)}</span>`).join('') +
         '</div>'
       : '';
-    body.innerHTML = vm + nudge + tagRow + exportToolbarHtml('transcript') + '<div class="unit" style="border-radius:3px;margin-top:' + (vm || nudge ? '10px' : '0') + ';padding:6px 32px">' + segmentsHtml(t) + '</div>';
+    body.innerHTML = vm + vmDone + nudge + tagRow + exportToolbarHtml('transcript') + '<div class="unit" style="border-radius:3px;margin-top:' + (vm || vmDone || nudge ? '10px' : '0') + ';padding:6px 32px">' + segmentsHtml(t) + '</div>';
     body.querySelectorAll('[data-dact]').forEach(b => b.addEventListener('click', () => detailAction(b.dataset.dact, b)));
   } else if (S.detailTab === 'corrected') {
     body.innerHTML = (t.corrected_text ? exportToolbarHtml('corrected') : '') + correctedHtml(t);
@@ -5856,7 +5911,7 @@ async function runIdentify() {
     if (best) {
       box.style.borderColor = GREEN;
       box.innerHTML = '<span style="font-size:13px;color:' + GREEN + ';font-weight:600">Match: ' + escapeHtml(best.name) + '</span>' +
-        '<span style="font-family:var(--f-mono);font-size:11px;color:var(--label-dim)">' + Math.round((best.similarity || 0) * 100) + '% similarity</span>';
+        '<span style="font-family:var(--f-mono);font-size:11px;color:var(--label-dim)">' + similarityPct(best.similarity) + ' similarity</span>';
     } else {
       box.style.borderColor = AMBER;
       box.innerHTML = '<span style="font-size:13px;color:' + AMBER + ';font-weight:600">No match above ' + identifyThreshold + '%</span>' +
