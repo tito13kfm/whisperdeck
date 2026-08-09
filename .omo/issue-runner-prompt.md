@@ -165,11 +165,14 @@ worktree, and reports written into the worktree, where cleanup deletes them
 unrecoverably.
 
 **`<your-branch-name>` is the branch name, exactly.** Not an abbreviation,
-not the issue number, not a model nickname, and the worktree directory
-name matches it too. `verify_self_audit.py` resolves your worktree by
-matching that report directory name against `git worktree list`, so a name
-that only resembles the branch can resolve to somebody else's checkout and
-verify the wrong code.
+not the issue number, not a model nickname, and not the worktree directory
+name. `git worktree add <path> -b <name>` sets those two independently, so
+they can differ. Get the branch from `git branch --show-current`, never
+from the directory path.
+
+`verify_self_audit.py` matches the report subdirectory name against each
+worktree's checked-out branch, so a near-miss name can resolve to a
+different checkout and verify the wrong code.
 
 **Never run `git checkout`, `git switch`, or `git checkout -b` in `<MAIN>`.**
 The main checkout stays on `master` for the whole run. Branches come from
@@ -208,8 +211,8 @@ name.** In `oh-my-openagent.json` it lives under `categories`, and nothing
 under `agents` is named `deep`, so dispatching it as an agent fails outright
 with `Unknown agent: deep`. Route it as a category. Check which section of
 the config a name sits in before dispatching it, rather than assuming every
-name this document uses is addressable the same way. `ultrabrain` no longer
-exists in the config; any reference to it elsewhere is stale.
+name this document uses is addressable the same way. A name that appears in
+another doc but in no section of the config is not dispatchable at all.
 
 - **Phase 1 (investigate):** `explore` for straightforward "read this file,
   report X" lookups. For anything requiring actual reasoning (comparing the
@@ -360,9 +363,9 @@ reason in `wrong-directions.md`.
 **Mutation check for every new or changed test:** the test must fail if the
 function under test were replaced with each trivial constant of its declared
 return type (None, False, True, 0, [] — whichever apply). A test that only
-proves "doesn't break things" or "doesn't raise" is vacuous. Tests have
-passed against a function that was a complete no-op, because setup had
-already produced the state they asserted on.
+proves "doesn't break things" or "doesn't raise" is vacuous. A test whose
+setup already produces the state it asserts on passes against a function
+that is a complete no-op.
 
 **Backfill/migration/repair functions: construct the broken state after
 content insertion, with no state mutations between wipe and call.** The
@@ -439,8 +442,7 @@ in a small, vocabulary-dense file can't reliably tell right from wrong. This
 tool supplements Phase 3.75 and `/audit-pr`, it doesn't replace them.
 
 **A stale-build finding needs a diagnosis before you may call it
-out-of-scope.** The checker no longer false-positives on `--sourcemap`
-builds, so "pre-existing condition" is not a blanket excuse for one. Before
+out-of-scope.** "Pre-existing condition" is not a blanket excuse. Before
 applying the label, write one line naming which artifact is stale, why
 nothing in your diff could have caused it, and whether it reproduces
 against a clean `origin/master` checkout. If it reproduces there it is
@@ -654,14 +656,12 @@ same line, still starting with `Independent review:`. `verify_self_audit.py`
 blocks when the line is missing, because nothing else distinguishes a
 skipped Oracle pass from a clean one. The word `oracle` must also appear
 somewhere in `token-usage.md`'s Role column; the checker cross-checks the
-two files, since the verdict has been recorded here while the largest paid
-call was left out of the table.
+two files.
 
 **If Oracle's response is BLOCK or NEEDS-DISCUSSION**, fix it before
 proceeding to Phase 4 (or resolve the discussion point), then re-run the
 fast-tier tests. Don't skip this because you're confident the fix is
-right — confidence is not evidence, and this is the pass that has caught
-regressions the author was sure were not there.
+right — confidence is not evidence.
 
 ## Phase 4: PR
 

@@ -15,7 +15,7 @@ A guard is only as strong as its least-guarded entry point. Tests that only exer
 
 **The main checkout `C:/Claude/whisperdesk` stays on `master`. Never run `git checkout`, `git switch`, or `git checkout -b` there.** Every branch lives in a worktree: `git worktree add .claude/worktrees/<name> -b <name> origin/master`. This binds every session, not only issue-runner runs.
 
-Why it matters more than it looks: run artifacts are written to `<main>/.omo/runs/`, so a feature branch checked out in the main checkout hides every file that branch predates and leaves reports describing a tree that is not checked out there. It has happened twice. The second time, a just-merged `docs/` file and the tracked `.omo/issue-runner-prompt.md` vanished from disk, which reads exactly like data loss; nothing was lost, but the first instance went unnoticed for two days.
+Why it matters more than it looks: run artifacts are written to `<main>/.omo/runs/`, so a feature branch checked out in the main checkout hides every file that branch predates and leaves reports describing a tree that is not checked out there. Tracked files disappearing from disk reads exactly like data loss.
 
 Three guards now exist, in increasing order of how hard they are to ignore:
 

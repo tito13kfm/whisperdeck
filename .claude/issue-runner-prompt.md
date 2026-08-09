@@ -133,11 +133,14 @@ path-crossing mistake at the point it is still cheap.
   number, collides with a parallel run's files).
 
 **`<your-branch-name>` is the branch name, exactly.** Not an abbreviation,
-not the issue number, not a model nickname. The report subdirectory name
-and the worktree directory name both match the branch, because
-`verify_self_audit.py` resolves your worktree by matching that directory
-name against `git worktree list`, so a name that only resembles the branch
-can resolve to somebody else's checkout and verify the wrong code.
+not the issue number, not a model nickname, and not the worktree directory
+name. `EnterWorktree` creates directory `.claude/worktrees/<name>` and
+branch `worktree-<name>`, so those two never match. Get the branch from
+`git branch --show-current`, never from the directory path.
+
+`verify_self_audit.py` matches the report subdirectory name against each
+worktree's checked-out branch, so a near-miss name can resolve to a
+different checkout and verify the wrong code.
 
 If you're ever unsure which root a path belongs to: code changes go where
 your cwd already is; report writes go to the absolute main-repo path
@@ -414,8 +417,7 @@ bundle and byte-diffs it against the committed output, and checks every
 `file:line` citation for a literal identifier match nearby.
 
 **A stale-build finding needs a diagnosis before you may call it
-out-of-scope.** The checker no longer false-positives on `--sourcemap`
-builds, so "pre-existing condition" is not a blanket excuse for one. Before
+out-of-scope.** "Pre-existing condition" is not a blanket excuse. Before
 applying the label, write one line naming which artifact is stale, why
 nothing in your diff could have caused it, and whether it reproduces against
 a clean `origin/master` checkout. If it does reproduce there, it is
@@ -500,10 +502,10 @@ found it wrong.
 - **Value-space exhaustiveness.** Enumerate the values that can actually
   arrive at the code you changed (every status string, every enum member,
   every exception type a call can raise) and confirm each has a correct
-  path. One run shipped a counter that treated cancelled as completed while
-  keying on `"processing"` when the real value was `"running"`, so the live
-  count could never appear. Another claimed all error paths returned the
-  original audio while `OSError` went uncaught.
+  path. A counter keyed on `"processing"` when the real value is `"running"`
+  counts cancelled as completed and the live count never appears. A claim
+  that all error paths return the original audio hides an uncaught
+  `OSError`.
 - **Boundary cardinality.** Exercise each criterion at a collection of one
   and against the endpoint's own pagination limit. A one-item batch got no
   header, which made every batch-level action unreachable, and grouping
@@ -605,8 +607,7 @@ Use `.omo/runs/issue-<N>/<your-branch-name>/` (main repo absolute path):
   recommended fix. Before logging something as wrong, re-check it against
   the live config or the current doc. Don't assume a past run's finding
   still holds, and don't read a failed tool call as proof the thing does
-  not exist. A stale finding recorded as fresh propagates into the next
-  retrospective as if it were current.
+  not exist.
 - `token-usage.md` — list every `Agent()` call this run made: which model
   backed it (Sonnet, Haiku, Fable) and the exact token count from that
   call's own result. Don't estimate it -- the Agent tool result already
