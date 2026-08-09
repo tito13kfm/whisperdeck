@@ -417,8 +417,7 @@ bundle and byte-diffs it against the committed output, and checks every
 `file:line` citation for a literal identifier match nearby.
 
 **A stale-build finding needs a diagnosis before you may call it
-out-of-scope.** The checker no longer false-positives on `--sourcemap`
-builds, so "pre-existing condition" is not a blanket excuse for one. Before
+out-of-scope.** "Pre-existing condition" is not a blanket excuse. Before
 applying the label, write one line naming which artifact is stale, why
 nothing in your diff could have caused it, and whether it reproduces against
 a clean `origin/master` checkout. If it does reproduce there, it is
@@ -503,10 +502,10 @@ found it wrong.
 - **Value-space exhaustiveness.** Enumerate the values that can actually
   arrive at the code you changed (every status string, every enum member,
   every exception type a call can raise) and confirm each has a correct
-  path. One run shipped a counter that treated cancelled as completed while
-  keying on `"processing"` when the real value was `"running"`, so the live
-  count could never appear. Another claimed all error paths returned the
-  original audio while `OSError` went uncaught.
+  path. A counter keyed on `"processing"` when the real value is `"running"`
+  counts cancelled as completed and the live count never appears. A claim
+  that all error paths return the original audio hides an uncaught
+  `OSError`.
 - **Boundary cardinality.** Exercise each criterion at a collection of one
   and against the endpoint's own pagination limit. A one-item batch got no
   header, which made every batch-level action unreachable, and grouping
@@ -608,8 +607,7 @@ Use `.omo/runs/issue-<N>/<your-branch-name>/` (main repo absolute path):
   recommended fix. Before logging something as wrong, re-check it against
   the live config or the current doc. Don't assume a past run's finding
   still holds, and don't read a failed tool call as proof the thing does
-  not exist. A stale finding recorded as fresh propagates into the next
-  retrospective as if it were current.
+  not exist.
 - `token-usage.md` — list every `Agent()` call this run made: which model
   backed it (Sonnet, Haiku, Fable) and the exact token count from that
   call's own result. Don't estimate it -- the Agent tool result already
