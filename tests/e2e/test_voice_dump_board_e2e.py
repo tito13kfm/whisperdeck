@@ -355,109 +355,105 @@ def test_transcribe_mode_wheel_cycles_via_real_clicks(page, registered_user):
     assert page.evaluate("() => window.S.mode") == "voice_dump"
 
 
-def test_transcribe_start_posts_kind_voice_dump(browser, live_server, registered_user, tmp_path):
+def test_transcribe_start_posts_kind_voice_dump(page_no_sw, registered_user, tmp_path):
     """The acceptance criterion from issue #286: recording with kind
     voice_dump starts live capture (here, a file-based job) normally --
     i.e. the wheel's selection actually reaches the /api/transcribe
     request as `kind=voice_dump`, not just the rendered Mode row.
 
-    Uses its own browser context (service_workers='block') instead of the
-    shared `page` fixture: app.py's sw.js registers a service worker that
-    intercepts every /api/* fetch and reissues it from the *service
-    worker's* own scope (`e.respondWith(fetch(e.request)...)`), not the
-    page's. page.route() only patches requests the page itself makes, so
-    with the service worker active it never sees the /api/transcribe
-    call -- confirmed empirically (route handler simply never fired, while
-    the request still hit the real backend and came back with no doneId,
-    i.e. a real failed transcription of the fake wav bytes). Blocking
-    service workers for this context's requests is the fix.
+    Uses `page_no_sw` rather than the shared `page` fixture because this
+    test intercepts /api/* with page.route(). sw.js's fetch handler
+    reissues those requests from the service worker's own scope
+    (`e.respondWith(fetch(e.request)...)`), where a page-level route
+    handler never sees them -- confirmed empirically (the handler simply
+    never fired, while the request still hit the real backend and came back
+    with no doneId, i.e. a real failed transcription of the fake wav
+    bytes). page_no_sw blocks service workers for the context; see its
+    docstring in conftest.py.
     """
-    ctx = browser.new_context(viewport={"width": 1440, "height": 900}, service_workers="block")
-    page = ctx.new_page()
-    page.goto(live_server + "/")
-    try:
-        username, password = registered_user
-        _login(page, username, password)
+    page = page_no_sw
+    # The rest of the body reads `page`; page_no_sw is the same object
+    # with service workers blocked for its context.
+    username, password = registered_user
+    _login(page, username, password)
 
-        page.locator("button[data-nav='transcribe']").click()
-        page.wait_for_selector("#page-transcribe.active", timeout=5000)
-        page.wait_for_selector("#mfd-leftcol .mfd-btn", timeout=5000)
+    page.locator("button[data-nav='transcribe']").click()
+    page.wait_for_selector("#page-transcribe.active", timeout=5000)
+    page.wait_for_selector("#mfd-leftcol .mfd-btn", timeout=5000)
 
-        _cycle_mode_via_clicks(page, "voice_dump")
+    _cycle_mode_via_clicks(page, "voice_dump")
 
-        # Load a tiny real file through the real, visible-to-the-app file
-        # input (the same node wireTranscribeDrop()'s change-listener wires
-        # up) -- never write to S.tapeFile/S.tapeLoaded directly.
-        audio_path = tmp_path / "tiny.wav"
-        audio_path.write_bytes(b"RIFF" + b"\x00" * 256)
-        page.locator("#file-input").set_input_files(str(audio_path))
-        page.wait_for_function("() => window.S.tapeLoaded === true", timeout=5000)
+    # Load a tiny real file through the real, visible-to-the-app file
+    # input (the same node wireTranscribeDrop()'s change-listener wires
+    # up) -- never write to S.tapeFile/S.tapeLoaded directly.
+    audio_path = tmp_path / "tiny.wav"
+    audio_path.write_bytes(b"RIFF" + b"\x00" * 256)
+    page.locator("#file-input").set_input_files(str(audio_path))
+    page.wait_for_function("() => window.S.tapeLoaded === true", timeout=5000)
 
-        # Intercept the upload: assert the real multipart body carries
-        # kind=voice_dump, record that fact in `intercepted_kinds`, and
-        # fulfill with a minimal stub so no real transcription pipeline
-        # runs. Also stub the immediately-following GET
-        # /api/transcripts/<id> poll as already "completed" so
-        # startJob()'s poll loop returns on its first iteration instead of
-        # hitting the real (nonexistent) transcript row.
-        intercepted_kinds = []
+    # Intercept the upload: assert the real multipart body carries
+    # kind=voice_dump, record that fact in `intercepted_kinds`, and
+    # fulfill with a minimal stub so no real transcription pipeline
+    # runs. Also stub the immediately-following GET
+    # /api/transcripts/<id> poll as already "completed" so
+    # startJob()'s poll loop returns on its first iteration instead of
+    # hitting the real (nonexistent) transcript row.
+    intercepted_kinds = []
 
-        def handle_transcribe_post(route):
-            body = (route.request.post_data_buffer or b"").decode("utf-8", errors="replace")
-            match = re.search(r'name="kind"\r\n\r\n([^\r\n]*)\r\n', body)
-            intercepted_kinds.append(match.group(1) if match else None)
-            route.fulfill(
-                status=200,
-                content_type="application/json",
-                body=json.dumps({"id": 999999, "status": "completed", "duration_seconds": 1}),
-            )
-
-        def handle_transcript_get(route):
-            route.fulfill(
-                status=200,
-                content_type="application/json",
-                body=json.dumps({"id": 999999, "status": "completed", "duration_seconds": 1}),
-            )
-
-        page.route("**/api/transcribe", handle_transcribe_post)
-        page.route(re.compile(r".*/api/transcripts/\d+$"), handle_transcript_get)
-
-        # curProv().ready gates BOTH the real START button (#key-play-a is
-        # disabled otherwise -- see rack.js's `playKey.disabled = !canStart`)
-        # and startJob()'s own early-return guard. Investigate rather than
-        # assume. In this environment moonshine's check_health() actually
-        # passes (it's installed) even though neither faster-whisper nor
-        # any hosted-provider API key is configured for this fresh test
-        # user, so curProv() (whichever provider ensureProviders() picked
-        # as firstReady) reports ready=True and the real button is not
-        # disabled -- confirmed below rather than assumed.
-        ready = page.evaluate("() => window.curProv().ready")
-        with page.expect_request("**/api/transcribe", timeout=5000):
-            if ready:
-                page.locator("#key-play-a").click()
-            else:
-                # BLOCKED-VERIFICATION: no provider is ready in this test
-                # environment, so the real START button stays disabled and
-                # a real click could never reach startJob(). Confirm
-                # that's really why (not a UI/guard mismatch), then fall
-                # back to calling the real startJob() directly -- exposed
-                # on window in rack.js's existing test-hook Object.assign
-                # block for exactly this -- after marking the current
-                # provider ready so startJob()'s *other* guard doesn't
-                # also block it. tapeLoaded and tapeFile were still set
-                # through the real file input above, not this evaluate
-                # call, and S.mode was still set through real wheel clicks
-                # above, not this evaluate call.
-                assert page.locator("#key-play-a").is_disabled(), (
-                    "curProv().ready is False but #key-play-a isn't disabled -- "
-                    "guard/UI mismatch, not the expected no-ready-provider case"
-                )
-                page.evaluate("() => { window.S.providers[window.S.providerIdx].ready = true; }")
-                page.evaluate("() => window.startJob()")
-
-        assert intercepted_kinds == ["voice_dump"], (
-            f"expected exactly one intercepted /api/transcribe request carrying "
-            f"kind=voice_dump, got {intercepted_kinds}"
+    def handle_transcribe_post(route):
+        body = (route.request.post_data_buffer or b"").decode("utf-8", errors="replace")
+        match = re.search(r'name="kind"\r\n\r\n([^\r\n]*)\r\n', body)
+        intercepted_kinds.append(match.group(1) if match else None)
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({"id": 999999, "status": "completed", "duration_seconds": 1}),
         )
-    finally:
-        ctx.close()
+
+    def handle_transcript_get(route):
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({"id": 999999, "status": "completed", "duration_seconds": 1}),
+        )
+
+    page.route("**/api/transcribe", handle_transcribe_post)
+    page.route(re.compile(r".*/api/transcripts/\d+$"), handle_transcript_get)
+
+    # curProv().ready gates BOTH the real START button (#key-play-a is
+    # disabled otherwise -- see rack.js's `playKey.disabled = !canStart`)
+    # and startJob()'s own early-return guard. Investigate rather than
+    # assume. In this environment moonshine's check_health() actually
+    # passes (it's installed) even though neither faster-whisper nor
+    # any hosted-provider API key is configured for this fresh test
+    # user, so curProv() (whichever provider ensureProviders() picked
+    # as firstReady) reports ready=True and the real button is not
+    # disabled -- confirmed below rather than assumed.
+    ready = page.evaluate("() => window.curProv().ready")
+    with page.expect_request("**/api/transcribe", timeout=5000):
+        if ready:
+            page.locator("#key-play-a").click()
+        else:
+            # BLOCKED-VERIFICATION: no provider is ready in this test
+            # environment, so the real START button stays disabled and
+            # a real click could never reach startJob(). Confirm
+            # that's really why (not a UI/guard mismatch), then fall
+            # back to calling the real startJob() directly -- exposed
+            # on window in rack.js's existing test-hook Object.assign
+            # block for exactly this -- after marking the current
+            # provider ready so startJob()'s *other* guard doesn't
+            # also block it. tapeLoaded and tapeFile were still set
+            # through the real file input above, not this evaluate
+            # call, and S.mode was still set through real wheel clicks
+            # above, not this evaluate call.
+            assert page.locator("#key-play-a").is_disabled(), (
+                "curProv().ready is False but #key-play-a isn't disabled -- "
+                "guard/UI mismatch, not the expected no-ready-provider case"
+            )
+            page.evaluate("() => { window.S.providers[window.S.providerIdx].ready = true; }")
+            page.evaluate("() => window.startJob()")
+
+    assert intercepted_kinds == ["voice_dump"], (
+        f"expected exactly one intercepted /api/transcribe request carrying "
+        f"kind=voice_dump, got {intercepted_kinds}"
+    )

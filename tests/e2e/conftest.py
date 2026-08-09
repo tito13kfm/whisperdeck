@@ -2,8 +2,11 @@
 
 Starts a real uvicorn server in a background thread (so the browser can hit
 it over a real socket) and skips the whole module if Playwright or
-Chromium aren't installed. Per-test isolation is handled by conftest.py
-at the parent level (WHISPERDECK_DATA_DIR redirect, rate-limiter reset).
+Chromium aren't installed. Data isolation (the WHISPERDECK_DATA_DIR
+redirect) comes from tests/conftest.py at module import time. The
+rate-limiter reset does NOT: that one lives inside the parent conftest's
+`client` fixture, which no e2e test requests, so this file resets the
+limiter itself in pytest_runtest_setup below.
 """
 import os
 import socket
@@ -16,6 +19,34 @@ import pytest
 
 # ── Skip the whole module if Playwright is not installed ─────────────────────
 playwright = pytest.importorskip("playwright", reason="Playwright not installed; run `pip install -r requirements-browser.txt`")
+
+
+# ── Rate-limit isolation for every test in this directory ────────────────────
+@pytest.hookimpl(tryfirst=True)
+def pytest_runtest_setup(item):
+    """Clear the process-wide rate-limit buckets before each e2e test.
+
+    `rate_limiter` (services/security.py) is a module-level singleton, and
+    live_server runs uvicorn in a background *thread* of this same
+    interpreter, so the serving code and this hook share one _buckets dict.
+    Nine files under tests/e2e each register a user through a module-scoped
+    `registered_user` fixture, against a limit of 5 registrations per 300s
+    (app.py's `register:{client_ip}` bucket) -- so running the directory in
+    one pytest invocation used to 429 partway through and error out every
+    remaining module's fixture. /api/login's 10-per-60s bucket has the same
+    shape and is cleared by the same call.
+
+    This is a hook rather than an autouse fixture on purpose. `registered_user`
+    is module-scoped, and pytest instantiates higher-scoped fixtures first, so
+    a function-scoped autouse fixture here would run *after* the registration
+    it is supposed to protect. pytest_runtest_setup runs before any fixture
+    setup for the item, which is the only placement that covers it.
+
+    Same reset call as tests/conftest.py's `client` fixture, which solved the
+    identical problem for the non-e2e suite.
+    """
+    from services.security import rate_limiter
+    rate_limiter._buckets.clear()
 
 
 # ── live_server: start uvicorn in a background thread for the test session ──
@@ -92,6 +123,32 @@ def browser():
 def page(browser, live_server):
     """A blank page already navigated to the test server's root."""
     ctx = browser.new_context(viewport={"width": 1440, "height": 900})
+    pg = ctx.new_page()
+    pg.goto(live_server + "/")
+    yield pg
+    ctx.close()
+
+
+@pytest.fixture()
+def page_no_sw(browser, live_server):
+    """Like `page`, but with service workers blocked for the whole context.
+
+    Use this for any test that intercepts network traffic -- page.route(),
+    page.expect_request(), page.expect_response(). static/sw.js registers a
+    service worker at root scope (static/rack.js's registration is
+    unconditional) whose fetch handler answers every /api/* request with
+    `e.respondWith(fetch(e.request)...)`. That reissued fetch originates in
+    the worker, not the page, so a page-level route handler never fires: the
+    real backend answers, the stub is silently ignored, and a test written
+    to drive an error or empty state passes against the success response
+    instead. Blocking service workers for the context is the fix, and it is
+    the only mechanism this app supports -- there is no flag or query param
+    that suppresses the registration.
+
+    Tests that don't touch the network should keep using `page`, so the
+    service worker stays on the path the real browser actually takes.
+    """
+    ctx = browser.new_context(viewport={"width": 1440, "height": 900}, service_workers="block")
     pg = ctx.new_page()
     pg.goto(live_server + "/")
     yield pg

@@ -111,7 +111,9 @@ Run the two suites separately:
 .venv\Scripts\python.exe -m pytest -m "not e2e"          # everything else
 ```
 
-How the harness works: the `live_server` fixture in `tests/e2e/conftest.py` starts a real uvicorn in a background thread so the browser hits a real socket, and `tests/conftest.py` isolates each test's data (redirects `WHISPERDECK_DATA_DIR` to a tempdir, resets the rate limiter). `tests/e2e/test_browser_smoke.py` is a working template covering the login form and app shell; copy it for new flows.
+How the harness works: the `live_server` fixture in `tests/e2e/conftest.py` starts a real uvicorn in a background thread so the browser hits a real socket, `tests/conftest.py` redirects `WHISPERDECK_DATA_DIR` to a tempdir so no test touches real data, and `tests/e2e/conftest.py`'s `pytest_runtest_setup` clears the rate limiter before every e2e test (the parent conftest resets it too, but only inside its `client` fixture, which e2e tests don't use). `tests/e2e/test_browser_smoke.py` is a working template covering the login form and app shell; copy it for new flows.
+
+Any e2e test that intercepts network traffic (`page.route`, `page.expect_request`, `page.expect_response`) must take the `page_no_sw` fixture instead of `page`. `static/sw.js` reissues every `/api/*` request from the service worker's own scope, so a page-level route handler never sees it: the stub is ignored, the real response comes back, and the assertion can pass against the wrong state.
 
 ## 8. If you get locked out
 
