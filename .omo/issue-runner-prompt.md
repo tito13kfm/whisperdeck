@@ -165,11 +165,14 @@ worktree, and reports written into the worktree, where cleanup deletes them
 unrecoverably.
 
 **`<your-branch-name>` is the branch name, exactly.** Not an abbreviation,
-not the issue number, not a model nickname, and the worktree directory
-name matches it too. `verify_self_audit.py` resolves your worktree by
-matching that report directory name against `git worktree list`, so a name
-that only resembles the branch can resolve to somebody else's checkout and
-verify the wrong code.
+not the issue number, not a model nickname, and not the worktree directory
+name. `git worktree add <path> -b <name>` sets those two independently, so
+they can differ. Get the branch from `git branch --show-current`, never
+from the directory path.
+
+`verify_self_audit.py` matches the report subdirectory name against each
+worktree's checked-out branch, so a near-miss name can resolve to a
+different checkout and verify the wrong code.
 
 **Never run `git checkout`, `git switch`, or `git checkout -b` in `<MAIN>`.**
 The main checkout stays on `master` for the whole run. Branches come from
