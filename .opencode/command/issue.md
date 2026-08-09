@@ -18,7 +18,7 @@ send overrides as a separate message next time.
 Canonical workflow (single source of truth lives at `.omo/issue-runner-prompt.md`,
 inlined below so this command never drifts out of sync with it):
 
-!`cat "C:/Claude/whisperdesk/.omo/issue-runner-prompt.md"`
+!`cat "$(git rev-parse --path-format=absolute --git-common-dir)/../.omo/issue-runner-prompt.md"`
 
 Everywhere the text above says `<N>` or refers to "the issue number you were
 given", substitute the leading number extracted above. Start at Phase 0.
