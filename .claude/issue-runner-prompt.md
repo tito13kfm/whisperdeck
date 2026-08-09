@@ -133,11 +133,14 @@ path-crossing mistake at the point it is still cheap.
   number, collides with a parallel run's files).
 
 **`<your-branch-name>` is the branch name, exactly.** Not an abbreviation,
-not the issue number, not a model nickname. The report subdirectory name
-and the worktree directory name both match the branch, because
-`verify_self_audit.py` resolves your worktree by matching that directory
-name against `git worktree list`, so a name that only resembles the branch
-can resolve to somebody else's checkout and verify the wrong code.
+not the issue number, not a model nickname, and not the worktree directory
+name. `EnterWorktree` creates directory `.claude/worktrees/<name>` and
+branch `worktree-<name>`, so those two never match. Get the branch from
+`git branch --show-current`, never from the directory path.
+
+`verify_self_audit.py` matches the report subdirectory name against each
+worktree's checked-out branch, so a near-miss name can resolve to a
+different checkout and verify the wrong code.
 
 If you're ever unsure which root a path belongs to: code changes go where
 your cwd already is; report writes go to the absolute main-repo path
