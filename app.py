@@ -58,7 +58,7 @@ from services.llm_jobs import (
     dismiss_llm_job, clear_finished_llm_jobs,
 )
 from services.classification import effective_kind
-from services.relabel import record_relabel, latest_relabel, clear_relabel_history, count_distinct_speakers
+from services.relabel import record_relabel, latest_relabel, clear_relabel_history, count_distinct_speakers, USER_ASSIGNED_CONFIDENCE
 from backends import list_providers, get_provider, LOCAL_PROVIDERS
 from services.security import (
     generate_csrf_token, rotate_csrf_token, validate_csrf_token,
@@ -2456,11 +2456,21 @@ async def retag_transcript_segments(
             raise HTTPException(status_code=400, detail=f"Segment index {i} is out of range")
 
     index_set = set(indices)
-    changed = [(i, segments[i].get("speaker") or "") for i in sorted(index_set)]
+    changed = [
+        (i, segments[i].get("speaker") or "", segments[i].get("speaker_confidence"))
+        for i in sorted(index_set)
+    ]
     record_relabel(db, t, "retag", changed,
                    description=f"retag {len(index_set)} lines to {speaker}")
+    # A retag is the user overriding the diarizer, so the diarizer's
+    # confidence in the label it lost no longer describes the line. Stamp the
+    # user-assigned sentinel instead of leaving the stale value, which kept
+    # the "?" uncertainty marker on lines the user just corrected (issue
+    # #305). The old value travels in the inverse patch above so undo can
+    # bring it back.
     new_segments = [
-        {**seg, "speaker": speaker} if i in index_set else seg
+        {**seg, "speaker": speaker, "speaker_confidence": USER_ASSIGNED_CONFIDENCE}
+        if i in index_set else seg
         for i, seg in enumerate(segments)
     ]
     t.segments = new_segments
@@ -2494,7 +2504,14 @@ async def undo_last_relabel(
     for patch in entry.inverse.get("segments", []):
         i = patch.get("index")
         if isinstance(i, int) and 0 <= i < len(segments):
-            segments[i] = {**segments[i], "speaker": patch.get("speaker") or ""}
+            restored = {**segments[i], "speaker": patch.get("speaker") or ""}
+            # Retag patches carry the pre-retag confidence (None when the
+            # segment never had one, behaviorally the same to the UI); rows
+            # recorded before issue #305 lack the key entirely and must leave
+            # confidence untouched.
+            if "speaker_confidence" in patch:
+                restored["speaker_confidence"] = patch["speaker_confidence"]
+            segments[i] = restored
     t.segments = segments
     # Restoring the old labels restores the old label set, so the count has to
     # come back with them.
