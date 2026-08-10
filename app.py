@@ -31,6 +31,7 @@ from sqlalchemy.orm import Session
 from database import init_db, backfill_user_id, Transcript, Summary, VoiceNote, VoiceDumpItem, VoiceProfile, VoiceClip, ProviderConfig, User, LlmJob, TranscriptionJob, TranscriptTag, utcnow_naive
 from services.auth import (
     get_or_create_fallback_user, create_user, authenticate_user, validate_password,
+    verify_password,
     password_min_length, get_user_by_reset_token,
     list_usernames, generate_reset_token, reset_password,
     set_admin_status, get_all_users,
@@ -131,18 +132,52 @@ try:
             "  WHISPERDECK_DATA_DIR at the correct data directory.\n" +
             "!" * 72 + "\n"
         )
+    # Databases migrated before issue #302 was fixed carry the fallback
+    # user with the publicly documented static password. New migrations
+    # get a random password; existing installs get this warning on every
+    # startup until the password is changed.
+    _local_user = _startup_db.query(User).filter(User.username == "local").first()
+    if _local_user and verify_password("changeme", _local_user.password_salt, _local_user.password_hash):
+        print(
+            "\n" + "!" * 72 + "\n"
+            "  WARNING: the 'local' user still has the default password\n"
+            "  'changeme'. Anyone who can reach this instance can sign in\n"
+            "  as it. Log in and change it, or have an admin generate a\n"
+            "  reset code from the Service panel. (issue #302)\n" +
+            "!" * 72 + "\n"
+        )
 finally:
     _startup_db.close()
 
 if migrated_tables:
     _migration_db = SessionLocal()
     try:
-        _fallback_user = get_or_create_fallback_user(_migration_db)
+        _fallback_user, _fallback_password = get_or_create_fallback_user(_migration_db)
         backfill_user_id(engine, migrated_tables, _fallback_user.id)
-        print(
-            f"[migration] assigned {len(migrated_tables)} pre-existing table(s) "
-            f"to fallback user 'local' (password: changeme — change it after logging in)"
-        )
+        if _fallback_password:
+            # The plaintext exists only here and in the recovery file
+            # below (issue #302). Migration commonly runs headless where
+            # stdout is rotated or discarded, and at migration time there
+            # is usually no other account that could admin-reset 'local' —
+            # without the file a missed log line would strand the entire
+            # migrated library. Same trust domain as the SQLite DB beside it.
+            _pw_file = DATA_DIR / "LOCAL_USER_PASSWORD.txt"
+            _pw_file.write_text(
+                "One-time password for the migrated 'local' user: "
+                f"{_fallback_password}\n"
+                "Log in, change the password, then delete this file.\n"
+            )
+            print(
+                f"[migration] assigned {len(migrated_tables)} pre-existing table(s) "
+                f"to fallback user 'local' (one-time password: {_fallback_password} "
+                f"— also written to {_pw_file}; change it after logging in, "
+                f"then delete that file)"
+            )
+        else:
+            print(
+                f"[migration] assigned {len(migrated_tables)} pre-existing table(s) "
+                f"to existing fallback user 'local'"
+            )
     finally:
         _migration_db.close()
 
@@ -553,8 +588,30 @@ async def login(request: Request, data: dict = Body(...), db: Session = Depends(
         raise HTTPException(status_code=429, detail="Too many login attempts — try again later")
     username = (data.get("username") or "").strip()
     password = data.get("password") or ""
+    # Per-account failure throttle (issue #124), keyed on (username, client):
+    # - failures only, so successful logins never consume a slot;
+    # - peek() before authenticating, so a full bucket 429s even for the
+    #   correct password (no validity oracle);
+    # - the username is hashed into the key so attacker-chosen input cannot
+    #   control key size;
+    # - scoped by client IP: a pure per-username key would let anyone lock
+    #   an arbitrary account out of login indefinitely with a trickle of
+    #   wrong passwords (usernames are enumerable by design) — scoping it
+    #   means an attacker only ever fills their own bucket. Cross-IP
+    #   distributed guessing remains bounded by the IP bucket above plus
+    #   PBKDF2 cost per attempt.
+    # Applies under TestClient too (protects the account, not the client);
+    # tests rely on the existing bucket-clearing fixtures.
+    user_key = None
+    if username:
+        user_digest = hashlib.sha256(username.encode("utf-8")).hexdigest()[:32]
+        user_key = f"login-user:{user_digest}:{client_ip or 'local'}"
+        if not rate_limiter.peek(user_key, max_requests=5, window_seconds=300):
+            raise HTTPException(status_code=429, detail="Too many failed attempts for this account — try again later")
     user = authenticate_user(db, username, password)
     if not user:
+        if user_key:
+            rate_limiter.record(user_key)
         raise HTTPException(status_code=401, detail="Invalid username or password")
     request.session["user_id"] = user.id
     rotate_csrf_token(request.session)

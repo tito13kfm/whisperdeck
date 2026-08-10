@@ -103,14 +103,19 @@ def authenticate_user(db, username: str, password: str) -> Optional[User]:
     return user
 
 
-def get_or_create_fallback_user(db) -> User:
+def get_or_create_fallback_user(db) -> tuple[User, Optional[str]]:
     """Used only during migration of a pre-existing database, to own rows
-    that predate user accounts. Username 'local', password 'changeme' —
-    the user should change it after first login."""
+    that predate user accounts. Username 'local'.
+
+    Returns (user, plaintext_password). The password is generated randomly
+    on creation and returned exactly once so the caller can print it; on
+    every later call (user already exists) it is None. A static default
+    here would sit outside the password policy forever (issue #302)."""
     user = db.query(User).filter(User.username == "local").first()
     if user:
-        return user
-    return create_user(db, "local", "changeme")
+        return user, None
+    password = secrets.token_urlsafe(16)
+    return create_user(db, "local", password), password
 
 
 # ── Username Recovery ─────────────────────────────────────────────────────
