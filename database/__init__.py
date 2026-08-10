@@ -550,7 +550,12 @@ def populate_fts(engine) -> None:
                     pass
 
             if not existing_st:
-                # UPDATE fires trg_transcripts_fts_update which indexes the row
+                # The one purpose segment_text serves (issue #191): this write
+                # is a lever, not data. Any UPDATE on the row fires
+                # trg_transcripts_fts_update, whose insert half indexes the row
+                # with segment terms derived from the segments JSON — the value
+                # written here is never what gets indexed, and stays NULL on
+                # every row the ORM creates.
                 conn.execute(
                     text("UPDATE transcripts SET segment_text = :st WHERE id = :tid"),
                     {"st": segment_text, "tid": t_id},
@@ -694,6 +699,20 @@ def init_db(db_path: str = "data/whisperdesk.db") -> tuple:
     # always see them present and never detect a genuinely pre-#267 database.
     _classification_cols_were_absent = classification_columns_were_absent(engine)
     ensure_columns(engine, "users", {"settings": "JSON"})
+    # About "segment_text" in the list below (issue #191): it is a backfill-only
+    # trigger lever, not a content column, and it stays on purpose.
+    #
+    # It has no ORM attribute, so every row the app creates leaves it NULL. The
+    # segment terms in the FTS index are computed from the segments JSON by all
+    # three triggers (group_concat over json_each), never read from this column,
+    # so the FTS index deliberately disagrees with the content table here. That
+    # divergence is why an `INSERT INTO transcripts_fts VALUES('rebuild')` would
+    # corrupt the database — see cleanup_fts_orphans' docstring.
+    #
+    # Its one job is in populate_fts(): writing it is the only UPDATE that fires
+    # trg_transcripts_fts_update for a pre-#108 row that has no index entry yet.
+    # Dropping the column would take that lever away and leave old installs
+    # unsearchable. Never read it for content — it is NULL on anything recent.
     ensure_columns(engine, "transcripts", {"audio_path": "TEXT", "diarize_requested": "BOOLEAN", "num_speakers": "INTEGER", "processed_size_bytes": "INTEGER", "corrected_text": "TEXT", "correction_error": "TEXT", "correction_model": "TEXT", "queue_dismissed": "BOOLEAN DEFAULT 0", "source_transcript_id": "INTEGER", "batch_id": "TEXT", "video_path": "TEXT", "kind": "TEXT DEFAULT 'meeting'", "diarization_method": "TEXT", "stereo_audio_path": "TEXT", "segment_text": "TEXT", "classification_status": "TEXT DEFAULT 'override'", "classification_confidence": "REAL", "classification_provenance": "JSON"})
     ensure_columns(engine, "llm_jobs", {"dismissed": "BOOLEAN DEFAULT 0", "result_json": "JSON", "attempts": "INTEGER DEFAULT 0"})
     ensure_nullable_llm_job_transcript_id(engine)
