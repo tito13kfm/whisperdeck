@@ -25,7 +25,7 @@ from starlette.middleware.sessions import SessionMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.gzip import GZipMiddleware
 from sqlalchemy import or_, func, case
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session
 
 from database import init_db, backfill_user_id, Transcript, Summary, VoiceNote, VoiceDumpItem, VoiceProfile, VoiceClip, ProviderConfig, User, LlmJob, TranscriptionJob, TranscriptTag, utcnow_naive
@@ -251,6 +251,26 @@ app.add_middleware(BaseHTTPMiddleware, dispatch=static_cache_headers)
 # middleware stack) so it compresses the final response after all other
 # middleware has processed it.
 app.add_middleware(GZipMiddleware, minimum_size=500)
+
+
+# WAL mode serializes writers: two connections both trying to write take
+# turns, and the loser waits out PRAGMA busy_timeout (5000ms,
+# database/__init__.py) before SQLAlchemy raises OperationalError wrapping
+# sqlite3's "database is locked". That UPDATE never took the lock, so the
+# write did not happen -- retrying is safe, not just harmless. An audit for
+# issue #391 found ~27 write endpoints that would otherwise let this escape
+# as a bare 500, so this is one handler covering all of them instead of a
+# try/except bolted onto each. Non-"is locked" OperationalErrors (disk I/O
+# errors, etc.) are re-raised and still surface as 500s.
+@app.exception_handler(OperationalError)
+async def handle_db_locked(request: Request, exc: OperationalError):
+    if "is locked" not in str(exc.orig or exc):
+        raise exc
+    return JSONResponse(
+        status_code=409,
+        content={"detail": "The database is busy with another write; please retry."},
+        headers={"Retry-After": "1"},
+    )
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────
