@@ -41,7 +41,7 @@ from services.auth import (
 )
 from services.settings import get_user_settings, update_user_settings
 from services.transcription import TranscriptionService
-from services.diarization import DiarizationService
+from services.diarization import DiarizationService, MissingTokenError, degraded_error_text
 from services.voice_id import voice_id_service
 from services.audio_prep import transcode_for_upload, AudioPrepError, chunk_audio, get_audio_duration, extract_clips_concat, has_video_stream, transcode_stereo_for_diarization
 from services.audio_cleanup import cleanup_audio, filter_hallucinations
@@ -1543,7 +1543,7 @@ async def _run_transcription_pipeline(
         # Run diarization if requested
         if diarize and transcript.segments:
             try:
-                merged, speaker_count, diarization_method = await diarization_service.diarize_and_merge(
+                merged, speaker_count, diarization_method, diarization_warning = await diarization_service.diarize_and_merge(
                     str(save_path),
                     num_speakers=num_speakers,
                     segments=transcript.segments,
@@ -1553,8 +1553,15 @@ async def _run_transcription_pipeline(
                 transcript.segments = merged
                 transcript.speaker_count = count_distinct_speakers(merged)
                 transcript.diarization_method = diarization_method
+                if diarization_warning:
+                    # pyannote failed but the heuristic rescued the run
+                    # (issue #121): labels exist, status stays completed,
+                    # but the reason must not vanish.
+                    transcript.error = degraded_error_text(diarization_warning)
                 db.commit()
             except Exception as e:
+                # Only reachable when the heuristic tier also failed —
+                # the issue-#120 hard-failure surfacing, unchanged.
                 import traceback
                 traceback.print_exc()
                 transcript.error = f"Diarization failed: {e}"
@@ -2727,7 +2734,13 @@ async def diarize_audio(
 ):
     """Run speaker diarization on an audio file."""
     file_ext = os.path.splitext(file.filename or "audio.mp3")[1] or ".mp3"
-    safe_name = f"diar_{utcnow_naive().strftime('%Y%m%d_%H%M%S')}{file_ext}"
+    # A per-second timestamp alone collides: two callers (or one retrying
+    # client) in the same second wrote the same path, and the first request
+    # then diarized the second one's audio. The suffix makes each request's
+    # scratch file its own, and the finally below deletes it — nothing here
+    # is referenced by a transcript row, so keeping it only fills the disk.
+    safe_name = (f"diar_{utcnow_naive().strftime('%Y%m%d_%H%M%S')}"
+                 f"_{secrets.token_hex(4)}{file_ext}")
     save_path = UPLOAD_DIR / safe_name
 
     with open(save_path, "wb") as f:
@@ -2753,8 +2766,21 @@ async def diarize_audio(
             "speaker_count": result.speaker_count,
             "method": result.method,
         }
+    except MissingTokenError as e:
+        # Explicit pyannote opt-in without a token is user-actionable:
+        # 400 with the settings-pointing message, not a generic 500
+        # (issue #119). The pipeline paths degrade to the heuristic
+        # instead — this endpoint bypasses diarize_and_merge on purpose.
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        # Same discipline as the enroll endpoint: this upload is scratch, no
+        # row points at it once the response is built.
+        try:
+            os.remove(save_path)
+        except OSError:
+            pass
 
 
 # ── Summarization ────────────────────────────────────────────────────────

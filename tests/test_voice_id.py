@@ -119,6 +119,10 @@ def test_detect_backend_prefers_speechbrain_over_pyannote(tmp_path, monkeypatch)
 def test_embed_pyannote_caches_inference_across_calls(tmp_path, monkeypatch):
     svc = VoiceIdentificationService(voices_dir=str(tmp_path / "voices"))
     svc._backend = "pyannote"
+    # The pyannote backend now refuses to build without a token (issue #119),
+    # and _embed_pyannote's catch-all would swallow that into a None return —
+    # these tests are about caching/shape, so give it a token.
+    monkeypatch.setenv("HUGGINGFACE_TOKEN", "hf-test-token")
 
     calls = {"instantiated": 0}
 
@@ -155,6 +159,7 @@ def test_embed_pyannote_caches_inference_across_calls(tmp_path, monkeypatch):
 def test_embed_pyannote_returns_flat_vector(tmp_path, monkeypatch):
     svc = VoiceIdentificationService(voices_dir=str(tmp_path / "voices"))
     svc._backend = "pyannote"
+    monkeypatch.setenv("HUGGINGFACE_TOKEN", "hf-test-token")  # see caching test
 
     class FakeInference:
         def __init__(self, model, window):
@@ -177,6 +182,30 @@ def test_embed_pyannote_returns_flat_vector(tmp_path, monkeypatch):
 
     assert result.shape == (3,)
     assert np.array_equal(result, np.array([1.0, 2.0, 3.0]))
+
+
+def test_embed_pyannote_reports_the_missing_token_as_the_backend_error(tmp_path, monkeypatch):
+    """Issue #119: with no token configured, the pyannote backend fails with
+    the actionable setup message, not a gated-repo 401 traceback. The clip
+    still falls back to another backend, but the reason is now readable."""
+    svc = VoiceIdentificationService(voices_dir=str(tmp_path / "voices"))
+    svc._backend = "pyannote"
+    monkeypatch.delenv("HUGGINGFACE_TOKEN", raising=False)
+
+    class ShouldNotLoad:
+        @staticmethod
+        def from_pretrained(name, token=None):
+            raise AssertionError("pyannote must not be reached without a token")
+
+    monkeypatch.setitem(sys.modules, "pyannote.audio",
+                        types.SimpleNamespace(Model=ShouldNotLoad, Inference=object))
+    monkeypatch.setitem(sys.modules, "torch", types.SimpleNamespace(from_numpy=lambda arr: arr))
+    monkeypatch.setitem(sys.modules, "soundfile", types.SimpleNamespace(
+        read=lambda path, dtype, always_2d: (np.array([[0.1], [0.2]]), 16000)))
+
+    assert svc._embed_pyannote("fake.wav") is None
+    assert "HuggingFace token required" in svc._last_backend_error
+    assert "Service Panel" in svc._last_backend_error
 
 
 def test_embed_pyannote_sets_last_backend_error_on_failure(tmp_path, monkeypatch):
@@ -677,6 +706,7 @@ def test_add_clip_rejects_dim_mismatch_with_legacy_null_model_clip(tmp_path, mon
 def test_embed_pyannote_downmixes_stereo_to_mono(tmp_path, monkeypatch):
     svc = VoiceIdentificationService(voices_dir=str(tmp_path / "voices"))
     svc._backend = "pyannote"
+    monkeypatch.setenv("HUGGINGFACE_TOKEN", "hf-test-token")  # see caching test
     seen = {}
 
     class FakeInference:
@@ -805,6 +835,10 @@ def test_get_classifier_builds_one_instance_when_two_threads_race(tmp_path, monk
 def test_get_pyannote_inference_builds_one_instance_when_two_threads_race(tmp_path, monkeypatch):
     svc = VoiceIdentificationService(voices_dir=str(tmp_path / "voices"))
     svc._backend = "pyannote"
+    # _get_pyannote_inference raises MissingTokenError before touching pyannote
+    # when no token is configured (issue #119) — that would fail both threads
+    # before the lock is ever contended, which is not what this test is about.
+    monkeypatch.setenv("HUGGINGFACE_TOKEN", "hf-test-token")
     calls = {"instantiated": 0}
     first_thread_inside_loader = threading.Event()
 

@@ -363,7 +363,7 @@ class _FakeDiarizationService:
     async def diarize_and_merge(self, audio_path, num_speakers, segments,
                                 hf_token=None, stereo_audio_path=None):
         merged = [{"start": 0.0, "end": 2.0, "text": "regenerated", "speaker": "SPEAKER_00"}]
-        return merged, 1, "heuristic"
+        return merged, 1, "heuristic", None
 
 
 def test_rediarize_clears_relabel_history(client, db_session, tmp_path):
@@ -393,3 +393,72 @@ def test_rediarize_clears_relabel_history(client, db_session, tmp_path):
             .filter(RelabelHistory.transcript_id == t.id).count()) == 0
     # And the undo endpoint agrees there is nothing left to undo.
     assert client.post(f"/api/transcripts/{t.id}/relabel-undo").status_code == 404
+
+
+class _DegradedDiarizationService:
+    async def diarize_and_merge(self, audio_path, num_speakers, segments,
+                                hf_token=None, stereo_audio_path=None):
+        merged = [{"start": 0.0, "end": 2.0, "text": "regenerated", "speaker": "Speaker 1"}]
+        return merged, 1, "heuristic (pyannote failed)", "401 Client Error"
+
+
+def test_rediarize_refuses_the_heuristic_rescue_and_keeps_existing_labels(client, db_session, tmp_path):
+    """Rediarize is the one call site that must NOT accept issue #121's
+    heuristic rescue. The transcript already has labels, possibly
+    hand-corrected, and accepting pause-gap guesses would clear the relabel
+    history and overwrite them under a "completed" badge. The job fails
+    instead, with the pyannote reason, and segments plus undo history survive
+    so Rerun can retry. Dropping the diarization_warning check in llm_jobs
+    makes this test see a completed job, no history, and "Speaker 1" labels
+    (mutation check)."""
+    from database import LlmJob, Transcript
+    user = _test_user(db_session)
+    audio = tmp_path / "a.mp3"
+    audio.write_bytes(b"fake")
+    t = _transcript(db_session, audio_path=str(audio))
+
+    r = client.post(f"/api/transcripts/{t.id}/segments/retag",
+                    json={"indices": [0], "speaker": "Bob"})
+    assert r.status_code == 200
+    before = list(db_session.query(Transcript).filter(Transcript.id == t.id).first().segments)
+
+    job = enqueue_llm_job(db_session, user.id, t.id, "rediarize", "", "")
+    job.status = "running"
+    db_session.commit()
+    factory = lambda: _NoCloseSession(db_session)
+    asyncio.run(run_llm_job(factory, job.id, transcription_service=None,
+                            diarization_service=_DegradedDiarizationService()))
+
+    db_session.expire_all()
+    job = db_session.query(LlmJob).filter(LlmJob.id == job.id).first()
+    t = db_session.query(Transcript).filter(Transcript.id == t.id).first()
+    assert job.status == "failed"
+    assert job.error is not None and "401" in job.error
+    # the user's corrections and their undo path are untouched
+    assert [s["speaker"] for s in t.segments] == [s["speaker"] for s in before]
+    assert (db_session.query(RelabelHistory)
+            .filter(RelabelHistory.transcript_id == t.id).count()) == 1
+
+
+def test_rediarize_clears_a_stale_degraded_note_on_success(client, db_session, tmp_path):
+    """A "Diarization degraded" note describes a condition a later successful
+    diarization has resolved, so it must not outlive it — otherwise the detail
+    view keeps reporting a fixed pyannote/token problem. Only that prefix is
+    cleared, never another failure's text."""
+    from database import Transcript
+    user = _test_user(db_session)
+    audio = tmp_path / "a.mp3"
+    audio.write_bytes(b"fake")
+    t = _transcript(db_session, audio_path=str(audio))
+    t.error = "Diarization degraded: pyannote failed (401 Client Error); used pause-gap heuristic"
+    db_session.commit()
+
+    job = enqueue_llm_job(db_session, user.id, t.id, "rediarize", "", "")
+    job.status = "running"
+    db_session.commit()
+    factory = lambda: _NoCloseSession(db_session)
+    asyncio.run(run_llm_job(factory, job.id, transcription_service=None,
+                            diarization_service=_FakeDiarizationService()))
+
+    db_session.expire_all()
+    assert db_session.query(Transcript).filter(Transcript.id == t.id).first().error is None

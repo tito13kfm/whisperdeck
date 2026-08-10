@@ -367,7 +367,7 @@ def test_run_llm_job_rediarize_merges_in_place_without_key(db_session, tmp_path)
         {"start": 0.5, "end": 1, "text": "b", "speaker": "SPEAKER_02"},
     ]
     fake_diar = AsyncMock()
-    fake_diar.diarize_and_merge = AsyncMock(return_value=(merged, 2, "pyannote"))
+    fake_diar.diarize_and_merge = AsyncMock(return_value=(merged, 2, "pyannote", None))
 
     factory = lambda: _NoCloseSession(db_session)
     asyncio.run(run_llm_job(factory, job.id, transcription_service=None,
@@ -443,7 +443,7 @@ def test_rediarize_cancel_during_diarize_skips_the_writes(db_session, tmp_path):
 
     async def diarize_then_cancel(*args, **kwargs):
         cancel_llm_job(db_session, user.id, job.id)
-        return (merged, 2, "pyannote")
+        return (merged, 2, "pyannote", None)
 
     fake_diar = AsyncMock()
     fake_diar.diarize_and_merge = diarize_then_cancel

@@ -22,6 +22,79 @@ class DiarizationResult:
     method: str = "none"
 
 
+class MissingTokenError(ValueError):
+    """pyannote requested but no HuggingFace token configured (issue #119)."""
+
+
+HF_TOKEN_HELP = (
+    "HuggingFace token required for pyannote speaker diarization. "
+    "Set it in Settings -> Service Panel or the HUGGINGFACE_TOKEN "
+    "environment variable."
+)
+# ASCII arrow on purpose: this string reaches print() on the queue worker,
+# and a cp1252 console (the Windows default) raises UnicodeEncodeError on
+# "→", turning a helpful message into a crash inside the failure path.
+
+
+def _error_text(exc: Exception) -> str:
+    """Never-empty description of a failure. str(exc) is "" for anything
+    raised with no args (MemoryError, bare asyncio.TimeoutError), and an
+    empty fallback_error is indistinguishable from no failure at all —
+    which would make the degradation silent, the exact thing issue #121
+    is about."""
+    return str(exc) or exc.__class__.__name__
+
+
+def degraded_error_text(fallback_error: str) -> str:
+    """One shared wording for the three call sites that persist a
+    pyannote-failed-but-heuristic-rescued warning (issue #121)."""
+    return (f"Diarization degraded: pyannote failed ({fallback_error}); "
+            f"used pause-gap heuristic")
+
+
+def resolve_hf_token(hf_token: Optional[str]) -> Optional[str]:
+    """This app's own token sources: the explicit setting, else the
+    HUGGINGFACE_TOKEN env var. Treats None, "" and whitespace alike — the
+    settings default is "" (services/settings.py), so an unset token arrives
+    as an empty string, never None.
+
+    Returns None when neither is set, and that None is meaningful: it is
+    handed to Model/Pipeline.from_pretrained unchanged so huggingface_hub
+    resolves its OWN credentials (a `huggingface-cli login` token file, the
+    HF_TOKEN / HUGGING_FACE_HUB_TOKEN variables) or serves an already-cached
+    model offline. Refusing to load without a token of ours would break every
+    install authenticated the standard HuggingFace way. Missing auth is
+    diagnosed after the fact instead, by as_missing_token_error()."""
+    return (hf_token or "").strip() or os.environ.get("HUGGINGFACE_TOKEN", "").strip() or None
+
+
+def as_missing_token_error(exc: Exception, token: Optional[str]) -> Exception:
+    """Translate a pyannote model-load failure into the actionable
+    MissingTokenError when no credential is configured anywhere (issue #119),
+    instead of letting pyannote's gated-model 401 traceback reach the user.
+
+    Returns the exception to raise — the original when it is not plausibly an
+    auth problem, so a missing torch or a corrupt cache still reports itself.
+    Also used by services/voice_id.py for its pyannote embedding backend."""
+    if isinstance(exc, (ImportError, MissingTokenError)):
+        return exc
+    if token or _hub_has_credentials():
+        return exc
+    return MissingTokenError(f"{HF_TOKEN_HELP} (load failed: {exc})")
+
+
+def _hub_has_credentials() -> bool:
+    """True when huggingface_hub can produce a token of its own (HF_TOKEN,
+    HUGGING_FACE_HUB_TOKEN, or ~/.cache/huggingface/token from a CLI login).
+    A machine with one of those is authenticated even though this app's own
+    setting is empty, so a failure there is not a missing-token problem."""
+    try:
+        from huggingface_hub import get_token
+        return bool((get_token() or "").strip())
+    except Exception:
+        return False
+
+
 class DiarizationService:
     """Speaker diarization using clustering heuristics or pyannote (optional).
 
@@ -55,33 +128,59 @@ class DiarizationService:
         segments: list[dict],
         hf_token: Optional[str] = None,
         stereo_audio_path: Optional[str] = None,
-    ) -> tuple[list[dict], int, str]:
+    ) -> tuple[list[dict], int, str, Optional[str]]:
         """Best-available diarization merged onto existing transcript
         segments: channel-aware live-stereo when a stereo copy exists and
         pyannote is installed, else pyannote on the mixed audio, else the
         pause-gap heuristic (which can't auto-detect, so it defaults to 2).
-        Returns (merged_segments, speaker_count, method).
-        Raises on failure — callers decide whether that's fatal."""
+
+        Returns (merged_segments, speaker_count, method, fallback_error).
+        fallback_error is non-None when pyannote was attempted and failed
+        but the heuristic rescued the run (issue #121) — callers surface it
+        so the degradation is never silent; `method` then reads
+        "heuristic (pyannote failed)" to distinguish rescue-heuristic from
+        heuristic-by-configuration in the DB and the UI sub-label.
+        Still raises if the heuristic itself fails — the issue-#120 hard
+        failure surfacing in callers stays live for that case."""
+        fallback_error: Optional[str] = None
+        result = None
         if stereo_audio_path and os.path.exists(stereo_audio_path) and self._check_pyannote():
             try:
                 result = await self.diarize_live_stereo(
                     stereo_audio_path, num_speakers=num_speakers, hf_token=hf_token
                 )
             except Exception as e:
-                print(f"[diarization] live-stereo path failed ({e}); falling back to mixed audio")
+                stereo_error = _error_text(e)
+                print(f"[diarization] live-stereo path failed ({stereo_error}); "
+                      f"falling back to mixed audio")
+                try:
+                    result = await self.diarize_pyannote(
+                        audio_path, num_speakers=num_speakers, hf_token=hf_token
+                    )
+                except Exception as e2:
+                    # Both tiers' reasons, not just the retry's: the stereo
+                    # failure is often the actionable one (dual-mono input),
+                    # and it is the only place it would ever be recorded.
+                    fallback_error = f"live-stereo: {stereo_error}; mixed: {_error_text(e2)}"
+        elif self._check_pyannote():
+            try:
                 result = await self.diarize_pyannote(
                     audio_path, num_speakers=num_speakers, hf_token=hf_token
                 )
-        elif self._check_pyannote():
-            result = await self.diarize_pyannote(
-                audio_path, num_speakers=num_speakers, hf_token=hf_token
-            )
-        else:
+            except Exception as e:
+                fallback_error = _error_text(e)
+        if result is None:
+            # pyannote not installed, or every pyannote tier failed.
+            if fallback_error:
+                print(f"[diarization] pyannote failed ({fallback_error}); "
+                      f"falling back to pause-gap heuristic")
             result = await self.diarize_heuristic(
                 audio_path, num_speakers=num_speakers or 2, segments=segments
             )
+        # 27 chars — fits the diarization_method String(32) column.
+        method = "heuristic (pyannote failed)" if fallback_error else result.method
         merged = await self.combine_with_transcript(result, segments)
-        return merged, result.speaker_count, result.method
+        return merged, result.speaker_count, method, fallback_error
 
     async def diarize_heuristic(
         self,
@@ -217,16 +316,24 @@ class DiarizationService:
         diarize_live_stereo, which never needs torch on the async side) is
         converted to a tensor here, keeping the torch dependency confined to
         this one method."""
+        # None here means "let huggingface_hub use its own credentials"; a
+        # load failure with no credential anywhere is translated into the
+        # actionable MissingTokenError below (issue #119).
+        token = resolve_hf_token(hf_token)
+
         import torch
         from pyannote.audio import Pipeline
 
         if not isinstance(waveform, torch.Tensor):
             waveform = torch.from_numpy(waveform)
 
-        pipeline = Pipeline.from_pretrained(
-            "pyannote/speaker-diarization-3.1",
-            token=hf_token or os.environ.get("HUGGINGFACE_TOKEN", None),
-        )
+        try:
+            pipeline = Pipeline.from_pretrained(
+                "pyannote/speaker-diarization-3.1",
+                token=token,
+            )
+        except Exception as e:
+            raise as_missing_token_error(e, token) from e
         output = pipeline({"waveform": waveform, "sample_rate": sample_rate}, num_speakers=num_speakers)
         return [
             DiarizationSegment(start=turn.start, end=turn.end, speaker=speaker)
@@ -249,7 +356,6 @@ class DiarizationService:
                 "pyannote.audio is not installed. "
                 "Install it with: pip install pyannote.audio torch"
             )
-
         def _run() -> list[DiarizationSegment]:
             import torch
             import soundfile as sf

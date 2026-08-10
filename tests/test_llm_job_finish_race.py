@@ -305,7 +305,7 @@ def test_rediarize_cancel_committed_from_another_connection_wins_the_race(db_ses
 
     class _FakeDiarizationService:
         async def diarize_and_merge(self, *args, **kwargs):
-            return new_segments, 1, "pyannote"
+            return new_segments, 1, "pyannote", None
 
     from services.relabel import clear_relabel_history as _real_clear
 
