@@ -37,9 +37,8 @@ from services.auth import (
     set_admin_status, get_all_users,
     set_device_token, revoke_device_token, get_user_by_device_token,
     registration_mode, generate_invite_token, get_valid_invite_token,
-    consume_invite_token, hash_invite_token,
+    consume_invite_token, mark_invite_used,
 )
-from database import InviteToken
 from services.settings import get_user_settings, update_user_settings
 from services.transcription import TranscriptionService
 from services.diarization import DiarizationService
@@ -601,14 +600,7 @@ async def register(request: Request, data: dict = Body(...), db: Session = Depen
         db.rollback()
         raise HTTPException(status_code=400, detail="Username already taken")
     if mode == "invite":
-        # Audit trail only; separate best-effort commit after the user
-        # exists so a failure here cannot strand a half-registered state.
-        row = db.query(InviteToken).filter(
-            InviteToken.token_hash == hash_invite_token(invite_token)
-        ).first()
-        if row:
-            row.used_by = user.id
-            db.commit()
+        mark_invite_used(db, invite_token, user.id)
     request.session["user_id"] = user.id
     rotate_csrf_token(request.session)
     return {"ok": True, "username": user.username}

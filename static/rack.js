@@ -1188,10 +1188,12 @@ async function submitAuth(ev) {
 async function logout() {
   stopBackgroundJobPoll();
   try { await api('/api/logout', { method: 'POST' }); } catch { /* session may be gone */ }
-  // Logout clears the whole session server-side, invalidating csrfToken too —
-  // refresh it so a subsequent login in this page session isn't rejected.
-  await refreshCsrfToken();
-  showLogin();
+  // Logout clears the whole session server-side, invalidating csrfToken too.
+  // checkAuth re-fetches /api/bootstrap: fresh CSRF token AND a fresh
+  // registration_mode latch (it may have changed since this tab booted,
+  // e.g. open at first boot, invite once a user exists), then shows the
+  // login page because user is null.
+  await checkAuth();
 }
 
 /* ══════════════════ dashboard (Monitor) ══════════════════ */

@@ -145,6 +145,10 @@ def registration_mode(db) -> str:
       invite from the Service panel instead of editing env vars.
     """
     env = os.environ.get("REGISTRATION_MODE", "").strip().lower()
+    if env == "open":
+        # Zero users would also resolve to open — skip the count on the
+        # bootstrap/register hot path when it can't change the answer.
+        return "open"
     if db.query(User).count() == 0:
         if env in ("invite", "closed"):
             print(f"[auth] REGISTRATION_MODE={env} ignored while no users exist — "
@@ -205,6 +209,23 @@ def consume_invite_token(db, token: str) -> bool:
         {"h": hash_invite_token(token), "now": utcnow()},
     )
     return res.rowcount == 1
+
+
+def mark_invite_used(db, token: str, user_id: int) -> None:
+    """Audit-trail backfill of used_by after a successful invite
+    registration. Genuinely best-effort: the registration has already
+    committed and the token is consumed, so a failure here (e.g. a lost
+    SQLite write lock) must not turn a successful registration into a 500."""
+    try:
+        row = db.query(InviteToken).filter(
+            InviteToken.token_hash == hash_invite_token(token)
+        ).first()
+        if row:
+            row.used_by = user_id
+            db.commit()
+    except Exception as e:
+        db.rollback()
+        print(f"[auth] invite used_by backfill failed (non-fatal): {e}")
 
 
 # ── Username Recovery ─────────────────────────────────────────────────────
