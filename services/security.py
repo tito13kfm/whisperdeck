@@ -55,9 +55,12 @@ class RateLimiter:
     (single-process only) — adequate for a self-hosted app.
     """
 
-    # Above this many keys, mutating calls first drop buckets whose entries
-    # have all expired. Bounds memory when an attacker controls the key
-    # (e.g. per-username login buckets, issue #124).
+    # Hard cap on tracked keys. Keys can embed attacker-chosen input (the
+    # per-attempt login buckets, issue #124), so this must be a real bound,
+    # not just a stale-sweep trigger: when the cap is exceeded the oldest
+    # buckets are dropped outright. Dropping rate-limit state fails open
+    # for the affected keys, which is the right failure mode here — memory
+    # safety of the whole app over strictness of one bucket.
     MAX_KEYS = 1024
     # Longest window any caller uses; entries older than this are dead
     # regardless of which limit their bucket belongs to.
@@ -66,48 +69,49 @@ class RateLimiter:
     def __init__(self):
         self._buckets: dict[str, list[float]] = {}
 
-    def _evict_stale(self) -> None:
+    def _enforce_cap(self) -> None:
         if len(self._buckets) <= self.MAX_KEYS:
             return
         cutoff = time.time() - self._MAX_WINDOW_SECONDS
         self._buckets = {
             k: v for k, v in self._buckets.items() if v and v[-1] > cutoff
         }
-
-    def check(self, key: str, max_requests: int = 10, window_seconds: int = 60) -> bool:
-        """Check if *key* is within rate limits. Returns True if allowed."""
-        self._evict_stale()
-        now = time.time()
-        bucket = self._buckets.get(key, [])
-        # Prune expired entries
-        cutoff = now - window_seconds
-        bucket = [t for t in bucket if t > cutoff]
-        if len(bucket) >= max_requests:
-            self._buckets[key] = bucket
-            return False
-        bucket.append(now)
-        self._buckets[key] = bucket
-        return True
+        if len(self._buckets) > self.MAX_KEYS:
+            # Still over after the stale sweep (flood of fresh keys):
+            # drop the oldest buckets to hold the bound. With the dict at
+            # cap this is a ~MAX_KEYS-item sort per over-cap insert —
+            # microseconds, and bounded by construction.
+            newest = sorted(
+                self._buckets.items(), key=lambda kv: kv[1][-1]
+            )[len(self._buckets) - self.MAX_KEYS:]
+            self._buckets = dict(newest)
 
     def peek(self, key: str, max_requests: int = 10, window_seconds: int = 60) -> bool:
-        """Like check(), but never records an attempt.
-
-        check() consumes a slot on every allowed call, which is wrong for
-        buckets that should only count *failures* (e.g. per-username login
-        throttling, where a run of successful logins must not lock the
-        account out). Callers pair peek() with an explicit record() on the
-        failure path.
-        """
+        """True if *key* has a slot free. Never records an attempt —
+        callers that should only count failures (per-attempt login buckets,
+        issue #124) pair this with record() on the failure path."""
         now = time.time()
         cutoff = now - window_seconds
         bucket = [t for t in self._buckets.get(key, []) if t > cutoff]
-        self._buckets[key] = bucket
+        if bucket:
+            self._buckets[key] = bucket
+        else:
+            self._buckets.pop(key, None)
         return len(bucket) < max_requests
 
     def record(self, key: str) -> None:
         """Record one attempt against *key* (companion to peek())."""
-        self._evict_stale()
+        self._enforce_cap()
         self._buckets.setdefault(key, []).append(time.time())
+
+    def check(self, key: str, max_requests: int = 10, window_seconds: int = 60) -> bool:
+        """Check if *key* is within rate limits, consuming a slot when
+        allowed. Composed from peek()+record() so there is exactly one
+        sliding-window implementation."""
+        if not self.peek(key, max_requests=max_requests, window_seconds=window_seconds):
+            return False
+        self.record(key)
+        return True
 
 
 # Singleton — shared across all requests
