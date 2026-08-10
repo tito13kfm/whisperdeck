@@ -266,11 +266,27 @@ async function api(path, opts = {}) {
     try { data = await res.json(); } catch { /* non-JSON */ }
     if (!res.ok) {
       const detail = data && (data.detail || data.error) ? (data.detail || data.error) : ('HTTP ' + res.status);
-      throw new Error(typeof detail === 'string' ? detail : JSON.stringify(detail));
+      const err = new Error(typeof detail === 'string' ? detail : JSON.stringify(detail));
+      err.status = res.status;
+      throw err;
     }
     return data;
   } finally {
     setInFlight(-1);
+  }
+}
+
+// A 409 from a job action means the row was mid-write when we asked (issue
+// #391); the action did not happen and is safe to retry once the worker's
+// transaction commits; a second 409 falls through to the caller's normal
+// error toast, whose message (the backend detail) already tells the user
+// to retry.
+async function apiRetry409(path, opts = {}) {
+  try { return await api(path, opts); }
+  catch (err) {
+    if (err.status !== 409) throw err;
+    await new Promise(r => setTimeout(r, 600));
+    return api(path, opts);
   }
 }
 
@@ -3589,8 +3605,8 @@ async function loadQueue(opts = {}) {
     if (act === 'open') { navigate('detail', tid); return; }
     withBusy(b, async () => {
       try {
-        if (act === 'j-cancel') { await api('/api/jobs/' + jid + '/cancel', { method: 'POST' }); toast('Job cancelled', 'info'); }
-        if (act === 'j-rerun') { await api('/api/jobs/' + jid + '/rerun', { method: 'POST' }); toast('Job requeued', 'info'); }
+        if (act === 'j-cancel') { await apiRetry409('/api/jobs/' + jid + '/cancel', { method: 'POST' }); toast('Job cancelled', 'info'); }
+        if (act === 'j-rerun') { await apiRetry409('/api/jobs/' + jid + '/rerun', { method: 'POST' }); toast('Job requeued', 'info'); }
         if (act === 't-cancel') { await api('/api/transcripts/' + tid + '/cancel', { method: 'POST' }); toast('Cancelled — resumable later', 'info'); }
         if (act === 't-resume') { const r = await api('/api/transcripts/' + tid + '/resume', { method: 'POST' }); toast('Resumed ' + r.resumed + ' sections', 'info'); }
         if (act === 't-retry') { const r = await api('/api/transcripts/' + tid + '/retry-failed-chunks', { method: 'POST' }); toast('Retrying ' + r.retried + ' sections', 'info'); }
