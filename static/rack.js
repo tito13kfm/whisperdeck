@@ -872,12 +872,20 @@ function showLogin() {
   if (videoFloating) closeVideoDock();
   $('page-login').style.display = 'flex';
   $('app-shell').style.display = 'none';
-  // Registration-mode chrome (issue #395): the server enforces the gate;
-  // this mirrors it so a closed instance never offers a dead register form.
-  // Covers first paint AND re-shows after logout (mode latched by checkAuth).
-  const regClosed = S.registrationMode === 'closed';
-  $('auth-toggle').style.display = regClosed ? 'none' : '';
-  if (regClosed && S.authMode === 'register') toggleAuthMode(); // snap back to sign-in
+  // Re-sync on every show: the latched mode can change between paints
+  // (e.g. 'open' at first boot, 'invite' after the first registration).
+  syncRegistrationChrome();
+}
+
+/* Registration-mode chrome (issue #395): the server enforces the gate; this
+   mirrors it so a closed instance never offers a dead register form and an
+   invite instance always shows the invite field in register mode. Called
+   from showLogin (first paint, logout re-show) and toggleAuthMode. */
+function syncRegistrationChrome() {
+  const closed = S.registrationMode === 'closed';
+  $('auth-toggle').style.display = closed ? 'none' : '';
+  if (closed && S.authMode === 'register') { toggleAuthMode(); return; } // snap back; toggle re-syncs
+  $('auth-invite-wrap').style.display = (S.authMode === 'register' && S.registrationMode === 'invite') ? '' : 'none';
 }
 function showApp() {
   $('page-login').style.display = 'none';
@@ -1017,9 +1025,8 @@ function toggleAuthMode() {
   $('auth-req-hint').style.display = S.authMode === 'register' ? '' : 'none';
   $('auth-req-hint').textContent = S.authMode === 'register' ? passwordHintText() : '';
   $('auth-pass').autocomplete = S.authMode === 'register' ? 'new-password' : 'current-password';
-  // Invite field shares the server's predicate: register mode + invite mode.
-  $('auth-invite-wrap').style.display = (S.authMode === 'register' && S.registrationMode === 'invite') ? '' : 'none';
   if (S.authMode === 'login') { $('auth-pass-confirm').value = ''; $('auth-invite').value = ''; }
+  syncRegistrationChrome();
 }
 
 
