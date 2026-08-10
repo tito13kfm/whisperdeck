@@ -9,6 +9,8 @@ it, the runner re-reads it between batches).
 import asyncio
 import datetime
 
+from sqlalchemy import func
+
 from database import LlmJob, Transcript, VoiceProfile, utcnow_naive
 from services.audio_prep import extract_clips_concat
 from services.queue import MAX_ATTEMPTS, _retry_eligible
@@ -132,6 +134,12 @@ def reset_stuck_llm_jobs(db) -> int:
     AUTO_RETRY_KINDS) — never straight back to 'pending'. Mirrors
     reset_stuck_transcription_jobs' identical reasoning for TranscriptionJob."""
     stuck = db.query(LlmJob).filter(LlmJob.status == "running").all()
+    # The only status writer that does NOT need _transition's compare-and-set:
+    # this runs inside lifespan startup (app.py, before llm_worker_loop is
+    # spawned), so there is no worker, no cancel endpoint and no retry sweep to
+    # race with — every "running" row it sees belongs to the process that died.
+    # Exempt by lifecycle, not by luck; if it ever moves later in startup it
+    # needs the same treatment as the others.
     for job in stuck:
         job.status = "failed"
         job.error = "Interrupted by server restart"
@@ -312,11 +320,21 @@ def cancel_llm_job(db, user_id: int, job_id: int) -> LlmJob:
     if job.status not in ACTIVE_STATUSES:
         raise ValueError(f"Cannot cancel a job with status '{job.status}'")
     # pending dies instantly; a running correction notices between batches.
-    job.status = "cancelled"
-    job.progress_done = 0
-    job.progress_total = 0
-    job.updated_at = utcnow_naive()
+    #
+    # The check above is a courtesy, not the guard — it gives the common case a
+    # clear message, but a job can finish between it and the write below. That
+    # window used to let a stale cancel overwrite a job that had already
+    # completed, which is worse than a failed cancel: the results stayed on
+    # disk while the row claimed the user had called the run off. The
+    # compare-and-set is the real guard, and losing it means the job genuinely
+    # finished first, so report that rather than rewriting history.
+    if not _transition(db, job.id, "cancelled", expect=ACTIVE_STATUSES,
+                       progress_done=0, progress_total=0):
+        db.rollback()
+        db.refresh(job)
+        raise ValueError(f"Cannot cancel a job with status '{job.status}'")
     db.commit()
+    db.refresh(job)
     return job
 
 
@@ -329,6 +347,39 @@ def rerun_llm_job(db, user_id: int, job_id: int) -> LlmJob:
     return enqueue_llm_job(db, user_id, job.transcript_id, job.kind, job.provider, job.model)
 
 
+def _transition(db, job_id: int, new_status: str, *, expect: tuple[str, ...], **fields) -> bool:
+    """Compare-and-set on `LlmJob.status`. True when this call made the move.
+
+    Every status transition on an LlmJob is a race. The worker claims and
+    finishes, the cancel endpoint cancels, the retry sweep resurrects, and any
+    two of them can be in flight against the same row at once. So none of them
+    may read the status and then write it: whichever committed second silently
+    overwrote the other, and the loser left no trace.
+
+    Two rounds of review on PR #389 each found a separate instance of exactly
+    that shape — first the terminal claim here in `_finish`, then
+    `cancel_llm_job` — which is why this is now one primitive they all go
+    through rather than a conditional bolted onto whichever one was reported.
+    A caller that reads a status and writes it without coming through here is
+    reintroducing the bug.
+
+    Emits a single `UPDATE ... WHERE id = ? AND status IN (...)`, which is
+    atomic against a concurrent writer: it takes sqlite's write lock, so either
+    it matches and the other writer serializes after our commit, or the other
+    writer already committed, the row no longer matches `expect`, and this
+    returns False with nothing written.
+
+    Autoflush means the caller's own pending writes flush into this same
+    transaction, so a caller that rolls back on False rolls those back too.
+    """
+    values = {"status": new_status, "updated_at": utcnow_naive(), **fields}
+    return bool(
+        db.query(LlmJob)
+        .filter(LlmJob.id == job_id, LlmJob.status.in_(expect))
+        .update(values, synchronize_session=False)
+    )
+
+
 def _finish(db, job: LlmJob, status: str, error: str | None = None) -> bool:
     """Claim a terminal state — unless a cancel raced in, which always wins.
 
@@ -336,34 +387,14 @@ def _finish(db, job: LlmJob, status: str, error: str | None = None) -> bool:
     cancel got there first. On False the session has been rolled back: whatever
     the caller left pending is gone and must not be committed.
 
-    The claim is a conditional UPDATE, not the read-then-write this used to be.
-    Read-then-write left a window a cancel could land in (found reviewing PR
-    #389): the check read `status`, the caller committed its dependent writes
-    some statements later, and a cancel committing in between was neither seen
-    by the check nor prevented by the commit. The job came out cancelled with
-    its results persisted anyway — a relabelled transcript, a stored
-    result_json, a summary the user had already called off.
-
-    Filtering on ACTIVE_STATUSES is what closes it, because the UPDATE and the
-    caller's pending writes are then one transaction. Either the row is still
-    active, the UPDATE takes the write lock, and a concurrent cancel serializes
-    after our commit (finding a terminal row and cancelling nothing); or the
-    cancel already committed, the UPDATE matches no row, and the whole batch
-    rolls back together. There is no ordering left where half of it lands.
-
-    This only covers what the caller still has pending. A write some service
-    already committed on its own (correction's `corrected_text`, inside
+    Callers must leave their dependent writes pending rather than committing
+    them first, which is what makes the rollback meaningful: the writes and the
+    transition then land or die together. A write some service already
+    committed on its own (correction's `corrected_text`, inside
     correct_transcript) is durable before this runs and no transition here can
     take it back.
     """
-    claimed = (
-        db.query(LlmJob)
-        .filter(LlmJob.id == job.id, LlmJob.status.in_(ACTIVE_STATUSES))
-        .update(
-            {"status": status, "error": error, "updated_at": utcnow_naive()},
-            synchronize_session=False,
-        )
-    )
+    claimed = _transition(db, job.id, status, expect=ACTIVE_STATUSES, error=error)
     if not claimed:
         db.rollback()
         db.refresh(job)
@@ -998,8 +1029,11 @@ async def llm_worker_tick(SessionLocal, transcription_service, diarization_servi
                 # transcript concurrently. Leave it failed; it's still
                 # manually rerunnable if the fresh sibling later fails too.
                 continue
-            job.status = "pending"
-            job.error = None
+            # Same compare-and-set discipline as _finish and cancel_llm_job: a
+            # cancel or a manual rerun landing between the query above and this
+            # write would otherwise be overwritten, resurrecting a job the user
+            # had just cancelled.
+            _transition(db, job.id, "pending", expect=("failed",), error=None)
         db.commit()
 
         claimed = []
@@ -1017,12 +1051,19 @@ async def llm_worker_tick(SessionLocal, transcription_service, diarization_servi
             )
         if not claimed:
             return
-        for job in claimed:
-            job.status = "running"
-            job.attempts = (job.attempts or 0) + 1
-            job.updated_at = utcnow_naive()
+        # Compare-and-set per row, and only run what we actually claimed. A
+        # cancel landing between the pending query above and this write used to
+        # be overwritten, which ran a job the user had already cancelled — the
+        # opposite of "pending dies instantly". A row we lose is simply dropped
+        # from this tick.
+        job_ids = [
+            job.id for job in claimed
+            if _transition(db, job.id, "running", expect=("pending",),
+                           attempts=func.coalesce(LlmJob.attempts, 0) + 1)
+        ]
         db.commit()  # claim lands before any await — same invariant as the chunk queue
-        job_ids = [job.id for job in claimed]
+        if not job_ids:
+            return
     finally:
         db.close()
 

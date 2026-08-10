@@ -11,12 +11,17 @@ caller's still-pending dependent writes commit -- or roll back -- as one
 transaction. There is no ordering left where half of it lands.
 """
 import asyncio
+import datetime
 from unittest.mock import patch
 
+import pytest
 from sqlalchemy import text
 
-from database import LlmJob, RelabelHistory, Transcript, User, VoiceProfile
-from services.llm_jobs import _finish, enqueue_llm_job, run_llm_job
+from database import LlmJob, RelabelHistory, Transcript, User, VoiceProfile, utcnow_naive as _real_utcnow_naive
+from services.llm_jobs import (
+    _finish, cancel_llm_job, enqueue_llm_job, get_active_job as _real_get_active_job,
+    llm_worker_tick, run_llm_job,
+)
 from services.voice_id import voice_id_service
 
 
@@ -131,6 +136,19 @@ def _cancel_from_another_connection(engine, job_id):
         conn.execute(text(
             "UPDATE llm_jobs SET status='cancelled', progress_done=0, progress_total=0 WHERE id=:i"
         ), {"i": job_id})
+        conn.commit()
+
+
+def _complete_from_another_connection(engine, job_id):
+    """Same shape as _cancel_from_another_connection above, landing a
+    genuine completion (non-null result_json, non-zero progress) instead of
+    a cancel -- used by the cancel_llm_job race test below, where the
+    competing writer is a finish, not a cancel."""
+    with engine.connect() as conn:
+        conn.execute(text(
+            "UPDATE llm_jobs SET status='completed', result_json=:r, "
+            "progress_done=5, progress_total=5 WHERE id=:i"
+        ), {"i": job_id, "r": '{"corrected_text": "already done"}'})
         conn.commit()
 
 
@@ -305,3 +323,176 @@ def test_rediarize_cancel_committed_from_another_connection_wins_the_race(db_ses
     assert job.status == "cancelled"
     assert job.result_json is None
     assert t.segments == original_segments
+
+
+# ── D: the other three status writers _transition now guards ──────────────
+#
+# Two rounds of audit on PR #389 each found a read-then-write race on
+# LlmJob.status: round 1 in _finish (pinned by the tests above), round 2 in
+# cancel_llm_job. Rather than patch cancel_llm_job alone, every status
+# transition moved onto _transition (services/llm_jobs.py), and a sweep
+# found two more instances the audit hadn't reached: the retry sweep and the
+# claim loop inside llm_worker_tick. These three tests pin those three
+# sites the same way the tests above pin _finish -- a competing transition
+# committed from a genuinely separate connection, landed inside the window
+# between the read and the write.
+
+
+def test_cancel_loses_the_race_to_a_completion_from_another_connection(db_session):
+    """The round-2 audit finding: cancel_llm_job's own courtesy check
+    (`if job.status not in ACTIVE_STATUSES`) reads the status, but the write
+    that follows -- the _transition call -- is several lines later. A job
+    that completes in that window used to have its 'completed' status and
+    results silently overwritten by a stale cancel, which is worse than a
+    failed cancel: the results stayed on disk while the row claimed the run
+    had been called off.
+
+    Injection point: `_transition` builds its `values` dict with
+    `utcnow_naive()` before issuing its `UPDATE ... WHERE status IN (...)`,
+    and cancel_llm_job reaches `_transition` through the module namespace --
+    so patching `services.llm_jobs.utcnow_naive` intercepts that call. The
+    courtesy check above never calls utcnow_naive, so this lands the
+    competing commit after the check has already passed and immediately
+    before the CAS write actually executes -- squarely inside the window.
+    Confirmed by the assertions below: if the commit had landed outside the
+    window, the CAS would already have claimed 'cancelled' and the row
+    would come back cancelled with progress zeroed, not completed with
+    results intact.
+    """
+    user = _user(db_session, "canceler")
+    t = Transcript(user_id=user.id, title="d", filename="d.mp3", status="completed", full_text="x")
+    db_session.add(t)
+    db_session.commit()
+    job = enqueue_llm_job(db_session, user.id, t.id, "correction", "groq", "m")
+    job.status = "running"
+    job.progress_done = 3
+    job.progress_total = 5
+    db_session.commit()
+
+    engine = db_session.get_bind()
+    fired = {"done": False}
+
+    def hook_utcnow_naive():
+        if not fired["done"]:
+            fired["done"] = True
+            _complete_from_another_connection(engine, job.id)
+        return _real_utcnow_naive()
+
+    with patch("services.llm_jobs.utcnow_naive", side_effect=hook_utcnow_naive):
+        with pytest.raises(ValueError) as exc_info:
+            cancel_llm_job(db_session, user.id, job.id)
+
+    assert "completed" in str(exc_info.value)
+    db_session.refresh(job)
+    assert job.status == "completed"
+    assert job.result_json == {"corrected_text": "already done"}
+    assert job.progress_total == 5
+
+
+def test_claim_loop_loses_the_race_to_a_cancel(db_session):
+    """A pending job cancelled between the claim loop's pending query and
+    its CAS write must not be claimed and run -- 'pending dies instantly'
+    (cancel_llm_job's own comment) has to hold even when the worker's claim
+    query already saw it as pending a moment earlier.
+
+    Injection point: same trick as the cancel-vs-completion test above.
+    _transition's `values` dict build calls `utcnow_naive()` right before
+    the claim loop's CAS UPDATE executes -- patching
+    `services.llm_jobs.utcnow_naive` lands the competing cancel there,
+    after the pending query already built `claimed` and before the write.
+    This also holds for the *old*, pre-fix claim loop (the one the mutation
+    check below restores): its per-job body ends with
+    `job.updated_at = utcnow_naive()`, so the same hook lands inside that
+    version's window too, immediately before its trailing `db.commit()`
+    flushes the stale claim over the top of the outside cancel.
+    """
+    user = _user(db_session, "claimer")
+    t = Transcript(user_id=user.id, title="d", filename="d.mp3", status="completed", full_text="x")
+    db_session.add(t)
+    db_session.commit()
+    job = enqueue_llm_job(db_session, user.id, t.id, "correction", "groq", "m")
+    assert job.status == "pending"
+
+    engine = db_session.get_bind()
+    fired = {"done": False}
+
+    def hook_utcnow_naive():
+        if not fired["done"]:
+            fired["done"] = True
+            _cancel_from_another_connection(engine, job.id)
+        return _real_utcnow_naive()
+
+    run_calls = []
+
+    async def fake_run_llm_job(SessionLocal, jid, *args, **kwargs):
+        run_calls.append(jid)
+
+    factory = lambda: _NoCloseSession(db_session)
+    with patch("services.llm_jobs.utcnow_naive", side_effect=hook_utcnow_naive), \
+         patch("services.llm_jobs.run_llm_job", fake_run_llm_job):
+        asyncio.run(llm_worker_tick(factory, transcription_service=None))
+
+    db_session.refresh(job)
+    assert job.status == "cancelled"
+    assert job.attempts == 0  # the lost CAS must not have incremented it
+    assert job.id not in run_calls  # never dispatched to run_llm_job
+
+
+def test_retry_sweep_loses_the_race_to_a_cancel(db_session):
+    """A failed, retry-eligible job cancelled between the resurrection
+    sweep's query and its CAS write must not come back as 'pending' -- a
+    cancel is supposed to be the last word on a job, not something a stale
+    retry can steamroll on the next tick.
+
+    This job is built to genuinely qualify for the sweep: attempts=1 (>=1,
+    and < MAX_ATTEMPTS), kind='correction' (in AUTO_RETRY_KINDS),
+    dismissed=False (the default), and updated_at pushed back 1000s, well
+    past the 10s backoff _retry_eligible computes for attempts=1. The
+    positive control that this exact shape resurrects when nothing races it
+    already exists --
+    tests/test_llm_jobs.py::test_worker_tick_resurrects_failed_job_past_backoff_window
+    uses the identical construction (attempts=1, kind='correction', backoff
+    elapsed) and drives it all the way to 'completed' with a mocked provider
+    call. Not duplicated here, to keep this test about the race rather than
+    re-proving the eligibility rules.
+
+    Injection point: the sweep loop calls `get_active_job(...)` immediately
+    before its `_transition(...)` write (guarding against a manual rerun
+    already covering this transcript+kind) -- and that call is untouched by
+    the mutation check below, which only replaces the `_transition(...)`
+    line itself with a raw `job.status = "pending"; job.error = None`. So
+    patching `services.llm_jobs.get_active_job` lands the competing cancel
+    inside the window for *both* the fixed and the pre-fix code, unlike
+    hooking utcnow_naive here: the pre-fix line for this call site (per the
+    mutation spec) never calls utcnow_naive, so that hook would silently
+    fail to fire under the mutation and the test would go red for the wrong
+    reason. get_active_job's call site is shared by both versions, so the
+    race lands identically either way.
+    """
+    user = _user(db_session, "sweeper")
+    t = Transcript(user_id=user.id, title="d", filename="d.mp3", status="completed", full_text="x")
+    db_session.add(t)
+    db_session.commit()
+    job = enqueue_llm_job(db_session, user.id, t.id, "correction", "groq", "m")
+    job.status = "failed"
+    job.attempts = 1
+    job.error = "transient network blip"
+    job.updated_at = _real_utcnow_naive() - datetime.timedelta(seconds=1000)
+    db_session.commit()
+
+    engine = db_session.get_bind()
+    fired = {"done": False}
+
+    def hook_get_active_job(db, transcript_id, kind):
+        if not fired["done"] and transcript_id == t.id and kind == "correction":
+            fired["done"] = True
+            _cancel_from_another_connection(engine, job.id)
+        return _real_get_active_job(db, transcript_id, kind)
+
+    factory = lambda: _NoCloseSession(db_session)
+    with patch("services.llm_jobs.get_active_job", hook_get_active_job):
+        asyncio.run(llm_worker_tick(factory, transcription_service=None))
+
+    db_session.refresh(job)
+    assert job.status == "cancelled"
+    assert job.error == "transient network blip"  # not cleared by the lost retry
