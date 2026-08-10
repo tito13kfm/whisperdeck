@@ -22,9 +22,18 @@ a real delay then needs to run without blocking Playwright's own sync-API
 driver thread, and neither a direct time.sleep() (blocks the whole driver,
 delaying the *second* navigate() call too) nor a background thread
 (route.continue_() called off Playwright's own thread silently hangs) is
-safe. Monkey-patching the page's global api() to hand back promises the
+safe. Monkey-patching the page's global fetch() to hand back promises the
 test resolves itself sidesteps all of that and is exactly as deterministic
 as the assertion needs to be.
+
+Patch window.fetch, not window.api: static/rack.js is bundled by esbuild
+into an IIFE, and its bootstrap does `Object.assign(window, { api, ... })`
+once at load time as a value copy — internal code calls the bare `api`
+identifier, which resolves to rack.js's own closure-local binding, not to
+`window.api`. Reassigning window.api after load therefore never intercepts
+anything rack.js calls. `fetch` is never declared locally in rack.js, so it
+stays a free variable resolved against the real global on every call,
+which is what makes patching window.fetch actually take effect.
 """
 import http.cookiejar
 import json
@@ -98,24 +107,25 @@ def test_rapid_clicks_show_last_clicked_even_when_first_response_is_slow(page, r
 
     a_id, b_id = _make_two_transcripts(username)
 
-    # Trap api() calls for single-transcript fetches so the test controls
+    # Trap fetch() calls for single-transcript fetches so the test controls
     # exactly when each one resolves, instead of relying on real network
-    # delay (see module docstring for why that approach doesn't work here).
+    # delay (see module docstring for why that approach doesn't work here,
+    # and why this patches window.fetch rather than window.api).
     page.evaluate("""() => {
-        window.__origApi = window.api;
+        window.__origFetch = window.fetch;
         window.__pending = {};
-        window.api = function(url, opts) {
+        window.fetch = function(url, opts) {
             if (/\\/api\\/transcripts\\/\\d+$/.test(url)) {
                 return new Promise((resolve, reject) => {
                     window.__pending[url] = { resolve, reject };
                 });
             }
-            return window.__origApi(url, opts);
+            return window.__origFetch(url, opts);
         };
     }""")
 
     # Click A, then click B — both loadTranscriptDetail() calls start and
-    # both hang on their trapped api() promise.
+    # both hang on their trapped fetch() promise.
     page.evaluate(f"() => navigate('detail', {a_id})")
     page.wait_for_timeout(50)
     page.evaluate(f"() => navigate('detail', {b_id})")
@@ -123,14 +133,16 @@ def test_rapid_clicks_show_last_clicked_even_when_first_response_is_slow(page, r
 
     # Resolve B (clicked last) first, then A (clicked first) — simulating
     # A's response arriving after B's, the exact race the issue reports.
+    # Resolving with the real Response object (unconsumed body) lets api()'s
+    # own res.json()/res.ok/res.status handling run unchanged.
     page.evaluate(f"""async () => {{
-        const bData = await window.__origApi('/api/transcripts/{b_id}');
-        window.__pending['/api/transcripts/{b_id}'].resolve(bData);
+        const bRes = await window.__origFetch('/api/transcripts/{b_id}');
+        window.__pending['/api/transcripts/{b_id}'].resolve(bRes);
     }}""")
     page.wait_for_timeout(200)
     page.evaluate(f"""async () => {{
-        const aData = await window.__origApi('/api/transcripts/{a_id}');
-        window.__pending['/api/transcripts/{a_id}'].resolve(aData);
+        const aRes = await window.__origFetch('/api/transcripts/{a_id}');
+        window.__pending['/api/transcripts/{a_id}'].resolve(aRes);
     }}""")
     page.wait_for_timeout(500)
 
