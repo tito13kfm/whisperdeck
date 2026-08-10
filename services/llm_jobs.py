@@ -329,18 +329,55 @@ def rerun_llm_job(db, user_id: int, job_id: int) -> LlmJob:
     return enqueue_llm_job(db, user_id, job.transcript_id, job.kind, job.provider, job.model)
 
 
-def _finish(db, job: LlmJob, status: str, error: str | None = None) -> None:
-    """Set a terminal state — unless a cancel raced in, which always wins."""
-    db.refresh(job)
-    if job.status == "cancelled":
-        job.progress_done = 0
-        job.progress_total = 0
-        db.commit()
-        return
-    job.status = status
-    job.error = error
-    job.updated_at = utcnow_naive()
+def _finish(db, job: LlmJob, status: str, error: str | None = None) -> bool:
+    """Claim a terminal state — unless a cancel raced in, which always wins.
+
+    Returns True when this call is what set the terminal state, False when a
+    cancel got there first. On False the session has been rolled back: whatever
+    the caller left pending is gone and must not be committed.
+
+    The claim is a conditional UPDATE, not the read-then-write this used to be.
+    Read-then-write left a window a cancel could land in (found reviewing PR
+    #389): the check read `status`, the caller committed its dependent writes
+    some statements later, and a cancel committing in between was neither seen
+    by the check nor prevented by the commit. The job came out cancelled with
+    its results persisted anyway — a relabelled transcript, a stored
+    result_json, a summary the user had already called off.
+
+    Filtering on ACTIVE_STATUSES is what closes it, because the UPDATE and the
+    caller's pending writes are then one transaction. Either the row is still
+    active, the UPDATE takes the write lock, and a concurrent cancel serializes
+    after our commit (finding a terminal row and cancelling nothing); or the
+    cancel already committed, the UPDATE matches no row, and the whole batch
+    rolls back together. There is no ordering left where half of it lands.
+
+    This only covers what the caller still has pending. A write some service
+    already committed on its own (correction's `corrected_text`, inside
+    correct_transcript) is durable before this runs and no transition here can
+    take it back.
+    """
+    claimed = (
+        db.query(LlmJob)
+        .filter(LlmJob.id == job.id, LlmJob.status.in_(ACTIVE_STATUSES))
+        .update(
+            {"status": status, "error": error, "updated_at": utcnow_naive()},
+            synchronize_session=False,
+        )
+    )
+    if not claimed:
+        db.rollback()
+        db.refresh(job)
+        if job.status == "cancelled":
+            job.progress_done = 0
+            job.progress_total = 0
+            db.commit()
+        return False
     db.commit()
+    # synchronize_session=False leaves the in-session object holding the old
+    # status, and callers read job.status straight after this (the correction
+    # branch gates its classification enqueue on it).
+    db.refresh(job)
+    return True
 
 
 async def run_llm_job(SessionLocal, job_id: int, transcription_service, diarization_service=None) -> None:
@@ -393,7 +430,6 @@ async def run_llm_job(SessionLocal, job_id: int, transcription_service, diarizat
             )
             if result == "ok":
                 job.result_json = {"corrected_text": transcript.corrected_text}
-                db.commit()
                 _finish(db, job, "completed")
                 # A cancel can race in between correct_transcript() returning
                 # and _finish() running — _finish() detects that and leaves
@@ -441,7 +477,6 @@ async def run_llm_job(SessionLocal, job_id: int, transcription_service, diarizat
                     "decisions": summary.decisions or [],
                 }
                 job.progress_done = 1
-                db.commit()
                 _finish(db, job, "completed")
             except Exception as e:
                 _finish(db, job, "failed", str(e))
@@ -460,7 +495,6 @@ async def run_llm_job(SessionLocal, job_id: int, transcription_service, diarizat
                 )
                 job.result_json = {"text": text}
                 job.progress_done = 1
-                db.commit()
                 _finish(db, job, "completed")
             except Exception as e:
                 _finish(db, job, "failed", str(e))
@@ -473,7 +507,6 @@ async def run_llm_job(SessionLocal, job_id: int, transcription_service, diarizat
             )
             job.result_json = {"format": label}
             job.progress_done = 1
-            db.commit()
             _finish(db, job, "completed")
         elif job.kind == "classify_pipeline":
             job.progress_total = 1
@@ -556,7 +589,6 @@ async def run_llm_job(SessionLocal, job_id: int, transcription_service, diarizat
                 db.add(TranscriptTag(transcript_id=transcript.id, tag=tag))
             job.result_json = {"tags": tags}
             job.progress_done = 1
-            db.commit()
             _finish(db, job, "completed")
         elif job.kind == "voice_note":
             # Two-call chain (classify → structure) inside one job. The
@@ -622,7 +654,6 @@ async def run_llm_job(SessionLocal, job_id: int, transcription_service, diarizat
                     "structured": result.get("structured", {}),
                 }
                 job.progress_done = 2
-                db.commit()
                 _finish(db, job, "completed")
             except Exception as e:
                 _finish(db, job, "failed", str(e))
@@ -664,7 +695,6 @@ async def run_llm_job(SessionLocal, job_id: int, transcription_service, diarizat
                     db.commit()
                 job.result_json = {"items": items}
                 job.progress_done = len(segments) + 1
-                db.commit()
                 _finish(db, job, "completed")
             except Exception as e:
                 _finish(db, job, "failed", str(e))
@@ -702,7 +732,6 @@ async def run_llm_job(SessionLocal, job_id: int, transcription_service, diarizat
                 transcript.updated_at = utcnow_naive()
                 job.progress_done = 1
                 job.result_json = {"segments": merged}
-                db.commit()
                 _finish(db, job, "completed")
             except Exception as e:
                 _finish(db, job, "failed", str(e))
@@ -860,7 +889,6 @@ async def run_llm_job(SessionLocal, job_id: int, transcription_service, diarizat
                     for name, sims in sorted(match_sims.items(), key=lambda kv: (-len(kv[1]), kv[0]))
                 ],
             }
-            db.commit()
             notes = []
             if skipped:
                 notes.append(f"{skipped} segment(s) skipped (extraction/embedding failed)")
@@ -944,7 +972,6 @@ async def run_assistant_job(db, job: LlmJob, api_key: str, provider_name: str, m
 
     job.result_json = {"user_request": user_request, **result}
     job.progress_done = job.progress_total
-    db.commit()
     _finish(db, job, "completed" if result.get("ok") else "failed", result.get("error"))
 
 
