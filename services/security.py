@@ -55,11 +55,28 @@ class RateLimiter:
     (single-process only) — adequate for a self-hosted app.
     """
 
+    # Above this many keys, mutating calls first drop buckets whose entries
+    # have all expired. Bounds memory when an attacker controls the key
+    # (e.g. per-username login buckets, issue #124).
+    MAX_KEYS = 1024
+    # Longest window any caller uses; entries older than this are dead
+    # regardless of which limit their bucket belongs to.
+    _MAX_WINDOW_SECONDS = 3600
+
     def __init__(self):
         self._buckets: dict[str, list[float]] = {}
 
+    def _evict_stale(self) -> None:
+        if len(self._buckets) <= self.MAX_KEYS:
+            return
+        cutoff = time.time() - self._MAX_WINDOW_SECONDS
+        self._buckets = {
+            k: v for k, v in self._buckets.items() if v and v[-1] > cutoff
+        }
+
     def check(self, key: str, max_requests: int = 10, window_seconds: int = 60) -> bool:
         """Check if *key* is within rate limits. Returns True if allowed."""
+        self._evict_stale()
         now = time.time()
         bucket = self._buckets.get(key, [])
         # Prune expired entries
@@ -71,6 +88,26 @@ class RateLimiter:
         bucket.append(now)
         self._buckets[key] = bucket
         return True
+
+    def peek(self, key: str, max_requests: int = 10, window_seconds: int = 60) -> bool:
+        """Like check(), but never records an attempt.
+
+        check() consumes a slot on every allowed call, which is wrong for
+        buckets that should only count *failures* (e.g. per-username login
+        throttling, where a run of successful logins must not lock the
+        account out). Callers pair peek() with an explicit record() on the
+        failure path.
+        """
+        now = time.time()
+        cutoff = now - window_seconds
+        bucket = [t for t in self._buckets.get(key, []) if t > cutoff]
+        self._buckets[key] = bucket
+        return len(bucket) < max_requests
+
+    def record(self, key: str) -> None:
+        """Record one attempt against *key* (companion to peek())."""
+        self._evict_stale()
+        self._buckets.setdefault(key, []).append(time.time())
 
 
 # Singleton — shared across all requests

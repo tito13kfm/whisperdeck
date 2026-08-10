@@ -137,12 +137,21 @@ finally:
 if migrated_tables:
     _migration_db = SessionLocal()
     try:
-        _fallback_user = get_or_create_fallback_user(_migration_db)
+        _fallback_user, _fallback_password = get_or_create_fallback_user(_migration_db)
         backfill_user_id(engine, migrated_tables, _fallback_user.id)
-        print(
-            f"[migration] assigned {len(migrated_tables)} pre-existing table(s) "
-            f"to fallback user 'local' (password: changeme — change it after logging in)"
-        )
+        if _fallback_password:
+            # Printed exactly once, at creation — the only place the
+            # plaintext ever appears (issue #302).
+            print(
+                f"[migration] assigned {len(migrated_tables)} pre-existing table(s) "
+                f"to fallback user 'local' (one-time password: {_fallback_password} "
+                f"— change it after logging in)"
+            )
+        else:
+            print(
+                f"[migration] assigned {len(migrated_tables)} pre-existing table(s) "
+                f"to existing fallback user 'local'"
+            )
     finally:
         _migration_db.close()
 
@@ -553,8 +562,17 @@ async def login(request: Request, data: dict = Body(...), db: Session = Depends(
         raise HTTPException(status_code=429, detail="Too many login attempts — try again later")
     username = (data.get("username") or "").strip()
     password = data.get("password") or ""
+    # Per-username bucket (issue #124): counts failures only, so successful
+    # logins never lock an account; peek() before authenticating so a full
+    # bucket 429s even for the correct password (no validity oracle).
+    # Unconditional — unlike the IP bucket, this protects the account, not
+    # the client, so it applies under TestClient too (tests clear buckets).
+    if username and not rate_limiter.peek(f"login-username:{username}", max_requests=5, window_seconds=300):
+        raise HTTPException(status_code=429, detail="Too many failed attempts for this account — try again later")
     user = authenticate_user(db, username, password)
     if not user:
+        if username:
+            rate_limiter.record(f"login-username:{username}")
         raise HTTPException(status_code=401, detail="Invalid username or password")
     request.session["user_id"] = user.id
     rotate_csrf_token(request.session)
