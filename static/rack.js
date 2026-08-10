@@ -186,10 +186,11 @@ function formatDur(sec) {
 
 // One predicate for both the per-line "?" marker and the detail header's
 // "N uncertain" count — a threshold tweak in one place must move both.
-const LOW_CONFIDENCE_THRESHOLD = 0.5;
-function isLowConfidence(sg) {
-  return sg.speaker_confidence != null && sg.speaker_confidence < LOW_CONFIDENCE_THRESHOLD;
-}
+// Lives in ./confidence.js (dependency-free, unit-tested in Node) and is
+// inlined into the bundle at build time, same as batch_aggregate.js below.
+// It excludes the -1 "user assigned this label by hand" sentinel that the
+// retag endpoint stamps (issue #305).
+const { isLowConfidence } = require('./confidence.js');
 
 function hashColor(name) {
   let h = 0;

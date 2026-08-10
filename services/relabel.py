@@ -16,6 +16,16 @@ MAX_HISTORY = 20
 # would for the same segment list.
 NON_SPEAKER_LABELS = frozenset({"unknown"})
 
+# Stamped into a segment's speaker_confidence by the manual retag endpoint
+# (issue #305): the user overrode the diarizer by hand, so the diarizer's
+# confidence in the label it lost no longer describes the line. Kept distinct
+# from both the diarizer's [0, 1] range and from None ("never diarized") so
+# the UI can tell "human said so" apart from "model was unsure". The frontend
+# twin lives in static/confidence.js (USER_ASSIGNED_CONFIDENCE) and excludes
+# this value from the "?" marker and the "N uncertain" count — change both
+# together.
+USER_ASSIGNED_CONFIDENCE = -1.0
+
 
 def count_distinct_speakers(segments) -> int:
     """Distinct real speaker labels in a persisted transcript.segments list.
@@ -46,10 +56,12 @@ def count_distinct_speakers(segments) -> int:
 def record_relabel(db, transcript, kind: str, changed: list[tuple[int, str]],
                    corrected_text_before: str | None = None, description: str = "") -> RelabelHistory | None:
     """changed: [(segment_index, old_speaker), ...] for every segment the
-    action rewrote. corrected_text_before: full before-image when the action
-    also rewrites corrected_text (renames); None otherwise. Renames are not
-    invertible by reverse transform (renaming A to an already-present B
-    merges them), hence the before-image.
+    action rewrote; append a third element (old speaker_confidence, None when
+    the segment had none) when the action also rewrites speaker_confidence
+    (the manual retag), so undo can restore it. corrected_text_before: full
+    before-image when the action also rewrites corrected_text (renames); None
+    otherwise. Renames are not invertible by reverse transform (renaming A to
+    an already-present B merges them), hence the before-image.
 
     Returns the new entry so callers that also rewrite corrected_text can
     stamp the after-image into inverse["corrected_text_after"] once the
@@ -62,7 +74,11 @@ def record_relabel(db, transcript, kind: str, changed: list[tuple[int, str]],
         transcript_id=transcript.id,
         kind=kind,
         inverse={
-            "segments": [{"index": i, "speaker": old} for i, old in changed],
+            "segments": [
+                {"index": c[0], "speaker": c[1],
+                 **({"speaker_confidence": c[2]} if len(c) > 2 else {})}
+                for c in changed
+            ],
             "corrected_text": corrected_text_before,
         },
         description=description[:255],

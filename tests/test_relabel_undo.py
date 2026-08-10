@@ -76,6 +76,45 @@ def test_retag_then_undo(client, db_session):
     assert [s["speaker"] for s in t2.segments] == ["SPEAKER_00", "SPEAKER_01", "SPEAKER_00"]
 
 
+def test_retag_then_undo_restores_confidence(client, db_session):
+    """Issue #305: retag stamps the user-assigned sentinel, so its inverse
+    patch must carry the pre-retag confidence — including "no key at all"
+    (restored as None, which the UI treats the same)."""
+    t = _transcript(db_session, segments=[
+        {"start": 0.0, "end": 2.0, "text": "hello there", "speaker": "SPEAKER_00", "speaker_confidence": 0.3},
+        {"start": 2.0, "end": 4.0, "text": "general kenobi", "speaker": "SPEAKER_01"},
+        {"start": 4.0, "end": 6.0, "text": "you are bold", "speaker": "SPEAKER_00", "speaker_confidence": 0.8},
+    ])
+    r = client.post(f"/api/transcripts/{t.id}/segments/retag",
+                    json={"indices": [0, 1], "speaker": "Bob"})
+    assert r.status_code == 200
+    r = client.post(f"/api/transcripts/{t.id}/relabel-undo")
+    assert r.status_code == 200
+    db_session.expire_all()
+    t2 = db_session.query(Transcript).filter(Transcript.id == t.id).first()
+    assert [s["speaker"] for s in t2.segments] == ["SPEAKER_00", "SPEAKER_01", "SPEAKER_00"]
+    assert t2.segments[0]["speaker_confidence"] == 0.3
+    assert t2.segments[1].get("speaker_confidence") is None
+    assert t2.segments[2]["speaker_confidence"] == 0.8
+
+
+def test_undo_of_legacy_history_leaves_confidence_alone(client, db_session):
+    """History rows recorded before issue #305 have no speaker_confidence in
+    their inverse patches; undoing one must restore only the label."""
+    from services.relabel import record_relabel
+    t = _transcript(db_session, segments=[
+        {"start": 0.0, "end": 2.0, "text": "hello there", "speaker": "Bob", "speaker_confidence": 0.7},
+    ])
+    record_relabel(db_session, t, "retag", [(0, "SPEAKER_00")], description="legacy")
+    db_session.commit()
+    r = client.post(f"/api/transcripts/{t.id}/relabel-undo")
+    assert r.status_code == 200
+    db_session.expire_all()
+    t2 = db_session.query(Transcript).filter(Transcript.id == t.id).first()
+    assert t2.segments[0]["speaker"] == "SPEAKER_00"
+    assert t2.segments[0]["speaker_confidence"] == 0.7
+
+
 def test_rename_merge_drops_speaker_count(client, db_session):
     """Issue #111: renaming SPEAKER_00 onto SPEAKER_01 (an already-present
     label) merges the two, so the distinct count must drop from 2 to 1."""

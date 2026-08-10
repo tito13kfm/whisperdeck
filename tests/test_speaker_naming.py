@@ -130,6 +130,42 @@ def test_retag_leaves_corrected_text_untouched(client, db_session):
     assert t2.corrected_text == corrected
 
 
+def test_retag_stamps_user_assigned_confidence(client, db_session):
+    """Issue #305: a manual retag overrides the diarizer, so the diarizer's
+    stale confidence must not survive on the corrected line (it kept the "?"
+    uncertainty marker on lines the user just fixed)."""
+    from services.relabel import USER_ASSIGNED_CONFIDENCE
+    t = _transcript(db_session, segments=[
+        {"start": 0.0, "end": 2.0, "text": "hello there", "speaker": "SPEAKER_00", "speaker_confidence": 0.3},
+        {"start": 2.0, "end": 4.0, "text": "general kenobi", "speaker": "SPEAKER_01", "speaker_confidence": 0.9},
+        {"start": 4.0, "end": 6.0, "text": "you are bold", "speaker": "SPEAKER_00", "speaker_confidence": 0.2},
+    ])
+    r = client.post(f"/api/transcripts/{t.id}/segments/retag",
+                    json={"indices": [0], "speaker": "Bob"})
+    assert r.status_code == 200
+    db_session.expire_all()
+    t2 = db_session.query(Transcript).filter(Transcript.id == t.id).first()
+    confs = [s["speaker_confidence"] for s in t2.segments]
+    # index 0 gets the sentinel; untouched lines keep the diarizer's numbers,
+    # including index 2 which shares the retagged line's original label
+    assert confs == [USER_ASSIGNED_CONFIDENCE, 0.9, 0.2]
+
+
+def test_retag_stamps_sentinel_even_without_prior_confidence(client, db_session):
+    """A never-diarized transcript has no speaker_confidence keys at all; a
+    retag still marks the line user-assigned rather than leaving it bare."""
+    from services.relabel import USER_ASSIGNED_CONFIDENCE
+    t = _transcript(db_session)
+    r = client.post(f"/api/transcripts/{t.id}/segments/retag",
+                    json={"indices": [1], "speaker": "Bob"})
+    assert r.status_code == 200
+    db_session.expire_all()
+    t2 = db_session.query(Transcript).filter(Transcript.id == t.id).first()
+    assert t2.segments[1]["speaker_confidence"] == USER_ASSIGNED_CONFIDENCE
+    assert "speaker_confidence" not in t2.segments[0]
+    assert "speaker_confidence" not in t2.segments[2]
+
+
 def test_retag_validation(client, db_session):
     t = _transcript(db_session)
     assert client.post(f"/api/transcripts/{t.id}/segments/retag",
