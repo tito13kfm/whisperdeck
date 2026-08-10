@@ -8,6 +8,7 @@ const S = {
   user: null,
   isAdmin: false,
   authMode: 'login',          // login | register
+  registrationMode: 'open',   // open | invite | closed — latched from /api/bootstrap (issue #395); server enforces, this only drives chrome
   passwordMinLength: 8,       // overridden from <meta name="wd-password-min-length"> at DOMContentLoaded
   detailId: null,
   detailTab: 'transcript',
@@ -871,6 +872,12 @@ function showLogin() {
   if (videoFloating) closeVideoDock();
   $('page-login').style.display = 'flex';
   $('app-shell').style.display = 'none';
+  // Registration-mode chrome (issue #395): the server enforces the gate;
+  // this mirrors it so a closed instance never offers a dead register form.
+  // Covers first paint AND re-shows after logout (mode latched by checkAuth).
+  const regClosed = S.registrationMode === 'closed';
+  $('auth-toggle').style.display = regClosed ? 'none' : '';
+  if (regClosed && S.authMode === 'register') toggleAuthMode(); // snap back to sign-in
 }
 function showApp() {
   $('page-login').style.display = 'none';
@@ -974,6 +981,7 @@ async function checkAuth() {
     csrfToken = body.csrf_token || null;
     S.user = body.user ? (body.user.username || null) : null;
     S.isAdmin = !!(body.user && body.user.is_admin);
+    S.registrationMode = body.registration_mode || 'open';
     S.exportDir = (body.settings && body.settings.export_directory) || '';
     if (S.user) $('rail-operator').textContent = 'Operator: ' + S.user + (S.isAdmin ? ' (admin)' : '');
     if (body.user) { showApp(); } else { showLogin(); }
@@ -1009,7 +1017,9 @@ function toggleAuthMode() {
   $('auth-req-hint').style.display = S.authMode === 'register' ? '' : 'none';
   $('auth-req-hint').textContent = S.authMode === 'register' ? passwordHintText() : '';
   $('auth-pass').autocomplete = S.authMode === 'register' ? 'new-password' : 'current-password';
-  if (S.authMode === 'login') { $('auth-pass-confirm').value = ''; }
+  // Invite field shares the server's predicate: register mode + invite mode.
+  $('auth-invite-wrap').style.display = (S.authMode === 'register' && S.registrationMode === 'invite') ? '' : 'none';
+  if (S.authMode === 'login') { $('auth-pass-confirm').value = ''; $('auth-invite').value = ''; }
 }
 
 
@@ -1072,6 +1082,31 @@ async function showGenerateResetCode() {
   $('fp-username').addEventListener('keydown', (e) => { if (e.key === 'Enter') guardedGenerate(); });
 }
 
+/* ── admin tool: mint a registration invite (Service Panel action, issue #395) ── */
+async function showGenerateInviteCode() {
+  openModal(`
+    <h2 class="modal-title">Generate invite code</h2>
+    <div style="font-size:13px;color:var(--label-dim);margin-bottom:14px">Mints a single-use registration invite. Share it out-of-band with the person you're inviting.</div>
+    <div id="iv-token-result" style="display:none;margin-bottom:14px;padding:12px;border:1px solid var(--nixie);border-radius:2px;background:var(--nixie-bg)">
+      <div style="font-family:var(--f-mono);font-size:10px;text-transform:uppercase;color:var(--label-dim);margin-bottom:6px">Invite code (valid 72 hours, single use)</div>
+      <div id="iv-token-text" style="font-family:var(--f-mono);font-size:12px;color:var(--nixie);word-break:break-all;text-shadow:0 0 4px rgba(255,138,61,0.4)"></div>
+      <div style="font-size:10px;color:var(--label-dim);margin-top:8px">They enter it in the "Invite code" field when registering.</div>
+    </div>
+    <div class="modal-actions">
+      <button id="iv-close" class="btn btn--ghost btn--sm">Close</button>
+      <button id="iv-generate" class="btn btn--amber btn--sm">Generate</button>
+    </div>`);
+  $('iv-close').addEventListener('click', closeModal);
+  const doGenerate = async () => {
+    try {
+      const r = await api('/api/admin/invites', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+      $('iv-token-result').style.display = 'block';
+      $('iv-token-text').textContent = r.invite_token;
+    } catch (e) { toast(e.message, 'error'); }
+  };
+  $('iv-generate').addEventListener('click', () => withBusy($('iv-generate'), doGenerate));
+}
+
 async function showResetCode() {
   openModal(`
     <h2 class="modal-title">Reset your password</h2>
@@ -1115,18 +1150,24 @@ async function submitAuth(ev) {
   const username = $('auth-user').value.trim();
   const password = $('auth-pass').value;
   if (!username || !password) { toast('Operator and password required', 'error'); return; }
+  const payload = { username, password };
   if (S.authMode === 'register') {
     const confirm = $('auth-pass-confirm').value;
     if (password !== confirm) { toast('Passwords do not match', 'error'); return; }
     const cv = clientValidatePassword(password);
     if (!cv.ok) { toast(cv.reason, 'error'); return; }
+    if (S.registrationMode === 'invite') {
+      const invite = $('auth-invite').value.trim();
+      if (!invite) { toast('An invite code is required to register', 'error'); return; }
+      payload.invite_token = invite;
+    }
   }
   return withBusy($('auth-submit'), async () => {
     try {
       await api('/api/' + S.authMode /* api-paths: /api/login /api/register */, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username, password }),
+        body: JSON.stringify(payload),
       });
       $('auth-led').classList.add('ok');
       await refreshCsrfToken();
@@ -6270,6 +6311,7 @@ async function loadSettingsPage() {
             <button id="export-dir-save" style="font-family:var(--f-cond);font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:0.03em;background:var(--input);border:1px solid var(--input-edge);color:var(--label);padding:6px 12px;border-radius:2px;cursor:pointer;white-space:nowrap">Save</button>
           </div>
           <div style="display:flex;align-items:center;justify-content:flex-end;gap:8px">
+            ${S.isAdmin ? `<button id="svc-invite-code" style="font-family:var(--f-cond);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:0.03em;background:var(--input);border:1px solid var(--amber);color:var(--amber);padding:7px 16px;border-radius:2px;cursor:pointer">Generate invite code</button>` : ''}
             ${S.isAdmin ? `<button id="svc-reset-code" style="font-family:var(--f-cond);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:0.03em;background:var(--input);border:1px solid var(--amber);color:var(--amber);padding:7px 16px;border-radius:2px;cursor:pointer">Generate reset code</button>` : ''}
             <button id="svc-logout" style="font-family:var(--f-cond);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:0.03em;background:var(--input);border:1px solid var(--red);color:var(--red);padding:7px 16px;border-radius:2px;cursor:pointer">Log out</button>
           </div>
@@ -6447,6 +6489,9 @@ async function loadSettingsPage() {
   // Admin-only reset-code generator — only exists when S.isAdmin is true
   const resetBtn = $('svc-reset-code');
   if (resetBtn) resetBtn.addEventListener('click', showGenerateResetCode);
+  // Admin-only registration invite generator (issue #395)
+  const inviteBtn = $('svc-invite-code');
+  if (inviteBtn) inviteBtn.addEventListener('click', showGenerateInviteCode);
 
   $('export-dir-save').addEventListener('click', (e) => withBusy(e.currentTarget, async () => {
     const val = $('export-dir-input').value.trim();

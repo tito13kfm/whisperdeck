@@ -36,7 +36,10 @@ from services.auth import (
     list_usernames, generate_reset_token, reset_password,
     set_admin_status, get_all_users,
     set_device_token, revoke_device_token, get_user_by_device_token,
+    registration_mode, generate_invite_token, get_valid_invite_token,
+    consume_invite_token, hash_invite_token,
 )
+from database import InviteToken
 from services.settings import get_user_settings, update_user_settings
 from services.transcription import TranscriptionService
 from services.diarization import DiarizationService
@@ -562,20 +565,50 @@ async def register(request: Request, data: dict = Body(...), db: Session = Depen
     password = data.get("password") or ""
     if not username or not password:
         raise HTTPException(status_code=400, detail="username and password are required")
+    # Registration gate (issue #395). Server-side by design — hiding the
+    # register form in the SPA is chrome, this check is the contract.
+    mode = registration_mode(db)
+    invite_token = (data.get("invite_token") or "").strip()
+    if mode == "closed":
+        raise HTTPException(status_code=403, detail="Registration is closed")
+    if mode == "invite":
+        if not invite_token:
+            raise HTTPException(status_code=400, detail="An invite token is required to register")
+        # Validity peek BEFORE username/password errors, mirroring the
+        # reset-password ordering convention.
+        if not get_valid_invite_token(db, invite_token):
+            raise HTTPException(status_code=400, detail="Invalid or expired invite token")
     if db.query(User).filter(User.username == username).first():
         raise HTTPException(status_code=400, detail="Username already taken")
     ok, reason = validate_password(password)
     if not ok:
         raise HTTPException(status_code=400, detail=reason)
+    if mode == "invite":
+        # CAS-consume immediately before create_user; a loser between the
+        # peek above and here gets the same message. Uncommitted until
+        # create_user's commit finalizes both atomically.
+        if not consume_invite_token(db, invite_token):
+            raise HTTPException(status_code=400, detail="Invalid or expired invite token")
     try:
         user = create_user(db, username, password)
     except IntegrityError:
         # Concurrent registrations can both pass the SELECT-then-INSERT
         # check above; the loser's commit hits users.username UNIQUE.
         # Rollback to keep the session usable, then return the same 400
-        # the synchronous path returns. Issue #125.
+        # the synchronous path returns. Issue #125. The rollback also
+        # un-consumes the invite token above — load-bearing, keep them in
+        # the same transaction.
         db.rollback()
         raise HTTPException(status_code=400, detail="Username already taken")
+    if mode == "invite":
+        # Audit trail only; separate best-effort commit after the user
+        # exists so a failure here cannot strand a half-registered state.
+        row = db.query(InviteToken).filter(
+            InviteToken.token_hash == hash_invite_token(invite_token)
+        ).first()
+        if row:
+            row.used_by = user.id
+            db.commit()
     request.session["user_id"] = user.id
     rotate_csrf_token(request.session)
     return {"ok": True, "username": user.username}
@@ -835,12 +868,13 @@ def _build_jobs_payload(db: Session, current_user: User, limit: int) -> dict:
 async def bootstrap(request: Request, db: Session = Depends(get_db)):
     """One-shot boot payload for the frontend's initial dashboard render.
 
-    Returns the CSRF token, the current user (or null if signed out), and
-    every piece of data the Monitor page needs on first paint: full status,
-    the five most recent transcripts, and the active jobs. Cuts the boot
-    waterfall from 4-5 sequential requests to one (issue #143). Resolves
-    the user from the session manually so the unauthenticated path returns
-    a clean shape instead of 401.
+    Returns the CSRF token, the current user (or null if signed out), the
+    registration mode (issue #395, top-level so anonymous callers get it),
+    and every piece of data the Monitor page needs on first paint: full
+    status, the five most recent transcripts, and the active jobs. Cuts the
+    boot waterfall from 4-5 sequential requests to one (issue #143).
+    Resolves the user from the session manually so the unauthenticated path
+    returns a clean shape instead of 401.
     """
     csrf = generate_csrf_token(request.session)
 
@@ -867,6 +901,10 @@ async def bootstrap(request: Request, db: Session = Depends(get_db)):
         "recent_transcripts": recents_payload,
         "jobs": jobs_payload,
         "settings": settings_payload,
+        # Top-level (not inside settings, which is None when signed out):
+        # the anonymous login screen derives register-form visibility from
+        # this, the same state the server enforces (issue #395).
+        "registration_mode": registration_mode(db),
     }
 
 
@@ -958,6 +996,23 @@ async def admin_promote(data: dict = Body(...), db: Session = Depends(get_db), c
     if not target:
         raise HTTPException(status_code=404, detail="User not found")
     return {"ok": True, "username": target.username, "is_admin": bool(target.is_admin)}
+
+
+@app.post("/api/admin/invites")
+async def admin_create_invite(request: Request, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    """Admin-only: mint a single-use registration invite token (issue #395).
+    The plaintext is returned once, same convention as /api/forgot-password;
+    only its hash is stored."""
+    if not current_user.is_admin:
+        raise HTTPException(status_code=403, detail="Administrator access required")
+    client_ip = request.client.host if request.client else None
+    if client_ip and not rate_limiter.check(f"invite-mint:{client_ip}", max_requests=10, window_seconds=60):
+        raise HTTPException(status_code=429, detail="Too many attempts — try again later")
+    minted = generate_invite_token(db, current_user)
+    if minted is None:
+        raise HTTPException(status_code=403, detail="Administrator access required")
+    token, expires_at = minted
+    return {"invite_token": token, "expires_at": expires_at.isoformat()}
 
 
 @app.post("/api/admin/demote")

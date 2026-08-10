@@ -52,6 +52,11 @@ if not _test_data_root or not _test_data_root.is_absolute():
 
 os.environ["WHISPERDECK_DATA_DIR"] = str(_test_data_root)
 
+# Registration gate (issue #395): once any user exists the mode defaults to
+# 'invite', which would 400 every helper that registers a second tokenless
+# user. The suite runs in 'open'; gate tests monkeypatch the env per-test.
+os.environ.setdefault("REGISTRATION_MODE", "open")
+
 import app as app_module
 from database import init_db
 from services.security import rate_limiter
