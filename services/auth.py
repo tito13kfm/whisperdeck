@@ -10,10 +10,14 @@ import hashlib
 import secrets
 from typing import Optional
 
-from database import User
+from sqlalchemy import text
+
+from database import InviteToken, User
 
 PBKDF2_ITERATIONS = 200_000
 RESET_TOKEN_TTL_HOURS = 1
+REGISTRATION_MODES = ("open", "invite", "closed")
+INVITE_TOKEN_TTL_HOURS = 72
 
 
 def hash_reset_token(token: str) -> str:
@@ -80,16 +84,21 @@ def get_user_by_device_token(db, token: str) -> Optional[User]:
 
 
 def create_user(db, username: str, password: str) -> User:
-    """Create a new user. The first user (empty table) is auto-admin."""
-    is_first = db.query(User).count() == 0
+    """Create a new user. The first user is auto-admin, elected by id == 1
+    *after* insert rather than by a pre-insert count: SQLite assigns rowids
+    under writer serialization, so concurrent first registrations cannot
+    both win (issue #301). Deleting every user and re-registering still
+    re-elects an admin (rowid restarts at 1 without AUTOINCREMENT)."""
     salt = generate_salt()
     user = User(
         username=username,
         password_salt=salt,
         password_hash=hash_password(password, salt),
-        is_admin=is_first,
+        is_admin=False,
     )
     db.add(user)
+    db.flush()  # assigns user.id inside the open transaction
+    user.is_admin = user.id == 1
     db.commit()
     return user
 
@@ -116,6 +125,107 @@ def get_or_create_fallback_user(db) -> tuple[User, Optional[str]]:
         return user, None
     password = secrets.token_urlsafe(16)
     return create_user(db, "local", password), password
+
+
+# ── Registration Gate (issue #395) ─────────────────────────────────────────
+
+
+def registration_mode(db) -> str:
+    """Current registration mode: 'open' | 'invite' | 'closed'.
+
+    Read at call time (same convention as password_min_length) so env
+    changes and test monkeypatching take effect without restart.
+
+    - Zero users: always 'open' — the first (admin) registration must be
+      possible, or the install is bricked. A conflicting env value is
+      ignored with a warning.
+    - Otherwise: REGISTRATION_MODE env var if valid, else 'invite'.
+      'invite' with no outstanding tokens rejects everything, exactly like
+      'closed', but lets an admin onboard someone at runtime by minting an
+      invite from the Service panel instead of editing env vars.
+    """
+    env = os.environ.get("REGISTRATION_MODE", "").strip().lower()
+    if env == "open":
+        # Zero users would also resolve to open — skip the count on the
+        # bootstrap/register hot path when it can't change the answer.
+        return "open"
+    if db.query(User).count() == 0:
+        if env in ("invite", "closed"):
+            print(f"[auth] REGISTRATION_MODE={env} ignored while no users exist — "
+                  "the first registration must stay open")
+        return "open"
+    if env in REGISTRATION_MODES:
+        return env
+    return "invite"
+
+
+def hash_invite_token(token: str) -> str:
+    """Same construction and rationale as hash_reset_token: the token is
+    256-bit random, so plain SHA-256 (not PBKDF2) is enough to make a DB
+    leak useless within the TTL."""
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def generate_invite_token(db, admin_user: User) -> Optional[tuple[str, datetime.datetime]]:
+    """Admin mints a single-use registration invite. Returns
+    (plaintext_token, expires_at) for one-time display, or None if the
+    caller is not an admin."""
+    if not admin_user.is_admin:
+        return None
+    token = secrets.token_hex(32)
+    expires_at = utcnow() + datetime.timedelta(hours=INVITE_TOKEN_TTL_HOURS)
+    db.add(InviteToken(
+        token_hash=hash_invite_token(token),
+        created_by=admin_user.id,
+        expires_at=expires_at,
+    ))
+    db.commit()
+    return token, expires_at
+
+
+def get_valid_invite_token(db, token: str) -> Optional[InviteToken]:
+    """Non-consuming validity peek (unused, unexpired). Lets the route
+    report a bad token before password-policy errors, mirroring the
+    reset-password ordering convention."""
+    return db.query(InviteToken).filter(
+        InviteToken.token_hash == hash_invite_token(token),
+        InviteToken.used_at.is_(None),
+        InviteToken.expires_at > utcnow(),
+    ).first()
+
+
+def consume_invite_token(db, token: str) -> bool:
+    """Compare-and-set consumption: marks the token used iff it is still
+    unused and unexpired. Executes but does NOT commit — the caller's
+    create_user() commit finalizes both atomically, so a registration that
+    fails after this call (e.g. username UNIQUE collision → rollback) does
+    not burn the token. Under SQLite's writer serialization the loser of a
+    concurrent race matches zero rows and gets False."""
+    res = db.execute(
+        text(
+            "UPDATE invite_tokens SET used_at = :now "
+            "WHERE token_hash = :h AND used_at IS NULL AND expires_at > :now"
+        ),
+        {"h": hash_invite_token(token), "now": utcnow()},
+    )
+    return res.rowcount == 1
+
+
+def mark_invite_used(db, token: str, user_id: int) -> None:
+    """Audit-trail backfill of used_by after a successful invite
+    registration. Genuinely best-effort: the registration has already
+    committed and the token is consumed, so a failure here (e.g. a lost
+    SQLite write lock) must not turn a successful registration into a 500."""
+    try:
+        row = db.query(InviteToken).filter(
+            InviteToken.token_hash == hash_invite_token(token)
+        ).first()
+        if row:
+            row.used_by = user_id
+            db.commit()
+    except Exception as e:
+        db.rollback()
+        print(f"[auth] invite used_by backfill failed (non-fatal): {e}")
 
 
 # ── Username Recovery ─────────────────────────────────────────────────────

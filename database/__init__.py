@@ -30,6 +30,22 @@ class User(Base):
     created_at = Column(DateTime, default=utcnow_naive)
 
 
+class InviteToken(Base):
+    """Single-use registration invite (issue #395). The plaintext token is
+    shown to the minting admin exactly once; only its SHA-256 is stored,
+    same rationale as User.reset_token. Consumed by a compare-and-set
+    UPDATE on used_at so two concurrent registrations cannot share one."""
+    __tablename__ = "invite_tokens"
+
+    id = Column(Integer, primary_key=True)
+    token_hash = Column(String(128), unique=True, nullable=False)
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime, default=utcnow_naive)
+    expires_at = Column(DateTime, nullable=False)
+    used_at = Column(DateTime, nullable=True)
+    used_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+
+
 class Transcript(Base):
     __tablename__ = "transcripts"
 
@@ -712,6 +728,19 @@ def init_db(db_path: str = "data/whisperdesk.db") -> tuple:
         ))
         conn.execute(text(
             "CREATE INDEX IF NOT EXISTS ix_transcript_tags_tag ON transcript_tags (tag)"
+        ))
+        # Brand-new table for issue #395, same fresh-vs-predating split as
+        # transcript_tags above.
+        conn.execute(text(
+            "CREATE TABLE IF NOT EXISTS invite_tokens ("
+            "id INTEGER PRIMARY KEY, "
+            "token_hash VARCHAR(128) NOT NULL UNIQUE, "
+            "created_by INTEGER REFERENCES users(id), "
+            "created_at DATETIME, "
+            "expires_at DATETIME NOT NULL, "
+            "used_at DATETIME, "
+            "used_by INTEGER REFERENCES users(id)"
+            ")"
         ))
         # FTS5 full-text search over transcript content (issue #108).
         # FTS5 full-text search over transcript content (issue #108).
