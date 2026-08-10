@@ -9,6 +9,8 @@ it, the runner re-reads it between batches).
 import asyncio
 import datetime
 
+from sqlalchemy import func
+
 from database import LlmJob, Transcript, VoiceProfile, utcnow_naive
 from services.audio_prep import extract_clips_concat
 from services.queue import MAX_ATTEMPTS, _retry_eligible
@@ -44,9 +46,14 @@ CPU_KINDS = ("rediarize", "voice_match")
 _MAX_CONCURRENT_IO_JOBS = 2
 _MAX_CONCURRENT_CPU_JOBS = 1
 
+# One threshold for both the identify_detailed call and the similarity summary
+# reported back to the user — the reported min/mean/max are only interpretable
+# against the cutoff they were selected by, so the two must never drift apart.
+VOICE_MATCH_THRESHOLD = 0.65
 
-def serialize_llm_job(job: LlmJob) -> dict:
-    return {
+
+def serialize_llm_job(job: LlmJob, include_result: bool = False) -> dict:
+    data = {
         "id": job.id,
         "kind": job.kind,
         "transcript_id": job.transcript_id,
@@ -68,6 +75,14 @@ def serialize_llm_job(job: LlmJob) -> dict:
         "created_at": job.created_at.isoformat() if job.created_at else None,
         "updated_at": job.updated_at.isoformat() if job.updated_at else None,
     }
+    # Opt-in, not default: this serializer also backs /api/jobs and every
+    # transcript row in the list payload, and result_json for correction /
+    # summary / voice_dump carries whole documents. Only callers that need a
+    # small, renderable result (voice_match's similarity summary) ask for it.
+    # Key name matches the /runs/{kind} endpoint's own "result" field.
+    if include_result:
+        data["result"] = job.result_json
+    return data
 
 
 def get_active_job(db, transcript_id: int | None, kind: str) -> LlmJob | None:
@@ -119,6 +134,12 @@ def reset_stuck_llm_jobs(db) -> int:
     AUTO_RETRY_KINDS) — never straight back to 'pending'. Mirrors
     reset_stuck_transcription_jobs' identical reasoning for TranscriptionJob."""
     stuck = db.query(LlmJob).filter(LlmJob.status == "running").all()
+    # The only status writer that does NOT need _transition's compare-and-set:
+    # this runs inside lifespan startup (app.py, before llm_worker_loop is
+    # spawned), so there is no worker, no cancel endpoint and no retry sweep to
+    # race with — every "running" row it sees belongs to the process that died.
+    # Exempt by lifecycle, not by luck; if it ever moves later in startup it
+    # needs the same treatment as the others.
     for job in stuck:
         job.status = "failed"
         job.error = "Interrupted by server restart"
@@ -299,11 +320,21 @@ def cancel_llm_job(db, user_id: int, job_id: int) -> LlmJob:
     if job.status not in ACTIVE_STATUSES:
         raise ValueError(f"Cannot cancel a job with status '{job.status}'")
     # pending dies instantly; a running correction notices between batches.
-    job.status = "cancelled"
-    job.progress_done = 0
-    job.progress_total = 0
-    job.updated_at = utcnow_naive()
+    #
+    # The check above is a courtesy, not the guard — it gives the common case a
+    # clear message, but a job can finish between it and the write below. That
+    # window used to let a stale cancel overwrite a job that had already
+    # completed, which is worse than a failed cancel: the results stayed on
+    # disk while the row claimed the user had called the run off. The
+    # compare-and-set is the real guard, and losing it means the job genuinely
+    # finished first, so report that rather than rewriting history.
+    if not _transition(db, job.id, "cancelled", expect=ACTIVE_STATUSES,
+                       progress_done=0, progress_total=0):
+        db.rollback()
+        db.refresh(job)
+        raise ValueError(f"Cannot cancel a job with status '{job.status}'")
     db.commit()
+    db.refresh(job)
     return job
 
 
@@ -316,18 +347,68 @@ def rerun_llm_job(db, user_id: int, job_id: int) -> LlmJob:
     return enqueue_llm_job(db, user_id, job.transcript_id, job.kind, job.provider, job.model)
 
 
-def _finish(db, job: LlmJob, status: str, error: str | None = None) -> None:
-    """Set a terminal state — unless a cancel raced in, which always wins."""
-    db.refresh(job)
-    if job.status == "cancelled":
-        job.progress_done = 0
-        job.progress_total = 0
-        db.commit()
-        return
-    job.status = status
-    job.error = error
-    job.updated_at = utcnow_naive()
+def _transition(db, job_id: int, new_status: str, *, expect: tuple[str, ...], **fields) -> bool:
+    """Compare-and-set on `LlmJob.status`. True when this call made the move.
+
+    Every status transition on an LlmJob is a race. The worker claims and
+    finishes, the cancel endpoint cancels, the retry sweep resurrects, and any
+    two of them can be in flight against the same row at once. So none of them
+    may read the status and then write it: whichever committed second silently
+    overwrote the other, and the loser left no trace.
+
+    Two rounds of review on PR #389 each found a separate instance of exactly
+    that shape — first the terminal claim here in `_finish`, then
+    `cancel_llm_job` — which is why this is now one primitive they all go
+    through rather than a conditional bolted onto whichever one was reported.
+    A caller that reads a status and writes it without coming through here is
+    reintroducing the bug.
+
+    Emits a single `UPDATE ... WHERE id = ? AND status IN (...)`, which is
+    atomic against a concurrent writer: it takes sqlite's write lock, so either
+    it matches and the other writer serializes after our commit, or the other
+    writer already committed, the row no longer matches `expect`, and this
+    returns False with nothing written.
+
+    Autoflush means the caller's own pending writes flush into this same
+    transaction, so a caller that rolls back on False rolls those back too.
+    """
+    values = {"status": new_status, "updated_at": utcnow_naive(), **fields}
+    return bool(
+        db.query(LlmJob)
+        .filter(LlmJob.id == job_id, LlmJob.status.in_(expect))
+        .update(values, synchronize_session=False)
+    )
+
+
+def _finish(db, job: LlmJob, status: str, error: str | None = None) -> bool:
+    """Claim a terminal state — unless a cancel raced in, which always wins.
+
+    Returns True when this call is what set the terminal state, False when a
+    cancel got there first. On False the session has been rolled back: whatever
+    the caller left pending is gone and must not be committed.
+
+    Callers must leave their dependent writes pending rather than committing
+    them first, which is what makes the rollback meaningful: the writes and the
+    transition then land or die together. A write some service already
+    committed on its own (correction's `corrected_text`, inside
+    correct_transcript) is durable before this runs and no transition here can
+    take it back.
+    """
+    claimed = _transition(db, job.id, status, expect=ACTIVE_STATUSES, error=error)
+    if not claimed:
+        db.rollback()
+        db.refresh(job)
+        if job.status == "cancelled":
+            job.progress_done = 0
+            job.progress_total = 0
+            db.commit()
+        return False
     db.commit()
+    # synchronize_session=False leaves the in-session object holding the old
+    # status, and callers read job.status straight after this (the correction
+    # branch gates its classification enqueue on it).
+    db.refresh(job)
+    return True
 
 
 async def run_llm_job(SessionLocal, job_id: int, transcription_service, diarization_service=None) -> None:
@@ -380,7 +461,6 @@ async def run_llm_job(SessionLocal, job_id: int, transcription_service, diarizat
             )
             if result == "ok":
                 job.result_json = {"corrected_text": transcript.corrected_text}
-                db.commit()
                 _finish(db, job, "completed")
                 # A cancel can race in between correct_transcript() returning
                 # and _finish() running — _finish() detects that and leaves
@@ -428,7 +508,6 @@ async def run_llm_job(SessionLocal, job_id: int, transcription_service, diarizat
                     "decisions": summary.decisions or [],
                 }
                 job.progress_done = 1
-                db.commit()
                 _finish(db, job, "completed")
             except Exception as e:
                 _finish(db, job, "failed", str(e))
@@ -447,7 +526,6 @@ async def run_llm_job(SessionLocal, job_id: int, transcription_service, diarizat
                 )
                 job.result_json = {"text": text}
                 job.progress_done = 1
-                db.commit()
                 _finish(db, job, "completed")
             except Exception as e:
                 _finish(db, job, "failed", str(e))
@@ -460,7 +538,6 @@ async def run_llm_job(SessionLocal, job_id: int, transcription_service, diarizat
             )
             job.result_json = {"format": label}
             job.progress_done = 1
-            db.commit()
             _finish(db, job, "completed")
         elif job.kind == "classify_pipeline":
             job.progress_total = 1
@@ -543,7 +620,6 @@ async def run_llm_job(SessionLocal, job_id: int, transcription_service, diarizat
                 db.add(TranscriptTag(transcript_id=transcript.id, tag=tag))
             job.result_json = {"tags": tags}
             job.progress_done = 1
-            db.commit()
             _finish(db, job, "completed")
         elif job.kind == "voice_note":
             # Two-call chain (classify → structure) inside one job. The
@@ -609,7 +685,6 @@ async def run_llm_job(SessionLocal, job_id: int, transcription_service, diarizat
                     "structured": result.get("structured", {}),
                 }
                 job.progress_done = 2
-                db.commit()
                 _finish(db, job, "completed")
             except Exception as e:
                 _finish(db, job, "failed", str(e))
@@ -651,7 +726,6 @@ async def run_llm_job(SessionLocal, job_id: int, transcription_service, diarizat
                     db.commit()
                 job.result_json = {"items": items}
                 job.progress_done = len(segments) + 1
-                db.commit()
                 _finish(db, job, "completed")
             except Exception as e:
                 _finish(db, job, "failed", str(e))
@@ -689,7 +763,6 @@ async def run_llm_job(SessionLocal, job_id: int, transcription_service, diarizat
                 transcript.updated_at = utcnow_naive()
                 job.progress_done = 1
                 job.result_json = {"segments": merged}
-                db.commit()
                 _finish(db, job, "completed")
             except Exception as e:
                 _finish(db, job, "failed", str(e))
@@ -741,6 +814,11 @@ async def run_llm_job(SessionLocal, job_id: int, transcription_service, diarizat
             degraded = 0
             unmatchable = 0
             changed = []
+            # Per matched profile name -> every similarity that picked it, kept
+            # so the job can report how confident each relabel was. Without it
+            # an over-matching backend that collapses distinct speakers onto one
+            # profile is indistinguishable from a good match (issue #311).
+            match_sims: dict[str, list[float]] = {}
             new_segments = list(segments)
             for i, seg in enumerate(segments):
                 # cancel_llm_job only flips the row, it can't signal this
@@ -767,7 +845,8 @@ async def run_llm_job(SessionLocal, job_id: int, transcription_service, diarizat
                         # sqlite is opened with check_same_thread=False.
                         loop = asyncio.get_event_loop()
                         def _identify():
-                            return voice_id_service.identify_detailed(db, job.user_id, clip_path, threshold=0.65,
+                            return voice_id_service.identify_detailed(db, job.user_id, clip_path,
+                                                                      threshold=VOICE_MATCH_THRESHOLD,
                                                                       hf_token=user_settings.get("hf_token"))
                         outcome = await loop.run_in_executor(None, _identify)
                     finally:
@@ -789,6 +868,9 @@ async def run_llm_job(SessionLocal, job_id: int, transcription_service, diarizat
                     if matches:
                         changed.append((i, seg.get("speaker") or ""))
                         new_segments[i] = {**seg, "speaker": matches[0]["name"]}
+                        match_sims.setdefault(matches[0]["name"], []).append(
+                            float(matches[0]["similarity"])
+                        )
                 job.progress_done = i + 1
                 db.commit()
             # The loop guard can't catch a cancel that lands during the final
@@ -812,7 +894,32 @@ async def run_llm_job(SessionLocal, job_id: int, transcription_service, diarizat
             # (count rises). Recount, never decrement.
             transcript.speaker_count = count_distinct_speakers(new_segments)
             transcript.updated_at = utcnow_naive()
-            db.commit()
+            # Persisted here rather than immediately before _finish: _finish
+            # opens with db.refresh(job), which would reload the row and discard
+            # an uncommitted result_json. The existing commit below covers it.
+            # min matters more than mean for the failure this reports: one
+            # profile matching many lines at barely-over-threshold is what an
+            # over-matching backend looks like.
+            job.result_json = {
+                "threshold": VOICE_MATCH_THRESHOLD,
+                "considered": len(segments),
+                "matched": len(changed),
+                "skipped": skipped,
+                "degraded": degraded,
+                "unmatchable": unmatchable,
+                "speakers": [
+                    {
+                        "name": name,
+                        "segments": len(sims),
+                        "min_similarity": round(min(sims), 4),
+                        "mean_similarity": round(sum(sims) / len(sims), 4),
+                        "max_similarity": round(max(sims), 4),
+                    }
+                    # Most-matched first, name as tiebreak so the order is
+                    # stable across runs rather than dict-insertion order.
+                    for name, sims in sorted(match_sims.items(), key=lambda kv: (-len(kv[1]), kv[0]))
+                ],
+            }
             notes = []
             if skipped:
                 notes.append(f"{skipped} segment(s) skipped (extraction/embedding failed)")
@@ -896,7 +1003,6 @@ async def run_assistant_job(db, job: LlmJob, api_key: str, provider_name: str, m
 
     job.result_json = {"user_request": user_request, **result}
     job.progress_done = job.progress_total
-    db.commit()
     _finish(db, job, "completed" if result.get("ok") else "failed", result.get("error"))
 
 
@@ -923,8 +1029,11 @@ async def llm_worker_tick(SessionLocal, transcription_service, diarization_servi
                 # transcript concurrently. Leave it failed; it's still
                 # manually rerunnable if the fresh sibling later fails too.
                 continue
-            job.status = "pending"
-            job.error = None
+            # Same compare-and-set discipline as _finish and cancel_llm_job: a
+            # cancel or a manual rerun landing between the query above and this
+            # write would otherwise be overwritten, resurrecting a job the user
+            # had just cancelled.
+            _transition(db, job.id, "pending", expect=("failed",), error=None)
         db.commit()
 
         claimed = []
@@ -942,12 +1051,19 @@ async def llm_worker_tick(SessionLocal, transcription_service, diarization_servi
             )
         if not claimed:
             return
-        for job in claimed:
-            job.status = "running"
-            job.attempts = (job.attempts or 0) + 1
-            job.updated_at = utcnow_naive()
+        # Compare-and-set per row, and only run what we actually claimed. A
+        # cancel landing between the pending query above and this write used to
+        # be overwritten, which ran a job the user had already cancelled — the
+        # opposite of "pending dies instantly". A row we lose is simply dropped
+        # from this tick.
+        job_ids = [
+            job.id for job in claimed
+            if _transition(db, job.id, "running", expect=("pending",),
+                           attempts=func.coalesce(LlmJob.attempts, 0) + 1)
+        ]
         db.commit()  # claim lands before any await — same invariant as the chunk queue
-        job_ids = [job.id for job in claimed]
+        if not job_ids:
+            return
     finally:
         db.close()
 
