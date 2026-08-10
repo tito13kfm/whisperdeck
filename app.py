@@ -2734,7 +2734,13 @@ async def diarize_audio(
 ):
     """Run speaker diarization on an audio file."""
     file_ext = os.path.splitext(file.filename or "audio.mp3")[1] or ".mp3"
-    safe_name = f"diar_{utcnow_naive().strftime('%Y%m%d_%H%M%S')}{file_ext}"
+    # A per-second timestamp alone collides: two callers (or one retrying
+    # client) in the same second wrote the same path, and the first request
+    # then diarized the second one's audio. The suffix makes each request's
+    # scratch file its own, and the finally below deletes it — nothing here
+    # is referenced by a transcript row, so keeping it only fills the disk.
+    safe_name = (f"diar_{utcnow_naive().strftime('%Y%m%d_%H%M%S')}"
+                 f"_{secrets.token_hex(4)}{file_ext}")
     save_path = UPLOAD_DIR / safe_name
 
     with open(save_path, "wb") as f:
@@ -2768,6 +2774,13 @@ async def diarize_audio(
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        # Same discipline as the enroll endpoint: this upload is scratch, no
+        # row points at it once the response is built.
+        try:
+            os.remove(save_path)
+        except OSError:
+            pass
 
 
 # ── Summarization ────────────────────────────────────────────────────────

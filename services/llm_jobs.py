@@ -751,6 +751,16 @@ async def run_llm_job(SessionLocal, job_id: int, transcription_service, diarizat
                 db.refresh(job)
                 if job.status == "cancelled":
                     return
+                if diarization_warning:
+                    # Rediarize is the one call site that must NOT accept the
+                    # heuristic rescue (issue #121): this transcript already
+                    # has labels, possibly hand-corrected, and continuing would
+                    # clear the relabel history and overwrite them with pause-gap
+                    # guesses under a "completed" badge. Fail instead, leaving
+                    # segments and undo history untouched so Rerun can retry
+                    # once the pyannote problem is fixed.
+                    _finish(db, job, "failed", f"Re-diarize failed: {diarization_warning}")
+                    return
                 # Rediarize regenerates the segmentation wholesale, so every
                 # stored inverse patch (index-based, recorded against the OLD
                 # segments) is now meaningless — undo would stamp stale labels
@@ -760,19 +770,16 @@ async def run_llm_job(SessionLocal, job_id: int, transcription_service, diarizat
                 transcript.segments = merged
                 transcript.speaker_count = count_distinct_speakers(merged)
                 transcript.diarization_method = diarization_method
-                degraded_note = None
-                if diarization_warning:
-                    # pyannote failed, heuristic rescued (issue #121). The
-                    # job completes — labels exist — with the reason on both
-                    # the transcript and the job (job.error doubles as a
-                    # success-path notes field on the Queue screen).
-                    from services.diarization import degraded_error_text
-                    degraded_note = degraded_error_text(diarization_warning)
-                    transcript.error = degraded_note
+                # This diarization succeeded, so a "Diarization degraded"
+                # note left by an earlier degraded run describes a condition
+                # that no longer holds — clear only that, never someone
+                # else's failure text.
+                if (transcript.error or "").startswith("Diarization degraded"):
+                    transcript.error = None
                 transcript.updated_at = utcnow_naive()
                 job.progress_done = 1
                 job.result_json = {"segments": merged}
-                _finish(db, job, "completed", degraded_note)
+                _finish(db, job, "completed")
             except Exception as e:
                 _finish(db, job, "failed", str(e))
         elif job.kind == "voice_match":

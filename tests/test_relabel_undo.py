@@ -402,18 +402,25 @@ class _DegradedDiarizationService:
         return merged, 1, "heuristic (pyannote failed)", "401 Client Error"
 
 
-def test_rediarize_fallback_completes_job_with_degraded_note(client, db_session, tmp_path):
-    """Issue #121 on the rediarize path: pyannote failed but the heuristic
-    rescued the run. The job completes (labels exist) with the degradation
-    recorded on job.error — which doubles as a success-path notes field on
-    the Queue screen — and on transcript.error. Dropping the
-    diarization_warning handling in llm_jobs leaves both None (mutation
-    check)."""
+def test_rediarize_refuses_the_heuristic_rescue_and_keeps_existing_labels(client, db_session, tmp_path):
+    """Rediarize is the one call site that must NOT accept issue #121's
+    heuristic rescue. The transcript already has labels, possibly
+    hand-corrected, and accepting pause-gap guesses would clear the relabel
+    history and overwrite them under a "completed" badge. The job fails
+    instead, with the pyannote reason, and segments plus undo history survive
+    so Rerun can retry. Dropping the diarization_warning check in llm_jobs
+    makes this test see a completed job, no history, and "Speaker 1" labels
+    (mutation check)."""
     from database import LlmJob, Transcript
     user = _test_user(db_session)
     audio = tmp_path / "a.mp3"
     audio.write_bytes(b"fake")
     t = _transcript(db_session, audio_path=str(audio))
+
+    r = client.post(f"/api/transcripts/{t.id}/segments/retag",
+                    json={"indices": [0], "speaker": "Bob"})
+    assert r.status_code == 200
+    before = list(db_session.query(Transcript).filter(Transcript.id == t.id).first().segments)
 
     job = enqueue_llm_job(db_session, user.id, t.id, "rediarize", "", "")
     job.status = "running"
@@ -425,7 +432,33 @@ def test_rediarize_fallback_completes_job_with_degraded_note(client, db_session,
     db_session.expire_all()
     job = db_session.query(LlmJob).filter(LlmJob.id == job.id).first()
     t = db_session.query(Transcript).filter(Transcript.id == t.id).first()
-    assert job.status == "completed"
-    assert job.error is not None and "Diarization degraded" in job.error
-    assert t.diarization_method == "heuristic (pyannote failed)"
-    assert t.error is not None and "401" in t.error
+    assert job.status == "failed"
+    assert job.error is not None and "401" in job.error
+    # the user's corrections and their undo path are untouched
+    assert [s["speaker"] for s in t.segments] == [s["speaker"] for s in before]
+    assert (db_session.query(RelabelHistory)
+            .filter(RelabelHistory.transcript_id == t.id).count()) == 1
+
+
+def test_rediarize_clears_a_stale_degraded_note_on_success(client, db_session, tmp_path):
+    """A "Diarization degraded" note describes a condition a later successful
+    diarization has resolved, so it must not outlive it — otherwise the detail
+    view keeps reporting a fixed pyannote/token problem. Only that prefix is
+    cleared, never another failure's text."""
+    from database import Transcript
+    user = _test_user(db_session)
+    audio = tmp_path / "a.mp3"
+    audio.write_bytes(b"fake")
+    t = _transcript(db_session, audio_path=str(audio))
+    t.error = "Diarization degraded: pyannote failed (401 Client Error); used pause-gap heuristic"
+    db_session.commit()
+
+    job = enqueue_llm_job(db_session, user.id, t.id, "rediarize", "", "")
+    job.status = "running"
+    db_session.commit()
+    factory = lambda: _NoCloseSession(db_session)
+    asyncio.run(run_llm_job(factory, job.id, transcription_service=None,
+                            diarization_service=_FakeDiarizationService()))
+
+    db_session.expire_all()
+    assert db_session.query(Transcript).filter(Transcript.id == t.id).first().error is None

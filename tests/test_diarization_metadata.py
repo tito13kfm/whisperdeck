@@ -208,16 +208,43 @@ async def test_stereo_then_pyannote_failure_falls_back_with_warning(monkeypatch,
         stereo_audio_path=str(stereo),
     )
     assert method == "heuristic (pyannote failed)"
+    # BOTH tiers' reasons: the stereo failure is often the actionable one
+    # (dual-mono input) and nothing else records it.
+    assert "stereo split failed" in warning
     assert "mixed path 401" in warning
     assert count >= 1
 
 
 @pytest.mark.asyncio
+async def test_message_less_pyannote_failure_still_reports_a_reason(monkeypatch, tmp_path):
+    """An exception raised with no args has str(e) == "", and an empty
+    warning is indistinguishable from no failure — the degradation would go
+    silent, which is what #121 is about. The class name stands in."""
+    svc = DiarizationService()
+    monkeypatch.setattr(svc, "_check_pyannote", lambda: True)
+
+    async def silent_failure(*a, **k):
+        raise MemoryError()
+
+    monkeypatch.setattr(svc, "diarize_pyannote", silent_failure)
+    merged, count, method, warning = await svc.diarize_and_merge(
+        str(tmp_path / "a.mp3"), num_speakers=2,
+        segments=[{"start": 0.0, "end": 2.0, "text": "hi"},
+                  {"start": 4.0, "end": 6.0, "text": "yo"}],
+    )
+    assert warning == "MemoryError"
+    assert method == "heuristic (pyannote failed)"
+
+
+@pytest.mark.asyncio
 async def test_missing_token_end_to_end_falls_back_with_actionable_warning(monkeypatch, tmp_path):
-    """Ties #119 to #121 through the real _run_pyannote_sync guard: no
-    internal mocks except availability, so the MissingTokenError raised
-    before the torch import becomes the fallback warning. Runs on venvs
-    without torch because the guard precedes the import."""
+    """Ties #119 to #121 through the real _run_pyannote_sync path: the gated
+    model load is genuinely attempted (a warm cache or a `huggingface-cli
+    login` must still be able to satisfy it), and only because no credential
+    exists anywhere does its 401 become the actionable message that the
+    heuristic fallback then reports."""
+    import sys
+    import types
     import numpy as np
     import soundfile as sf
 
@@ -225,6 +252,21 @@ async def test_missing_token_end_to_end_falls_back_with_actionable_warning(monke
     monkeypatch.setattr(svc, "_check_pyannote", lambda: True)
     monkeypatch.setattr(svc, "pyannote_available", True)
     monkeypatch.delenv("HUGGINGFACE_TOKEN", raising=False)
+    monkeypatch.setattr("services.diarization._hub_has_credentials", lambda: False)
+
+    class GatedPipeline:
+        @staticmethod
+        def from_pretrained(name, token=None):
+            assert token is None, "the hub passthrough must survive"
+            raise RuntimeError("401 Client Error: gated repo")
+
+    monkeypatch.setitem(sys.modules, "pyannote.audio",
+                        types.SimpleNamespace(Pipeline=GatedPipeline))
+    # Stand in for torch so this runs on venvs without the diarization
+    # extras; _run_pyannote_sync only needs Tensor for its isinstance check.
+    monkeypatch.setitem(sys.modules, "torch",
+                        types.SimpleNamespace(Tensor=object,
+                                              from_numpy=lambda arr: arr))
 
     wav = tmp_path / "tiny.wav"
     sf.write(str(wav), np.zeros(16000, dtype="float32"), 16000)
@@ -237,6 +279,44 @@ async def test_missing_token_end_to_end_falls_back_with_actionable_warning(monke
     assert method == "heuristic (pyannote failed)"
     assert "HuggingFace token required" in warning
     assert "Settings" in warning
+
+
+@pytest.mark.asyncio
+async def test_pyannote_is_attempted_without_any_token_of_ours(monkeypatch, tmp_path):
+    """The regression this guards: refusing to load without OUR token broke
+    every install authenticated with `huggingface-cli login` or running
+    offline off a warm cache. With hub credentials present, the load happens
+    and a real pyannote result is used unchanged."""
+    import sys
+    import types
+    import numpy as np
+    import soundfile as sf
+    from services.diarization import DiarizationSegment
+
+    svc = DiarizationService()
+    monkeypatch.setattr(svc, "_check_pyannote", lambda: True)
+    monkeypatch.setattr(svc, "pyannote_available", True)
+    monkeypatch.delenv("HUGGINGFACE_TOKEN", raising=False)
+    monkeypatch.setattr("services.diarization._hub_has_credentials", lambda: True)
+
+    async def hub_authenticated_pyannote(*a, **k):
+        from services.diarization import DiarizationResult
+        return DiarizationResult(
+            segments=[DiarizationSegment(start=0.0, end=3.0, speaker="SPEAKER_00")],
+            speaker_count=1,
+            method="pyannote",
+        )
+
+    monkeypatch.setattr(svc, "diarize_pyannote", hub_authenticated_pyannote)
+    wav = tmp_path / "tiny.wav"
+    sf.write(str(wav), np.zeros(16000, dtype="float32"), 16000)
+
+    merged, count, method, warning = await svc.diarize_and_merge(
+        str(wav), num_speakers=None, hf_token="",
+        segments=[{"start": 0.0, "end": 0.5, "text": "hi"}],
+    )
+    assert method == "pyannote"
+    assert warning is None
 
 
 @pytest.mark.asyncio
