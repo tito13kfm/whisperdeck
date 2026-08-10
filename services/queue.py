@@ -604,6 +604,7 @@ async def _finalize_if_done(db, transcript_id: int, diarization_service) -> None
     speaker_count = None
     diarization_method = None
     diarization_error = None
+    diarization_warning = None
     if should_fire_side_effects and transcript.diarize_requested and segments and transcript.audio_path:
         # IMPORTANT: nothing above this point may leave a dirty write on
         # `transcript` — diarization result, segments, and the new status
@@ -627,7 +628,7 @@ async def _finalize_if_done(db, transcript_id: int, diarization_service) -> None
             user_settings = get_user_settings(db, transcript_user_id)
             # diarize_and_merge picks pyannote when installed, else the
             # pause-gap heuristic (which needs a real count, default 2 inside).
-            merged, speaker_count, diarization_method = await diarization_service.diarize_and_merge(
+            merged, speaker_count, diarization_method, diarization_warning = await diarization_service.diarize_and_merge(
                 audio_path, num_speakers=num_speakers, segments=segments,
                 hf_token=user_settings.get("hf_token"),
                 stereo_audio_path=stereo_audio_path,
@@ -655,6 +656,13 @@ async def _finalize_if_done(db, transcript_id: int, diarization_service) -> None
         if diarization_error:
             transcript.error = diarization_error
             transcript.diarization_method = "failed"
+        elif diarization_warning:
+            # pyannote failed, heuristic rescued (issue #121): labels exist
+            # and new_status is untouched (stays completed), but the reason
+            # is persisted so the degradation is never silent. Written here,
+            # after the post-await re-fetch, same window as the writes above.
+            from services.diarization import degraded_error_text
+            transcript.error = degraded_error_text(diarization_warning)
 
     from services.relabel import clear_relabel_history, count_distinct_speakers
     if should_fire_side_effects:

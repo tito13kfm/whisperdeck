@@ -22,6 +22,37 @@ class DiarizationResult:
     method: str = "none"
 
 
+class MissingTokenError(ValueError):
+    """pyannote requested but no HuggingFace token configured (issue #119)."""
+
+
+HF_TOKEN_HELP = (
+    "HuggingFace token required for pyannote speaker diarization. "
+    "Set it in Settings → Service Panel or the HUGGINGFACE_TOKEN "
+    "environment variable."
+)
+
+
+def degraded_error_text(fallback_error: str) -> str:
+    """One shared wording for the three call sites that persist a
+    pyannote-failed-but-heuristic-rescued warning (issue #121)."""
+    return (f"Diarization degraded: pyannote failed ({fallback_error}); "
+            f"used pause-gap heuristic")
+
+
+def resolve_hf_token(hf_token: Optional[str]) -> str:
+    """Explicit token, else the HUGGINGFACE_TOKEN env var, else a clear
+    MissingTokenError instead of pyannote's cryptic gated-model 401.
+    Treats None, "" and whitespace alike — the settings default is ""
+    (services/settings.py), so an unset token arrives as an empty string,
+    never None. Also used by services/voice_id.py for its pyannote
+    embedding backend (same gated-model auth)."""
+    token = (hf_token or "").strip() or os.environ.get("HUGGINGFACE_TOKEN", "").strip()
+    if not token:
+        raise MissingTokenError(HF_TOKEN_HELP)
+    return token
+
+
 class DiarizationService:
     """Speaker diarization using clustering heuristics or pyannote (optional).
 
@@ -55,13 +86,22 @@ class DiarizationService:
         segments: list[dict],
         hf_token: Optional[str] = None,
         stereo_audio_path: Optional[str] = None,
-    ) -> tuple[list[dict], int, str]:
+    ) -> tuple[list[dict], int, str, Optional[str]]:
         """Best-available diarization merged onto existing transcript
         segments: channel-aware live-stereo when a stereo copy exists and
         pyannote is installed, else pyannote on the mixed audio, else the
         pause-gap heuristic (which can't auto-detect, so it defaults to 2).
-        Returns (merged_segments, speaker_count, method).
-        Raises on failure — callers decide whether that's fatal."""
+
+        Returns (merged_segments, speaker_count, method, fallback_error).
+        fallback_error is non-None when pyannote was attempted and failed
+        but the heuristic rescued the run (issue #121) — callers surface it
+        so the degradation is never silent; `method` then reads
+        "heuristic (pyannote failed)" to distinguish rescue-heuristic from
+        heuristic-by-configuration in the DB and the UI sub-label.
+        Still raises if the heuristic itself fails — the issue-#120 hard
+        failure surfacing in callers stays live for that case."""
+        fallback_error: Optional[str] = None
+        result = None
         if stereo_audio_path and os.path.exists(stereo_audio_path) and self._check_pyannote():
             try:
                 result = await self.diarize_live_stereo(
@@ -69,19 +109,31 @@ class DiarizationService:
                 )
             except Exception as e:
                 print(f"[diarization] live-stereo path failed ({e}); falling back to mixed audio")
+                try:
+                    result = await self.diarize_pyannote(
+                        audio_path, num_speakers=num_speakers, hf_token=hf_token
+                    )
+                except Exception as e2:
+                    fallback_error = str(e2)
+        elif self._check_pyannote():
+            try:
                 result = await self.diarize_pyannote(
                     audio_path, num_speakers=num_speakers, hf_token=hf_token
                 )
-        elif self._check_pyannote():
-            result = await self.diarize_pyannote(
-                audio_path, num_speakers=num_speakers, hf_token=hf_token
-            )
-        else:
+            except Exception as e:
+                fallback_error = str(e)
+        if result is None:
+            # pyannote not installed, or every pyannote tier failed.
+            if fallback_error:
+                print(f"[diarization] pyannote failed ({fallback_error}); "
+                      f"falling back to pause-gap heuristic")
             result = await self.diarize_heuristic(
                 audio_path, num_speakers=num_speakers or 2, segments=segments
             )
+        # 27 chars — fits the diarization_method String(32) column.
+        method = "heuristic (pyannote failed)" if fallback_error else result.method
         merged = await self.combine_with_transcript(result, segments)
-        return merged, result.speaker_count, result.method
+        return merged, result.speaker_count, method, fallback_error
 
     async def diarize_heuristic(
         self,
@@ -217,6 +269,11 @@ class DiarizationService:
         diarize_live_stereo, which never needs torch on the async side) is
         converted to a tensor here, keeping the torch dependency confined to
         this one method."""
+        # Token guard BEFORE the torch import: the clear error must win
+        # even on machines where torch itself would fail to import, and
+        # tests can exercise it on torch-less venvs (issue #119).
+        token = resolve_hf_token(hf_token)
+
         import torch
         from pyannote.audio import Pipeline
 
@@ -225,7 +282,7 @@ class DiarizationService:
 
         pipeline = Pipeline.from_pretrained(
             "pyannote/speaker-diarization-3.1",
-            token=hf_token or os.environ.get("HUGGINGFACE_TOKEN", None),
+            token=token,
         )
         output = pipeline({"waveform": waveform, "sample_rate": sample_rate}, num_speakers=num_speakers)
         return [
@@ -249,6 +306,10 @@ class DiarizationService:
                 "pyannote.audio is not installed. "
                 "Install it with: pip install pyannote.audio torch"
             )
+        # Validate the token before the executor hop: _run imports torch
+        # before it reaches _run_pyannote_sync's own guard, and the clear
+        # missing-token error must win over a torch ImportError (issue #119).
+        resolve_hf_token(hf_token)
 
         def _run() -> list[DiarizationSegment]:
             import torch

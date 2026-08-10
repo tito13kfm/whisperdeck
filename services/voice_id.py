@@ -497,10 +497,16 @@ class VoiceIdentificationService:
         if self._pyannote_inference is None:
             with self._model_lock:
                 if self._pyannote_inference is None:
+                    # Same gated-model auth as diarization: raise the clear
+                    # MissingTokenError before importing pyannote, instead
+                    # of a cryptic 401 (issue #119). _embed_pyannote's
+                    # catch-all records the message as the backend error.
+                    from services.diarization import resolve_hf_token
+                    token = resolve_hf_token(hf_token)
                     from pyannote.audio import Model, Inference
                     model = Model.from_pretrained(
                         "pyannote/wespeaker-voxceleb-resnet34-LM",
-                        token=hf_token or os.environ.get("HUGGINGFACE_TOKEN", None),
+                        token=token,
                     )
                     self._pyannote_inference = Inference(model, window="whole")
         return self._pyannote_inference

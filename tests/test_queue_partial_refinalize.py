@@ -176,7 +176,7 @@ async def test_auto_retry_resets_transcript_status_to_processing(db_session):
     queue_mod._run_chunk_job = _stub_run
     try:
         fake_diar = AsyncMock()
-        fake_diar.diarize_and_merge = AsyncMock(return_value=([], 0, "heuristic"))
+        fake_diar.diarize_and_merge = AsyncMock(return_value=([], 0, "heuristic", None))
         await queue_worker_tick(_session_factory, fake_diar)
     finally:
         queue_mod._run_chunk_job = orig_run

@@ -741,7 +741,7 @@ async def run_llm_job(SessionLocal, job_id: int, transcription_service, diarizat
             from services.settings import get_user_settings
             user_settings = get_user_settings(db, job.user_id)
             try:
-                merged, speaker_count, diarization_method = await diarization_service.diarize_and_merge(
+                merged, speaker_count, diarization_method, diarization_warning = await diarization_service.diarize_and_merge(
                     transcript.audio_path,
                     num_speakers=transcript.num_speakers,
                     segments=transcript.segments or [],
@@ -760,10 +760,19 @@ async def run_llm_job(SessionLocal, job_id: int, transcription_service, diarizat
                 transcript.segments = merged
                 transcript.speaker_count = count_distinct_speakers(merged)
                 transcript.diarization_method = diarization_method
+                degraded_note = None
+                if diarization_warning:
+                    # pyannote failed, heuristic rescued (issue #121). The
+                    # job completes — labels exist — with the reason on both
+                    # the transcript and the job (job.error doubles as a
+                    # success-path notes field on the Queue screen).
+                    from services.diarization import degraded_error_text
+                    degraded_note = degraded_error_text(diarization_warning)
+                    transcript.error = degraded_note
                 transcript.updated_at = utcnow_naive()
                 job.progress_done = 1
                 job.result_json = {"segments": merged}
-                _finish(db, job, "completed")
+                _finish(db, job, "completed", degraded_note)
             except Exception as e:
                 _finish(db, job, "failed", str(e))
         elif job.kind == "voice_match":

@@ -90,7 +90,7 @@ async def test_diarization_success_still_works(db_session):
     async def fake_diarize_and_merge(*args, **kwargs):
         return [
             {"start": 0, "end": 5, "text": "hello world", "speaker": "SPEAKER_01"}
-        ], 1, "heuristic"
+        ], 1, "heuristic", None
 
     with patch.object(diar_service, "diarize_and_merge",
                       side_effect=fake_diarize_and_merge):
@@ -100,4 +100,32 @@ async def test_diarization_success_still_works(db_session):
     assert transcript.status == "completed"
     assert transcript.error is None
     assert transcript.diarization_method == "heuristic"
+    assert transcript.speaker_count == 1
+
+
+@pytest.mark.asyncio
+async def test_pyannote_fallback_finalizes_completed_with_warning(db_session):
+    """Issue #121: pyannote failed but the heuristic rescued the run. The
+    transcript completes (labels exist; 'partial' would offer a useless
+    chunk-retry), but the degradation is persisted on transcript.error and
+    the suffixed method. Deleting the elif-diarization_warning branch in
+    _finalize_if_done leaves transcript.error None (mutation check)."""
+    transcript = _setup_transcript(db_session)
+    diar_service = DiarizationService()
+
+    async def fake_diarize_and_merge(*args, **kwargs):
+        return [
+            {"start": 0, "end": 5, "text": "hello world", "speaker": "Speaker 1"}
+        ], 1, "heuristic (pyannote failed)", "401 Client Error"
+
+    with patch.object(diar_service, "diarize_and_merge",
+                      side_effect=fake_diarize_and_merge):
+        await _finalize_if_done(db_session, transcript.id, diar_service)
+
+    db_session.refresh(transcript)
+    assert transcript.status == "completed"
+    assert transcript.error is not None
+    assert "Diarization degraded" in transcript.error
+    assert "401" in transcript.error
+    assert transcript.diarization_method == "heuristic (pyannote failed)"
     assert transcript.speaker_count == 1

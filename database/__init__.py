@@ -75,7 +75,7 @@ class Transcript(Base):
     stereo_audio_path = Column(String(512), nullable=True)  # 16 kHz stereo FLAC of a live capture (mic=ch0, system=ch1); NULL for ordinary uploads
     diarize_requested = Column(Boolean, default=False)
     num_speakers = Column(Integer, nullable=True)  # None = auto-detect (pyannote only; heuristic fallback defaults to 2)
-    diarization_method = Column(String(32), nullable=True)  # pyannote | heuristic | live_stereo; NULL = never diarized or pre-migration
+    diarization_method = Column(String(32), nullable=True)  # pyannote | heuristic | live_stereo | heuristic (pyannote failed) | failed; NULL = never diarized or pre-migration
     processed_size_bytes = Column(Integer, nullable=True)  # post-transcode size (sum of chunk files if chunked) — NOT the raw upload size
     corrected_text = Column(Text, nullable=True)
     correction_error = Column(Text, nullable=True)

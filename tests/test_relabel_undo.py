@@ -363,7 +363,7 @@ class _FakeDiarizationService:
     async def diarize_and_merge(self, audio_path, num_speakers, segments,
                                 hf_token=None, stereo_audio_path=None):
         merged = [{"start": 0.0, "end": 2.0, "text": "regenerated", "speaker": "SPEAKER_00"}]
-        return merged, 1, "heuristic"
+        return merged, 1, "heuristic", None
 
 
 def test_rediarize_clears_relabel_history(client, db_session, tmp_path):
@@ -393,3 +393,39 @@ def test_rediarize_clears_relabel_history(client, db_session, tmp_path):
             .filter(RelabelHistory.transcript_id == t.id).count()) == 0
     # And the undo endpoint agrees there is nothing left to undo.
     assert client.post(f"/api/transcripts/{t.id}/relabel-undo").status_code == 404
+
+
+class _DegradedDiarizationService:
+    async def diarize_and_merge(self, audio_path, num_speakers, segments,
+                                hf_token=None, stereo_audio_path=None):
+        merged = [{"start": 0.0, "end": 2.0, "text": "regenerated", "speaker": "Speaker 1"}]
+        return merged, 1, "heuristic (pyannote failed)", "401 Client Error"
+
+
+def test_rediarize_fallback_completes_job_with_degraded_note(client, db_session, tmp_path):
+    """Issue #121 on the rediarize path: pyannote failed but the heuristic
+    rescued the run. The job completes (labels exist) with the degradation
+    recorded on job.error — which doubles as a success-path notes field on
+    the Queue screen — and on transcript.error. Dropping the
+    diarization_warning handling in llm_jobs leaves both None (mutation
+    check)."""
+    from database import LlmJob, Transcript
+    user = _test_user(db_session)
+    audio = tmp_path / "a.mp3"
+    audio.write_bytes(b"fake")
+    t = _transcript(db_session, audio_path=str(audio))
+
+    job = enqueue_llm_job(db_session, user.id, t.id, "rediarize", "", "")
+    job.status = "running"
+    db_session.commit()
+    factory = lambda: _NoCloseSession(db_session)
+    asyncio.run(run_llm_job(factory, job.id, transcription_service=None,
+                            diarization_service=_DegradedDiarizationService()))
+
+    db_session.expire_all()
+    job = db_session.query(LlmJob).filter(LlmJob.id == job.id).first()
+    t = db_session.query(Transcript).filter(Transcript.id == t.id).first()
+    assert job.status == "completed"
+    assert job.error is not None and "Diarization degraded" in job.error
+    assert t.diarization_method == "heuristic (pyannote failed)"
+    assert t.error is not None and "401" in t.error
