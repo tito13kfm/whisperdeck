@@ -1,0 +1,551 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>opencode issue pipeline</title>
+<style>
+  :root {
+    color-scheme: light;
+    --plane:        #f9f9f7;
+    --surface:      #fcfcfb;
+    --ink:          #0b0b0b;
+    --ink-2:        #52514e;
+    --muted:        #898781;
+    --hair:         #e1e0d9;
+    --ring:         rgba(11,11,11,0.10);
+    --accent:       #2a78d6;
+    --good:         #0ca30c;
+    --warning:      #fab219;
+    --serious:      #ec835a;
+    --critical:     #d03b3b;
+    --wash:         rgba(42,120,214,0.08);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:where(:not([data-theme="light"])) {
+      color-scheme: dark;
+      --plane:   #0d0d0d;
+      --surface: #1a1a19;
+      --ink:     #ffffff;
+      --ink-2:   #c3c2b7;
+      --muted:   #898781;
+      --hair:    #2c2c2a;
+      --ring:    rgba(255,255,255,0.10);
+      --accent:  #3987e5;
+      --wash:    rgba(57,135,229,0.12);
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --plane:   #0d0d0d;
+    --surface: #1a1a19;
+    --ink:     #ffffff;
+    --ink-2:   #c3c2b7;
+    --muted:   #898781;
+    --hair:    #2c2c2a;
+    --ring:    rgba(255,255,255,0.10);
+    --accent:  #3987e5;
+    --wash:    rgba(57,135,229,0.12);
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--plane); color: var(--ink);
+    font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  a { color: var(--accent); }
+  h1 { font-size: 15px; margin: 0; letter-spacing: .01em; }
+  h2 { font-size: 12px; margin: 0 0 10px; color: var(--muted);
+       text-transform: uppercase; letter-spacing: .08em; font-weight: 600; }
+
+  header {
+    display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+    padding: 12px 18px; background: var(--surface);
+    border-bottom: 1px solid var(--hair); position: sticky; top: 0; z-index: 5;
+  }
+  header .spacer { flex: 1 1 auto; }
+  .meta { color: var(--ink-2); font-size: 12px; }
+  button, select {
+    font: inherit; font-size: 12px; color: var(--ink); background: var(--surface);
+    border: 1px solid var(--hair); border-radius: 6px; padding: 4px 9px; cursor: pointer;
+  }
+  button:hover, select:hover { background: var(--wash); }
+
+  main {
+    display: grid; gap: 14px; padding: 14px 18px 40px;
+    grid-template-columns: minmax(360px, 1fr) minmax(420px, 1.3fr);
+    align-items: start;
+  }
+  @media (max-width: 1000px) { main { grid-template-columns: 1fr; } }
+
+  .card {
+    background: var(--surface); border: 1px solid var(--hair);
+    border-radius: 10px; padding: 14px;
+  }
+  .stack { display: grid; gap: 14px; }
+
+  /* status: color never alone, always icon + label */
+  .pill {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-size: 12px; font-weight: 600; padding: 2px 8px;
+    border-radius: 999px; border: 1px solid var(--ring); white-space: nowrap;
+  }
+  .pill .dot { width: 8px; height: 8px; border-radius: 2px; flex: none; }
+  .pill .ico { font-size: 11px; line-height: 1; }
+  .s-good     .dot { background: var(--good); }
+  .s-warning  .dot { background: var(--warning); }
+  .s-serious  .dot { background: var(--serious); }
+  .s-critical .dot { background: var(--critical); }
+  .s-idle     .dot { background: var(--muted); }
+  .s-run      .dot { background: var(--accent); animation: pulse 1.4s ease-in-out infinite; }
+  @keyframes pulse { 0%,100% { opacity: 1 } 50% { opacity: .35 } }
+
+  .issue { border: 1px solid var(--hair); border-radius: 8px; padding: 10px 12px; }
+  .issue + .issue { margin-top: 10px; }
+  .issue.active { border-color: var(--accent); box-shadow: 0 0 0 2px var(--wash); }
+  .issue-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .issue-no { font-weight: 700; font-variant-numeric: tabular-nums; }
+  .grid2 {
+    display: grid; grid-template-columns: auto 1fr; gap: 3px 12px;
+    margin-top: 8px; font-size: 12.5px;
+  }
+  .grid2 dt { color: var(--muted); }
+  .grid2 dd { margin: 0; color: var(--ink-2); overflow-wrap: anywhere; }
+
+  .rows { display: grid; gap: 2px; max-height: 260px; overflow: auto; }
+  .row {
+    display: grid; grid-template-columns: 58px 1fr; gap: 8px;
+    padding: 3px 4px; border-radius: 5px; font-size: 12.5px;
+  }
+  .row:hover { background: var(--wash); }
+  .row time { color: var(--muted); font-variant-numeric: tabular-nums; font-size: 11.5px; }
+  .row.e-error   { color: var(--critical); }
+  .row.e-stall,
+  .row.e-block   { color: var(--serious); }
+  .row.e-done    { color: var(--good); }
+  .row.e-phase   { color: var(--ink); font-weight: 600; }
+
+  .sess {
+    display: flex; align-items: baseline; gap: 8px; text-align: left;
+    border: 1px solid transparent; border-radius: 6px; padding: 5px 7px;
+    background: none; cursor: pointer; flex-wrap: wrap;
+  }
+  .sess > * { min-width: 0; overflow-wrap: anywhere; }
+  .sess:hover { background: var(--wash); }
+  .sess.sel { border-color: var(--accent); background: var(--wash); }
+  .sess.child { margin-left: 18px; }
+  #sessions { max-height: 34vh; overflow-y: auto; overflow-x: hidden; display: grid; gap: 1px; }
+  .sess .name { font-weight: 600; }
+  .sess .sub { color: var(--muted); font-size: 11.5px; }
+
+  #feed { max-height: 62vh; overflow: auto; display: grid; gap: 6px; }
+  .item { border-left: 2px solid var(--hair); padding: 3px 0 3px 10px; }
+  .item.tool { border-left-color: var(--accent); }
+  .item.text { border-left-color: var(--hair); }
+  .item.reasoning { border-left-color: var(--muted); }
+  .item .head {
+    display: flex; gap: 8px; align-items: baseline; font-size: 12.5px;
+  }
+  .item .kind {
+    font-size: 10.5px; text-transform: uppercase; letter-spacing: .06em;
+    color: var(--muted); flex: none; width: 62px;
+  }
+  .item .title { overflow-wrap: anywhere; }
+  .item.tool .title {
+    font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-size: 12px;
+  }
+  .item .st { font-size: 10.5px; }
+  .item .st.running   { color: var(--accent); }
+  .item .st.error     { color: var(--critical); }
+  .item .st.completed { color: var(--muted); }
+  details.detail > summary { color: var(--muted); font-size: 11.5px; cursor: pointer; }
+  details.detail pre {
+    margin: 4px 0 0; padding: 8px; background: var(--plane); border-radius: 6px;
+    border: 1px solid var(--hair); overflow: auto; max-height: 260px;
+    font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-size: 11.5px;
+    white-space: pre-wrap; overflow-wrap: anywhere;
+  }
+  pre#logbody {
+    margin: 0; padding: 10px; background: var(--plane); border: 1px solid var(--hair);
+    border-radius: 6px; max-height: 300px; overflow: auto; white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-size: 11.5px;
+    color: var(--ink-2);
+  }
+  button.linklike {
+    border: none; background: none; padding: 0; color: var(--accent);
+    font: inherit; font-size: 12.5px; text-decoration: underline; cursor: pointer;
+  }
+  button.linklike:hover { background: none; }
+  .empty { color: var(--muted); font-size: 12.5px; }
+  .err { color: var(--critical); font-size: 12.5px; }
+  .toolbar { display: flex; gap: 8px; align-items: center; margin-bottom: 10px; flex-wrap: wrap; }
+  label.chk { display: inline-flex; gap: 5px; align-items: center; font-size: 12px; color: var(--ink-2); }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>opencode issue pipeline</h1>
+  <span id="pipeStatus"></span>
+  <span class="meta" id="pipeMeta"></span>
+  <span class="spacer"></span>
+  <span class="meta" id="conn"></span>
+  <button id="theme">theme</button>
+</header>
+
+<main>
+  <div class="stack">
+    <section class="card">
+      <h2>Issues</h2>
+      <div id="issues"><p class="empty">waiting for state…</p></div>
+    </section>
+
+    <section class="card">
+      <h2>Events</h2>
+      <div class="rows" id="events"><p class="empty">no events yet</p></div>
+    </section>
+
+    <section class="card">
+      <h2>Log tail</h2>
+      <div class="toolbar">
+        <select id="logpick"></select>
+        <label class="chk"><input type="checkbox" id="logfollow" checked> follow</label>
+      </div>
+      <pre id="logbody">pick a log</pre>
+    </section>
+  </div>
+
+  <div class="stack">
+    <section class="card">
+      <h2>Sessions</h2>
+      <div id="sessions"><p class="empty">no opencode server attached</p></div>
+    </section>
+
+    <section class="card">
+      <h2>Live feed</h2>
+      <div class="toolbar">
+        <span class="meta" id="feedWho">no session selected</span>
+        <span class="spacer"></span>
+        <label class="chk"><input type="checkbox" id="autofollow" checked> auto-follow active</label>
+        <label class="chk"><input type="checkbox" id="feedstick" checked> stick to bottom</label>
+      </div>
+      <div id="feed"><p class="empty">select a session</p></div>
+    </section>
+  </div>
+</main>
+
+<script>
+"use strict";
+
+const el = (id) => document.getElementById(id);
+const esc = (s) => String(s == null ? "" : s)
+  .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+// ---- status mapping. Every pill carries an icon and a word, so the color is
+// ---- decoration, not the message.
+const STATUS = {
+  approved:         ["good",     "✓", "approved"],
+  "awaiting-human": ["good",     "✓", "awaiting human"],
+  finished:         ["good",     "✓", "finished"],
+  done:             ["good",     "✓", "done"],
+  running:          ["run",      "▶", "running"],
+  starting:         ["run",      "▶", "starting"],
+  stalled:          ["serious",  "⚠", "stalled"],
+  interrupted:      ["warning",  "⏸", "interrupted"],
+  queued:           ["idle",     "○", "queued"],
+  "dashboard-only": ["idle",     "○", "viewer only"],
+  "no-state":       ["idle",     "○", "no run yet"],
+  failed:           ["critical", "✕", "failed"],
+  error:            ["critical", "✕", "error"],
+};
+
+function pill(status) {
+  const [cls, ico, label] = STATUS[status] || ["idle", "○", status || "unknown"];
+  return `<span class="pill s-${cls}"><span class="dot"></span>` +
+         `<span class="ico">${ico}</span>${esc(label)}</span>`;
+}
+
+function ciPill(ci) {
+  if (!ci) return "";
+  const s = String(ci);
+  let cls = "idle", ico = "○";
+  if (s.startsWith("pass")) { cls = "good"; ico = "✓"; }
+  else if (s.startsWith("pending")) { cls = "run"; ico = "▶"; }
+  else if (s.startsWith("fail")) { cls = "critical"; ico = "✕"; }
+  else if (s.startsWith("timeout")) { cls = "serious"; ico = "⚠"; }
+  return `<span class="pill s-${cls}"><span class="dot"></span>` +
+         `<span class="ico">${ico}</span>CI ${esc(s)}</span>`;
+}
+
+function verdictPill(v) {
+  if (!v) return "";
+  const s = String(v);
+  let cls = "idle", ico = "○";
+  if (s.startsWith("APPROVE")) { cls = "good"; ico = "✓"; }
+  else if (s.startsWith("BLOCK")) { cls = "serious"; ico = "⚠"; }
+  else if (s.startsWith("missing") || s.startsWith("unparsed")) { cls = "critical"; ico = "✕"; }
+  return `<span class="pill s-${cls}"><span class="dot"></span>` +
+         `<span class="ico">${ico}</span>${esc(s.split(" (")[0])}</span>`;
+}
+
+const hhmm = (iso) => {
+  if (!iso) return "";
+  const d = typeof iso === "number" ? new Date(iso) : new Date(String(iso));
+  return isNaN(d) ? "" : d.toTimeString().slice(0, 8);
+};
+
+let state = null;
+let selected = null;      // session id shown in the feed
+let selectedManual = false;
+let eventIndex = 0;
+const eventRows = [];
+let sessionsById = new Map();
+
+async function api(path) {
+  const r = await fetch(path, { cache: "no-store" });
+  const body = await r.json().catch(() => ({ error: "bad json" }));
+  if (!r.ok) throw new Error(body.error || r.statusText);
+  return body;
+}
+
+function setConn(msg, bad) {
+  el("conn").textContent = msg;
+  el("conn").className = bad ? "err" : "meta";
+}
+
+// -------------------------------------------------------------------- state
+
+function renderState(s) {
+  state = s;
+  el("pipeStatus").innerHTML = pill(s.status);
+  const bits = [];
+  if (s.mode) bits.push(s.mode);
+  if (s.skipAudit) bits.push("audit skipped");
+  if (s.auto) bits.push("--auto ON");
+  if (s.serverUrl) bits.push(`server ${s.serverUrl}`);
+  if (s.note) bits.push(s.note);
+  el("pipeMeta").textContent = bits.join("  ·  ");
+
+  const issues = s.issues || {};
+  const keys = Object.keys(issues);
+  if (!keys.length) {
+    el("issues").innerHTML = `<p class="empty">no issues in this run yet</p>`;
+    return;
+  }
+  el("issues").innerHTML = keys.map((k) => {
+    const it = issues[k];
+    const active = String(s.currentIssue) === String(it.issue);
+    const pr = it.pr
+      ? `<a href="${esc(it.prUrl)}" target="_blank" rel="noreferrer">#${esc(it.pr)}</a>` +
+        (it.branch ? ` <span class="meta">${esc(it.branch)}</span>` : "") +
+        (it.commits != null ? ` <span class="meta">${esc(it.commits)} commits</span>` : "")
+      : "—";
+    return `
+      <div class="issue ${active ? "active" : ""}">
+        <div class="issue-head">
+          <span class="issue-no">#${esc(it.issue)}</span>
+          ${pill(it.status)} ${ciPill(it.ci)} ${verdictPill(it.verdict)}
+        </div>
+        <dl class="grid2">
+          <dt>phase</dt><dd>${esc(it.phase || "—")}</dd>
+          <dt>cycle</dt><dd>${esc(it.cycle || 0)} · fix cycles used ${esc(it.stallCount || 0)}</dd>
+          <dt>PR</dt><dd>${pr}</dd>
+          ${it.sessionId ? `<dt>session</dt><dd><button class="linklike" data-sess="${esc(it.sessionId)}">${esc(it.sessionId)}</button></dd>` : ""}
+          ${it.note ? `<dt>note</dt><dd>${esc(it.note)}</dd>` : ""}
+        </dl>
+      </div>`;
+  }).join("");
+
+  el("issues").querySelectorAll("[data-sess]").forEach((b) => {
+    b.addEventListener("click", () => selectSession(b.dataset.sess, true));
+  });
+}
+
+// ------------------------------------------------------------------- events
+
+function renderEvents(batch) {
+  for (const e of batch.events || []) {
+    eventRows.push(
+      `<div class="row e-${esc(e.type)}"><time>${hhmm(e.at)}</time>` +
+      `<span>${e.issue ? `<b>#${esc(e.issue)}</b> ` : ""}${esc(e.message)}</span></div>`
+    );
+  }
+  eventIndex = batch.nextIndex ?? eventIndex;
+  if (!eventRows.length) return;
+  const box = el("events");
+  const atBottom = box.scrollTop + box.clientHeight >= box.scrollHeight - 24;
+  box.innerHTML = eventRows.slice(-400).reverse().join("");
+  if (atBottom) box.scrollTop = 0;
+}
+
+// ----------------------------------------------------------------- sessions
+
+function activeSessionIds() {
+  const out = [];
+  const issues = (state && state.issues) || {};
+  for (const k of Object.keys(issues)) {
+    const it = issues[k];
+    if (it.sessionId) out.push(it.sessionId);
+    for (const s of it.sessions || []) out.push(s);
+  }
+  return out;
+}
+
+function renderSessions(list) {
+  sessionsById = new Map(list.map((s) => [s.id, s]));
+  const pipeline = new Set(activeSessionIds());
+
+  // Parents first, then their children indented, so a subagent reads as one.
+  const roots = list.filter((s) => !s.parentID || !sessionsById.has(s.parentID));
+  const kids = new Map();
+  for (const s of list) {
+    if (s.parentID && sessionsById.has(s.parentID)) {
+      if (!kids.has(s.parentID)) kids.set(s.parentID, []);
+      kids.get(s.parentID).push(s);
+    }
+  }
+
+  const shown = roots.filter((s) => pipeline.has(s.id) || (kids.get(s.id) || []).some((k) => pipeline.has(k.id)));
+  const chosen = shown.length ? shown : roots.slice(0, 12);
+
+  const line = (s, child) => {
+    const sub = [s.agent, s.model, s.tokens && s.tokens.output ? `${s.tokens.output} out` : null,
+                 s.cost ? `$${Number(s.cost).toFixed(3)}` : null]
+      .filter(Boolean).join("  ·  ");
+    const mark = pipeline.has(s.id) ? ` ${pill("running").replace("running", "pipeline")}` : "";
+    return `<button class="sess ${child ? "child" : ""} ${s.id === selected ? "sel" : ""}" data-sess="${esc(s.id)}">
+        <span class="name">${esc(s.title || s.id)}</span>
+        <span class="sub">${esc(sub)}</span>${mark}
+      </button>`;
+  };
+
+  const html = chosen.map((s) =>
+    line(s, false) + (kids.get(s.id) || []).map((k) => line(k, true)).join("")
+  ).join("");
+
+  el("sessions").innerHTML = html || `<p class="empty">no sessions yet</p>`;
+  el("sessions").querySelectorAll("[data-sess]").forEach((b) => {
+    b.addEventListener("click", () => selectSession(b.dataset.sess, true));
+  });
+
+  if (el("autofollow").checked && !selectedManual) {
+    const auto = list.find((s) => pipeline.has(s.id));
+    if (auto && auto.id !== selected) selectSession(auto.id, false);
+  }
+}
+
+function selectSession(id, manual) {
+  selected = id;
+  if (manual) selectedManual = true;
+  const s = sessionsById.get(id);
+  el("feedWho").textContent = s
+    ? `${s.title || id}  ·  ${s.agent || "?"}  ·  ${s.model || "?"}`
+    : id;
+  el("feed").innerHTML = `<p class="empty">loading…</p>`;
+  pollFeed();
+}
+
+// --------------------------------------------------------------------- feed
+
+function renderFeed(items) {
+  if (!items.length) {
+    el("feed").innerHTML = `<p class="empty">nothing in this session yet</p>`;
+    return;
+  }
+  const box = el("feed");
+  const stick = el("feedstick").checked;
+  box.innerHTML = items.map((i) => {
+    const st = i.status
+      ? `<span class="st ${esc(i.status)}">${esc(i.status)}</span>` : "";
+    const detail = i.detail
+      ? `<details class="detail"><summary>output</summary><pre>${esc(i.detail)}</pre></details>` : "";
+    return `<div class="item ${esc(i.kind)}">
+        <div class="head">
+          <span class="kind">${esc(i.kind === "tool" ? "tool" : i.role)}</span>
+          <span class="title">${esc(i.title)}</span>${st}
+        </div>${detail}
+      </div>`;
+  }).join("");
+  if (stick) box.scrollTop = box.scrollHeight;
+}
+
+// -------------------------------------------------------------------- polling
+
+async function pollState() {
+  try {
+    renderState(await api("/api/state"));
+    renderEvents(await api(`/api/events?after=${eventIndex}`));
+    setConn("connected", false);
+  } catch (e) {
+    setConn(`state error: ${e.message}`, true);
+  }
+}
+
+async function pollSessions() {
+  try {
+    renderSessions(await api("/api/sessions"));
+  } catch (e) {
+    el("sessions").innerHTML = `<p class="err">${esc(e.message)}</p>`;
+  }
+}
+
+async function pollFeed() {
+  if (!selected) return;
+  try {
+    const r = await api(`/api/feed?session=${encodeURIComponent(selected)}`);
+    if (r.session === selected) renderFeed(r.items || []);
+  } catch (e) {
+    el("feed").innerHTML = `<p class="err">${esc(e.message)}</p>`;
+  }
+}
+
+async function pollLogs() {
+  try {
+    const logs = await api("/api/logs");
+    const pick = el("logpick");
+    const cur = pick.value;
+    const want = logs.map((l) => l.name).join("|");
+    if (pick.dataset.sig !== want) {
+      pick.dataset.sig = want;
+      pick.innerHTML = logs.map((l) => `<option>${esc(l.name)}</option>`).join("");
+      if (logs.some((l) => l.name === cur)) pick.value = cur;
+    }
+    if (el("logfollow").checked && logs.length && !pick.dataset.touched) {
+      pick.value = logs[0].name;
+    }
+    if (pick.value) {
+      const body = await api(`/api/log?file=${encodeURIComponent(pick.value)}&tail=300`);
+      const pre = el("logbody");
+      const atBottom = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 24;
+      pre.textContent = (body.lines || []).join("\n") || (body.note || "(empty)");
+      if (atBottom) pre.scrollTop = pre.scrollHeight;
+    }
+  } catch (e) {
+    el("logbody").textContent = e.message;
+  }
+}
+
+el("logpick").addEventListener("change", () => {
+  el("logpick").dataset.touched = "1";
+  el("logfollow").checked = false;
+  pollLogs();
+});
+el("autofollow").addEventListener("change", () => {
+  if (el("autofollow").checked) selectedManual = false;
+});
+el("theme").addEventListener("click", () => {
+  const now = document.documentElement.getAttribute("data-theme");
+  const next = now === "dark" ? "light" : now === "light" ? "" : "dark";
+  if (next) document.documentElement.setAttribute("data-theme", next);
+  else document.documentElement.removeAttribute("data-theme");
+});
+
+pollState(); pollSessions(); pollLogs();
+setInterval(pollState, 1500);
+setInterval(pollSessions, 4000);
+setInterval(pollFeed, 2000);
+setInterval(pollLogs, 3000);
+</script>
+</body>
+</html>
