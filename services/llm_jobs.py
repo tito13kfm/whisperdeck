@@ -348,36 +348,25 @@ def rerun_llm_job(db, user_id: int, job_id: int) -> LlmJob:
 
 
 def _transition(db, job_id: int, new_status: str, *, expect: tuple[str, ...], **fields) -> bool:
-    """Compare-and-set on `LlmJob.status`. True when this call made the move.
+    """Compare-and-set on `LlmJob.status`. Thin wrapper over the shared primitive.
 
-    Every status transition on an LlmJob is a race. The worker claims and
-    finishes, the cancel endpoint cancels, the retry sweep resurrects, and any
-    two of them can be in flight against the same row at once. So none of them
-    may read the status and then write it: whichever committed second silently
-    overwrote the other, and the loser left no trace.
+    Every status transition on an LlmJob is a race — see
+    ``services.job_transitions.transition`` for the full rationale (PR #389).
+    This wrapper exists so existing imports of ``_transition`` keep working
+    and so the LlmJob call sites don't need to name their own model class
+    on every call. New code should import from ``services.job_transitions``
+    directly.
 
-    Two rounds of review on PR #389 each found a separate instance of exactly
-    that shape — first the terminal claim here in `_finish`, then
-    `cancel_llm_job` — which is why this is now one primitive they all go
-    through rather than a conditional bolted onto whichever one was reported.
-    A caller that reads a status and writes it without coming through here is
-    reintroducing the bug.
-
-    Emits a single `UPDATE ... WHERE id = ? AND status IN (...)`, which is
-    atomic against a concurrent writer: it takes sqlite's write lock, so either
-    it matches and the other writer serializes after our commit, or the other
-    writer already committed, the row no longer matches `expect`, and this
-    returns False with nothing written.
-
-    Autoflush means the caller's own pending writes flush into this same
-    transaction, so a caller that rolls back on False rolls those back too.
+    Computes ``updated_at`` here so a patch on
+    ``services.llm_jobs.utcnow_naive`` (used by the race tests) fires
+    inside the intended window — the shared function would otherwise call
+    ``services.job_transitions.utcnow_naive`` instead.
     """
-    values = {"status": new_status, "updated_at": utcnow_naive(), **fields}
-    return bool(
-        db.query(LlmJob)
-        .filter(LlmJob.id == job_id, LlmJob.status.in_(expect))
-        .update(values, synchronize_session=False)
-    )
+    if "updated_at" not in fields:
+        fields["updated_at"] = utcnow_naive()
+    from services.job_transitions import transition as _shared_transition
+
+    return _shared_transition(db, LlmJob, job_id, new_status, expect=expect, **fields)
 
 
 def _finish(db, job: LlmJob, status: str, error: str | None = None) -> bool:
