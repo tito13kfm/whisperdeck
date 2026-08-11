@@ -77,7 +77,7 @@ def list_providers() -> list[dict]:
         {
             "id": "openai",
             "name": "OpenAI",
-            "description": "whisper-1 · high accuracy, $0.006/min",
+            "description": "whisper-1 · high accuracy, $0.006/min · gpt-transcribe available ($0.0045/min, flat text, no timestamps)",
             "default_model": "whisper-1",
             "needs_key": True,
             "key_prefix": "sk-",
@@ -93,7 +93,7 @@ def list_providers() -> list[dict]:
         {
             "id": "openrouter",
             "name": "OpenRouter",
-            "description": "Unified API — OpenAI/Groq/Deepgram Whisper + Nova-3 models",
+            "description": "Unified API — whisper-1, gpt-transcribe ($0.0045/min, flat text), Nova-3 via OpenRouter proxy (strips languages, flattened usage — direct openai is full-fidelity for gpt-transcribe)",
             "default_model": "openai/whisper-1",
             "needs_key": True,
             "key_prefix": "sk-or-",

@@ -142,6 +142,8 @@ class DiarizationService:
         heuristic-by-configuration in the DB and the UI sub-label.
         Still raises if the heuristic itself fails — the issue-#120 hard
         failure surfacing in callers stays live for that case."""
+        if not segments:
+            return [], 0, "none", None
         fallback_error: Optional[str] = None
         result = None
         if stereo_audio_path and os.path.exists(stereo_audio_path) and self._check_pyannote():
