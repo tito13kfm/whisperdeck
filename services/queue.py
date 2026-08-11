@@ -11,6 +11,8 @@ import os
 import subprocess
 from typing import Optional
 
+from sqlalchemy import func
+
 from database import Transcript, TranscriptionJob, utcnow_naive
 from backends import get_provider, ProviderError
 from database import ProviderConfig
@@ -457,9 +459,14 @@ def _retry_eligible(job) -> bool:
 # before any await or use a separate session per job instead.
 async def _run_chunk_job(db, job, provider_config: dict, provider_name: str, language: str,
                           local_provider_lock: asyncio.Semaphore) -> None:
-    job.status = "running"
-    job.attempts += 1
+    claimed = _job_transition(db, TranscriptionJob, job.id, "running", expect=("pending",),
+                               attempts=func.coalesce(TranscriptionJob.attempts, 0) + 1)
     db.commit()
+    if not claimed:
+        # Lost the claim to a concurrent writer (e.g. cancel) between
+        # dispatch selection and here — leave its status alone, don't
+        # dispatch to the provider.
+        return
 
     # Fetch VAD settings for this transcript's owner (issue #270: mirror path
     # to app.py's inline transcribe). Read-only, safe before the await.

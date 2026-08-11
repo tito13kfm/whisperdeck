@@ -198,6 +198,42 @@ def test_cancel_loses_race_to_already_running(db_session):
     assert job.status == "running"
 
 
+def test_run_chunk_job_loses_claim_to_concurrent_cancel(db_session):
+    """_run_chunk_job's pending->running claim must not clobber a cancel that
+    committed between dispatch selection and the claim itself, and must not
+    dispatch to the provider when the claim is lost."""
+    from services.queue import _run_chunk_job
+
+    user = _user(db_session, "claim-racer")
+    t = _transcript(db_session, user, status="processing")
+    job = TranscriptionJob(
+        transcript_id=t.id, chunk_index=0, start_time=0, end_time=10,
+        audio_path="c0.mp3", status="pending", attempts=0,
+    )
+    db_session.add(job)
+    db_session.commit()
+
+    engine = db_session.get_bind()
+    fired = {"done": False}
+
+    def hook_utcnow():
+        if not fired["done"]:
+            fired["done"] = True
+            _cancel_from_another_connection(engine, job.id)
+        return _real_utcnow_naive()
+
+    def _unexpected_provider(*a, **kw):
+        raise AssertionError("provider must not be dispatched when the claim is lost")
+
+    with patch("services.job_transitions.utcnow_naive", side_effect=hook_utcnow), \
+         patch("services.queue.get_provider", side_effect=_unexpected_provider):
+        asyncio.run(_run_chunk_job(db_session, job, {}, "openai", "en", asyncio.Semaphore(1)))
+
+    db_session.refresh(job)
+    assert job.status == "cancelled"
+    assert job.attempts == 0
+
+
 def test_nonconflicting_retry_still_succeeds(db_session):
     """Control: without a race, retry_failed_chunks still resurrects."""
     user = _user(db_session, "retry-ok")
