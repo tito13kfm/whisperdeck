@@ -470,6 +470,33 @@ class TestPasswordPolicy:
         assert resp.status_code == 200
         assert 'name="wd-password-min-length" content="8"' in resp.text
 
+    def test_index_page_injects_regardless_of_placeholder_value(self, client, db_session, monkeypatch):
+        """Decoupling check for issue #308: the injection regex matches any
+        content value, not just the literal 8. Changing the placeholder in
+        index.html must not cause a silent no-op."""
+        import app as app_module
+        monkeypatch.setenv("PASSWORD_MIN_LENGTH", "12")
+        # Simulate an index.html that was edited to use a different placeholder
+        fake_html = '<html><head><meta name="wd-password-min-length" content="99"></head></html>'
+        monkeypatch.setattr(app_module, "_index_html_cache", fake_html)
+        resp = client.get("/")
+        assert resp.status_code == 200
+        assert 'name="wd-password-min-length" content="12"' in resp.text
+        assert 'content="99"' not in resp.text
+
+    def test_index_page_fails_loudly_when_meta_missing(self, client, db_session, monkeypatch):
+        """Issue #308 contract: if the meta tag is missing/renamed the server
+        must fail loudly (500) rather than silently serving a page with no
+        password-policy hint."""
+        import app as app_module
+        fake_html = "<html><head><title>no meta here</title></head></html>"
+        monkeypatch.setattr(app_module, "_index_html_cache", fake_html)
+        resp = client.get("/")
+        assert resp.status_code == 500
+
+    # Reset the module-level cache so later tests see the real file again.
+    # pytest's monkeypatch undo restores the original value automatically.
+
 
 # ── concurrent registration race (issue #125) ──────────────────────────────
 
