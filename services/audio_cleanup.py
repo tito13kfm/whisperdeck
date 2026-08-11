@@ -9,6 +9,7 @@ with a safe fallback to the original audio on failure.
 import os
 import subprocess
 import asyncio
+import uuid
 from dataclasses import dataclass, field
 
 
@@ -67,7 +68,8 @@ async def cleanup_audio(
         return result
 
     base = os.path.splitext(os.path.basename(audio_path))[0]
-    cleaned_path = os.path.join(output_dir, f"{base}_clean.mp3")
+    suffix = uuid.uuid4().hex
+    cleaned_path = os.path.join(output_dir, f"{base}_{suffix}_clean.mp3")
 
     cmd = [_ffmpeg_bin(), "-y", "-i", audio_path]
 
@@ -214,7 +216,8 @@ async def cleanup_demucs(
         return audio_path
 
     base = os.path.splitext(os.path.basename(audio_path))[0]
-    out_dir = os.path.join(output_dir, f"{base}_demucs")
+    suffix = uuid.uuid4().hex
+    out_dir = os.path.join(output_dir, f"{base}_{suffix}_demucs")
 
     def _run():
         # Demucs writes vocals.wav into out_dir/htdemucs/<filename>/
