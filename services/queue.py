@@ -14,6 +14,7 @@ from typing import Optional
 from database import Transcript, TranscriptionJob, utcnow_naive
 from backends import get_provider, ProviderError
 from database import ProviderConfig
+from services.job_transitions import transition as _job_transition
 
 # Free-tier numbers confirmed live against https://console.groq.com/docs/rate-limits
 # on 2026-07-01. Paid/dev tiers raise these — kept here as a dict (not a
@@ -309,17 +310,18 @@ def retry_failed_chunks(db, transcript_id: int) -> int:
         .filter(TranscriptionJob.transcript_id == transcript_id, TranscriptionJob.status == "failed")
         .all()
     )
+    succeeded = 0
     for job in failed:
-        job.status = "pending"
-        job.attempts = 0
-        job.error = None
+        if _job_transition(db, TranscriptionJob, job.id, "pending", expect=("failed",), attempts=0, error=None):
+            succeeded += 1
     if failed:
-        transcript = db.query(Transcript).filter(Transcript.id == transcript_id).first()
-        if transcript:
-            transcript.status = "processing"
-            transcript.queue_dismissed = False
+        if succeeded:
+            transcript = db.query(Transcript).filter(Transcript.id == transcript_id).first()
+            if transcript:
+                transcript.status = "processing"
+                transcript.queue_dismissed = False
         db.commit()
-    return len(failed)
+    return succeeded
 
 
 def cancel_transcript_jobs(db, transcript_id: int) -> int:
@@ -342,15 +344,17 @@ def cancel_transcript_jobs(db, transcript_id: int) -> int:
         .filter(TranscriptionJob.transcript_id == transcript_id, TranscriptionJob.status == "pending")
         .all()
     )
+    succeeded = 0
     for job in pending:
-        job.status = "cancelled"
+        if _job_transition(db, TranscriptionJob, job.id, "cancelled", expect=("pending",)):
+            succeeded += 1
 
     transcript = db.query(Transcript).filter(Transcript.id == transcript_id).first()
     if transcript:
         transcript.status = "cancelled"
         transcript.updated_at = utcnow_naive()
     db.commit()
-    return len(pending)
+    return succeeded
 
 
 def resume_cancelled_chunks(db, transcript_id: int) -> int:
@@ -373,17 +377,17 @@ def resume_cancelled_chunks(db, transcript_id: int) -> int:
         .filter(TranscriptionJob.transcript_id == transcript_id, TranscriptionJob.status == "cancelled")
         .all()
     )
+    succeeded = 0
     for job in cancelled:
-        job.status = "pending"
-        job.attempts = 0
-        job.error = None
+        if _job_transition(db, TranscriptionJob, job.id, "pending", expect=("cancelled",), attempts=0, error=None):
+            succeeded += 1
 
     transcript = db.query(Transcript).filter(Transcript.id == transcript_id).first()
     if transcript and transcript.status == "cancelled":
         transcript.status = "processing"
         transcript.queue_dismissed = False
     db.commit()
-    return len(cancelled)
+    return succeeded
 
 
 TERMINAL_TRANSCRIPT_STATUSES = ("completed", "failed", "partial", "cancelled")
@@ -825,16 +829,11 @@ async def queue_worker_tick(SessionLocal, diarization_service) -> None:
         resurrected_transcript_ids = set()
         for job in pending_or_retry:
             if job.status == "failed" and _retry_eligible(job):
-                job.status = "pending"
-                job.error = None
-                resurrected_transcript_ids.add(job.transcript_id)
+                if _job_transition(db, TranscriptionJob, job.id, "pending", expect=("failed",), error=None):
+                    resurrected_transcript_ids.add(job.transcript_id)
         for tid in resurrected_transcript_ids:
             transcript = db.query(Transcript).filter(Transcript.id == tid).first()
             if transcript and transcript.status != "cancelled":
-                # Cancel always wins (services/queue.py:516 guard) — a
-                # user-cancelled transcript must stay cancelled even if a
-                # failed chunk is retry-eligible; resume is explicit via
-                # resume_cancelled_chunks, not automatic.
                 transcript.status = "processing"
                 transcript.queue_dismissed = False
         db.commit()
