@@ -5280,12 +5280,16 @@ async function detailAction(act, btn) {
     }
     if (act === 'toggle-kind') {
       // 3-state cycle: meeting → dictation → voice_note → meeting.
+      // Unknown kinds (voice_dump, auto) are preserved instead of
+      // resetting to meeting, so one click cannot orphan dependent
+      // rows (VoiceDumpItem, VoiceNote) — see issue #299.
       // The PATCH endpoint guards against a kind change while the
       // transcript is still processing (it reads kind mid-pipeline to
       // decide diarization), so a status==='processing' transcript
-      // would 400 here — that's intentional, the user has to wait
+      // would 409 here — that's intentional, the user has to wait
       // for the current job to settle.
-      const newKind = t.kind === 'meeting' ? 'dictation' : t.kind === 'dictation' ? 'voice_note' : 'meeting';
+      const newKind = t.kind === 'meeting' ? 'dictation' : t.kind === 'dictation' ? 'voice_note' : t.kind === 'voice_note' ? 'meeting' : t.kind;
+      if (newKind === t.kind) return;
       try {
         await api('/api/transcripts/' + t.id, {
           method: 'PATCH',
@@ -5293,8 +5297,11 @@ async function detailAction(act, btn) {
           body: JSON.stringify({ kind: newKind }),
         });
       } catch (e) {
-        if (e.message && e.message.includes('400')) {
-          toast('Wait for the current job to finish before changing kind', 'info');
+        if (e.status === 409 || e.status === 400 || (e.message && (e.message.includes('409') || e.message.includes('400') || e.message.includes('Cannot change kind')))) {
+          const msg = e.message.includes('Cannot change kind')
+            ? e.message
+            : 'Wait for the current job to finish before changing kind';
+          toast(msg, 'info');
         } else {
           throw e;
         }

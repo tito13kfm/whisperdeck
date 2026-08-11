@@ -53,7 +53,7 @@ class Transcript(Base):
     user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     title = Column(String(255), nullable=False)
     filename = Column(String(255), nullable=False)
-    kind = Column(String(16), default="meeting")  # meeting | dictation | voice_note — drives default diarization, summary prompt, available reformat actions, and whether the voice-note LLM chain fires
+    kind = Column(String(16), default="meeting")  # meeting | dictation | voice_note | voice_dump | auto — drives default diarization, summary prompt, available reformat actions, and whether the voice-note/voice-dump LLM chain fires
     # Studio classification (issue #267/design 2026-08-01-studio-classification-design.md).
     # classification_status: pending | success | uncertain | failed | override.
     # A separate column from `status` above (transcription lifecycle) —
