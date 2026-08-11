@@ -16,6 +16,8 @@ STT_RATES: dict[tuple[str, str], dict] = {
     ("groq", "whisper-large-v3-flash"):     {"rate_per_minute": 0.004,  "rate_source": "Groq ($0.004/min)"},
     ("groq", "whisper-large-v3-turbo"):     {"rate_per_minute": 0.006,  "rate_source": "Groq ($0.006/min)"},
     ("openai", "whisper-1"):                {"rate_per_minute": 0.006,  "rate_source": "OpenAI ($0.006/min)"},
+    ("openai", "gpt-transcribe"):           {"rate_per_minute": 0.0045, "rate_source": "OpenAI ($0.0045/min)"},
+    ("openrouter", "openai/gpt-transcribe"): {"rate_per_minute": 0.0045, "rate_source": "OpenAI via OpenRouter ($0.0045/min)"},
     ("assemblyai", "universal-3-pro"):      {"rate_per_minute": 0.0035, "rate_source": "AssemblyAI ($0.0035/min)"},
     ("openrouter", "deepgram/nova-3"):      {"rate_per_minute": 0.0043, "rate_source": "Deepgram via OpenRouter ($0.0043/min)"},
 }

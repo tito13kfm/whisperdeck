@@ -101,8 +101,25 @@ class TranscriptionService:
             # after this await, or wrap the await inside an open
             # transaction — that would hold a lock across the wait and risk
             # "database is locked" errors under concurrent uploads.
+            # Wire hotword glossary as transcription-time keywords for
+            # gpt-transcribe (and any future provider that reads keywords).
+            # Kept as a best-effort fetch — never block transcription on it.
+            _kw = kwargs.copy()
+            if "keywords" not in _kw:
+                try:
+                    from services.hotwords import list_hotwords, sanitize_keywords
+                    hotwords = list_hotwords(db, user_id)
+                    terms = [h.term for h in hotwords] if hotwords else []
+                    sanitized = sanitize_keywords(terms)
+                    if sanitized:
+                        _kw["keywords"] = sanitized
+                        # For gpt-transcribe family, also pass languages hint
+                        if language and language != "auto":
+                            _kw.setdefault("languages", [language])
+                except Exception:
+                    pass
             result = await provider.transcribe(
-                audio_path, language=language, temperature=temperature, **kwargs
+                audio_path, language=language, temperature=temperature, **_kw
             )
 
             transcript.status = "completed"

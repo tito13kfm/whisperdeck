@@ -4,6 +4,24 @@ import httpx
 from .base import BaseProvider, TranscriptionResult, ProviderError
 
 
+def _is_transcribe_family(model: str) -> bool:
+    return "transcribe" in (model or "").lower()
+
+
+def _sanitize_keywords(terms: list[str]) -> list[str]:
+    out: list[str] = []
+    for t in terms:
+        if not t:
+            continue
+        s = t.strip()
+        if not s:
+            continue
+        if "<" in s or ">" in s or "\r" in s or "\n" in s:
+            continue
+        out.append(s)
+    return out
+
+
 class OpenAIProvider(BaseProvider):
     """Transcribe using OpenAI's Whisper endpoint."""
 
@@ -21,19 +39,39 @@ class OpenAIProvider(BaseProvider):
         temperature = kwargs.get("temperature", 0.0)
         response_format = kwargs.get("response_format", "verbose_json")
         prompt = kwargs.get("prompt", "")
+        keywords = kwargs.get("keywords", None)
+        languages = kwargs.get("languages", None)
+
+        if _is_transcribe_family(self.model) and response_format == "verbose_json":
+            response_format = "json"
 
         start_time = time.time()
 
         async with httpx.AsyncClient(timeout=300) as client:
             with open(audio_path, "rb") as f:
                 files = {"file": (audio_path, f, "audio/mpeg")}
-                data = {
+                data: dict = {
                     "model": self.model,
                     "temperature": temperature,
                     "response_format": response_format,
                 }
-                if language and language != "auto":
-                    data["language"] = language
+                if _is_transcribe_family(self.model):
+                    if keywords is not None:
+                        sanitized = _sanitize_keywords(list(keywords) if isinstance(keywords, (list, tuple)) else [str(keywords)])
+                        if sanitized:
+                            data["keywords[]"] = sanitized
+                    if languages is not None:
+                        langs = list(languages) if isinstance(languages, (list, tuple)) else [str(languages)]
+                        langs = [str(x).strip() for x in langs if str(x).strip()]
+                        if langs:
+                            data["languages[]"] = langs
+                        elif language and language != "auto":
+                            data["languages[]"] = [language]
+                    elif language and language != "auto":
+                        data["languages[]"] = [language]
+                else:
+                    if language and language != "auto":
+                        data["language"] = language
                 if prompt:
                     data["prompt"] = prompt
 
@@ -54,12 +92,31 @@ class OpenAIProvider(BaseProvider):
         except ValueError as e:
             raise ProviderError(f"OpenAI returned a non-JSON response: {e}")
         raw_segments = result.get("segments", [])
-        duration = max((s.get("end", 0) for s in raw_segments), default=0)
+        if raw_segments:
+            duration = max((s.get("end", 0) for s in raw_segments), default=0)
+        else:
+            usage = result.get("usage", {})
+            duration = usage.get("seconds", 0) if isinstance(usage, dict) else 0
+            duration = duration or 0
+
+        detected_language = language or "en"
+        if _is_transcribe_family(self.model):
+            langs_resp = result.get("languages")
+            if isinstance(langs_resp, list) and langs_resp:
+                first = langs_resp[0]
+                if isinstance(first, dict):
+                    detected_language = first.get("code") or first.get("language") or detected_language
+                elif isinstance(first, str):
+                    detected_language = first
+            elif result.get("language"):
+                detected_language = result.get("language")
+        else:
+            detected_language = result.get("language") or language or "en"
 
         return TranscriptionResult(
             segments=self._build_segments(raw_segments),
             full_text=result.get("text", ""),
-            language=result.get("language") or language or "en",
+            language=detected_language,
             duration_seconds=duration,
             model=self.model,
             provider="openai",
@@ -80,7 +137,7 @@ class OpenAIProvider(BaseProvider):
             return {"ok": False, "error": str(e)}
 
     async def list_models(self) -> list[str]:
-        """Fetch available models from OpenAI — filter to Whisper models."""
+        """Fetch available models from OpenAI — filter to Whisper/transcribe models."""
         if not self.api_key:
             return ["whisper-1"]
         try:
@@ -92,7 +149,7 @@ class OpenAIProvider(BaseProvider):
                 if resp.status_code == 200:
                     whisper_models = [
                         m["id"] for m in resp.json().get("data", [])
-                        if "whisper" in m.get("id", "").lower()
+                        if "whisper" in m.get("id", "").lower() or "transcribe" in m.get("id", "").lower()
                     ]
                     return whisper_models if whisper_models else ["whisper-1"]
         except Exception:

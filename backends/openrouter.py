@@ -2,10 +2,33 @@
 
 OpenRouter provides OpenAI-compatible endpoints for many models including
 openai/whisper-1, deepgram/nova-3, and community-hosted Whisper variants.
+
+Note: when proxying OpenAI's gpt-transcribe, OpenRouter strips the
+languages array and flattens usage to {seconds, cost} — see
+docs/superpowers/specs/2026-08-06-gpt-transcribe-provider-and-hotword-context-design.md.
+Direct openai provider is the full-fidelity path for that model.
 """
 import time
 import httpx
 from .base import BaseProvider, TranscriptionResult, ProviderError
+
+
+def _is_transcribe_family(model: str) -> bool:
+    return "transcribe" in (model or "").lower()
+
+
+def _sanitize_keywords(terms: list[str]) -> list[str]:
+    out: list[str] = []
+    for t in terms:
+        if not t:
+            continue
+        s = t.strip()
+        if not s:
+            continue
+        if any(c in s for c in ("<", ">", "\r", "\n")):
+            continue
+        out.append(s)
+    return out
 
 
 class OpenRouterProvider(BaseProvider):
@@ -27,19 +50,42 @@ class OpenRouterProvider(BaseProvider):
         language = kwargs.get("language", None)
         temperature = kwargs.get("temperature", 0.0)
         response_format = kwargs.get("response_format", "verbose_json")
+        prompt = kwargs.get("prompt", "")
+        keywords = kwargs.get("keywords", None)
+        languages = kwargs.get("languages", None)
+
+        if _is_transcribe_family(self.model) and response_format == "verbose_json":
+            response_format = "json"
 
         start_time = time.time()
 
         async with httpx.AsyncClient(timeout=300) as client:
             with open(audio_path, "rb") as f:
                 files = {"file": (audio_path, f, "audio/mpeg")}
-                data = {
+                data: dict = {
                     "model": self.model,
                     "temperature": temperature,
                     "response_format": response_format,
                 }
-                if language and language != "auto":
-                    data["language"] = language
+                if _is_transcribe_family(self.model):
+                    if keywords is not None:
+                        sanitized = _sanitize_keywords(list(keywords) if isinstance(keywords, (list, tuple)) else [str(keywords)])
+                        if sanitized:
+                            data["keywords[]"] = sanitized
+                    if languages is not None:
+                        langs = list(languages) if isinstance(languages, (list, tuple)) else [str(languages)]
+                        langs = [str(x).strip() for x in langs if str(x).strip()]
+                        if langs:
+                            data["languages[]"] = langs
+                        elif language and language != "auto":
+                            data["languages[]"] = [language]
+                    elif language and language != "auto":
+                        data["languages[]"] = [language]
+                else:
+                    if language and language != "auto":
+                        data["language"] = language
+                if prompt:
+                    data["prompt"] = prompt
 
                 headers = {
                     "Authorization": f"Bearer {self.api_key}",
@@ -57,8 +103,6 @@ class OpenRouterProvider(BaseProvider):
                 )
 
         if response.status_code == 404:
-            # OpenRouter may route differently — try completions-based approach
-            # or return a clear error
             raise ProviderError(
                 f"OpenRouter: model '{self.model}' may not support audio transcription. "
                 f"Try 'openai/whisper-1'. Response ({response.status_code}): {response.text}"
@@ -74,23 +118,58 @@ class OpenRouterProvider(BaseProvider):
             raise ProviderError(f"OpenRouter returned a non-JSON response: {e}")
         raw_segments = result.get("segments", [])
 
-        # Some OpenRouter models return flat text without segments
         if not raw_segments and result.get("text"):
+            if _is_transcribe_family(self.model):
+                duration = result.get("usage", {}).get("seconds", 0) or 0
+                if not duration and isinstance(result.get("usage"), dict):
+                    duration = result["usage"].get("seconds", 0) or 0
+                langs_resp = result.get("languages")
+                if isinstance(langs_resp, list) and langs_resp:
+                    first = langs_resp[0]
+                    if isinstance(first, dict):
+                        det_lang = first.get("code") or first.get("language") or language or "en"
+                    elif isinstance(first, str):
+                        det_lang = first
+                    else:
+                        det_lang = language or "en"
+                else:
+                    det_lang = result.get("language") or language or "en"
+            else:
+                duration = 0
+                det_lang = result.get("language") or language or "en"
             return TranscriptionResult(
                 full_text=result["text"],
-                language=result.get("language") or language or "en",
-                duration_seconds=0,
+                language=det_lang,
+                duration_seconds=duration,
                 model=self.model,
                 provider="openrouter",
                 processing_time=time.time() - start_time,
             )
 
-        duration = max((s.get("end", 0) for s in raw_segments), default=0)
+        if raw_segments:
+            duration = max((s.get("end", 0) for s in raw_segments), default=0)
+        else:
+            duration = result.get("usage", {}).get("seconds", 0) or 0
+
+        if _is_transcribe_family(self.model):
+            langs_resp = result.get("languages")
+            if isinstance(langs_resp, list) and langs_resp:
+                first = langs_resp[0]
+                if isinstance(first, dict):
+                    det_lang = first.get("code") or first.get("language") or language or "en"
+                elif isinstance(first, str):
+                    det_lang = first
+                else:
+                    det_lang = language or "en"
+            else:
+                det_lang = result.get("language") or language or "en"
+        else:
+            det_lang = result.get("language") or language or "en"
 
         return TranscriptionResult(
             segments=self._build_segments(raw_segments),
             full_text=result.get("text", ""),
-            language=result.get("language") or language or "en",
+            language=det_lang,
             duration_seconds=duration,
             model=self.model,
             provider="openrouter",
@@ -113,10 +192,8 @@ class OpenRouterProvider(BaseProvider):
                     models = []
                     for m in data.get("data", []):
                         mid = m.get("id", "")
-                        # Filter to likely transcription models
                         if any(kw in mid.lower() for kw in ["whisper", "transcribe", "nova", "deepgram"]):
                             models.append(mid)
-                    # Also include common known models
                     known = self._default_models()
                     for k in known:
                         if k not in models:
@@ -129,6 +206,7 @@ class OpenRouterProvider(BaseProvider):
     def _default_models(self) -> list[str]:
         return [
             "openai/whisper-1",
+            "openai/gpt-transcribe",
             "deepgram/nova-3",
             "deepgram/whisper-large-v3-turbo",
             "groq/whisper-large-v3-turbo",

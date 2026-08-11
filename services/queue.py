@@ -509,6 +509,19 @@ async def _run_chunk_job(db, job, provider_config: dict, provider_name: str, lan
 
         provider = get_provider(provider_name, provider_config)
         from backends import LOCAL_PROVIDERS
+        # Wire hotword glossary as keywords for gpt-transcribe (same shape as inline path).
+        _kw_extra: dict = {}
+        if t is not None:
+            try:
+                from services.hotwords import list_hotwords, sanitize_keywords
+                _terms = [h.term for h in list_hotwords(db, t.user_id)] if t.user_id else []
+                _san = sanitize_keywords(_terms)
+                if _san:
+                    _kw_extra["keywords"] = _san
+                    if language and language != "auto":
+                        _kw_extra.setdefault("languages", [language])
+            except Exception:
+                pass
         if provider_name in LOCAL_PROVIDERS:
             # Local providers (Moonshine/builtin) share one process-wide model
             # cache (see backends/moonshine.py / backends/builtin.py) whose
@@ -520,9 +533,9 @@ async def _run_chunk_job(db, job, provider_config: dict, provider_name: str, lan
             # "running" above, so a job parked on this lock is never
             # mistaken for "pending" and re-dispatched by a later tick.
             async with local_provider_lock:
-                result = await provider.transcribe(job.audio_path, language=language, temperature=0.0, **vad_settings)
+                result = await provider.transcribe(job.audio_path, language=language, temperature=0.0, **{**vad_settings, **_kw_extra})
         else:
-            result = await provider.transcribe(job.audio_path, language=language, temperature=0.0, **vad_settings)
+            result = await provider.transcribe(job.audio_path, language=language, temperature=0.0, **{**vad_settings, **_kw_extra})
 
         if hallu_enabled and result.segments:
             seg_dicts = [{"text": s.text, "confidence": s.confidence,

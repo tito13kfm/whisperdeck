@@ -1,9 +1,30 @@
 """Persistent per-user hotword glossary — manual entries plus terms
 auto-extracted from pasted meeting-context docs (see services/correction.py).
-Feeds the post-hoc correction pass, never the transcription-time prompt."""
+Feeds the post-hoc correction pass and, for gpt-transcribe, transcription-time
+keywords context (see backends/openai.py, backends/openrouter.py)."""
 from sqlalchemy import func
 
 from database import HotwordEntry
+
+
+def sanitize_keywords(terms: list[str]) -> list[str]:
+    """Sanitize glossary terms before sending as OpenAI keywords.
+
+    OpenAI rejects the entire request if any keyword contains < > CR LF.
+    Drop those terms rather than stripping chars (which could produce empty
+    or misleading keywords). Also strips whitespace and drops empties.
+    """
+    out: list[str] = []
+    for t in terms:
+        if not t:
+            continue
+        s = t.strip()
+        if not s:
+            continue
+        if any(c in s for c in ("<", ">", "\r", "\n")):
+            continue
+        out.append(s)
+    return out
 
 
 def list_hotwords(db, user_id: int) -> list[HotwordEntry]:
