@@ -222,13 +222,17 @@ def test_run_chunk_job_loses_claim_to_concurrent_cancel(db_session):
             _cancel_from_another_connection(engine, job.id)
         return _real_utcnow_naive()
 
-    def _unexpected_provider(*a, **kw):
+    provider_calls = {"count": 0}
+
+    def _track_provider(*a, **kw):
+        provider_calls["count"] += 1
         raise AssertionError("provider must not be dispatched when the claim is lost")
 
     with patch("services.job_transitions.utcnow_naive", side_effect=hook_utcnow), \
-         patch("services.queue.get_provider", side_effect=_unexpected_provider):
+         patch("services.queue.get_provider", side_effect=_track_provider):
         asyncio.run(_run_chunk_job(db_session, job, {}, "openai", "en", asyncio.Semaphore(1)))
 
+    assert provider_calls["count"] == 0
     db_session.refresh(job)
     assert job.status == "cancelled"
     assert job.attempts == 0
