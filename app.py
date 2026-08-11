@@ -3764,6 +3764,12 @@ async def get_voice_clip_audio(
 # so caching the full transformed HTML would break that contract.
 _INDEX_HTML_FALLBACK = "<h1>WhisperDeck</h1><p>Frontend not built yet.</p>"
 _index_html_cache: Optional[str] = None
+# Regex so the injection does not silently no-op if the placeholder value
+# in index.html ever changes (issue #308). The file's literal is load-bearing
+# only as "a meta tag with this name", not as a specific content value.
+# Permissive on attribute order, spacing, quotes and self-closing slash so a
+# harmless reformat does not become a 500 — only the name matters.
+_PASSWORD_MIN_LENGTH_META_RE = re.compile(r'<meta[^>]*name=["\']wd-password-min-length["\'][^>]*>')
 
 
 def _load_index_html() -> str:
@@ -3782,12 +3788,11 @@ async def index():
     body = _load_index_html()
     if body is _INDEX_HTML_FALLBACK:
         return HTMLResponse(body)
-    return HTMLResponse(
-        body.replace(
-            '<meta name="wd-password-min-length" content="8">',
-            f'<meta name="wd-password-min-length" content="{password_min_length()}">',
-        )
-    )
+    replacement = f'<meta name="wd-password-min-length" content="{password_min_length()}">'
+    new_body, n = _PASSWORD_MIN_LENGTH_META_RE.subn(replacement, body, count=1)
+    if n == 0:
+        raise HTTPException(status_code=500, detail="password-min-length meta tag not found in index.html")
+    return HTMLResponse(new_body)
 
 
 # First-party precached assets whose content decides the service worker's
