@@ -62,6 +62,11 @@ const S = {
   bulkSubmitting: false,
 };
 
+// Registry of session-scoped storage keys that must be cleared on logout.
+// Every new wd_* / sessionStorage key added by a feature must be listed here
+// so resetDeckState() clears it automatically (issue #304).
+const WD_SESSION_KEYS = ['wd_assistant_history'];
+
 const LANGUAGES = ['English', 'Auto-detect', 'Spanish', 'French', 'German', 'Japanese', 'Chinese'];
 
 /* ══════════════════ themes (verbatim from canonical prototype) ══════════════════ */
@@ -854,6 +859,8 @@ function resetDeckState() {
   S.bulkFiles = [];
   S.bulkDefaults = null;
   S.bulkSubmitting = false;
+  S.assistantHistory = [];
+  for (const k of WD_SESSION_KEYS) try { sessionStorage.removeItem(k); } catch {}
   detailData = null;
   // Holds user-authored, not-yet-saved dump-review edits — per-account
   // client state, cleared here for the same reason detailData is (#54).
