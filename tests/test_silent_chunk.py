@@ -95,7 +95,7 @@ def test_chunk_audio_filters_silent_chunks(tmp_path):
 
         # 2 chunks expected (600s / target=300s). Make second one silent.
         def silent_side_effect(path, threshold_db=-50.0):
-            return path.endswith("chunk1.mp3")
+            return "_chunk1.mp3" in path
 
         mock_silent.side_effect = silent_side_effect
 
@@ -106,7 +106,10 @@ def test_chunk_audio_filters_silent_chunks(tmp_path):
     assert len(chunks) == 1
     assert chunks[0]["index"] == 0
     assert "chunk0" in chunks[0]["path"]
-    assert not os.path.exists(str(tmp_path / "input_chunk1.mp3"))
+    # The silent chunk path (second created path) should have been deleted, not a hardcoded old name
+    assert len(created_paths) == 2
+    assert not os.path.exists(created_paths[1])
+    assert os.path.exists(chunks[0]["path"])
 
 
 def test_chunk_audio_keeps_all_when_none_silent(tmp_path):

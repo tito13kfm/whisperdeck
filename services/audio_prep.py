@@ -15,6 +15,7 @@ import os
 import re
 import shutil
 import subprocess
+import uuid
 
 
 class AudioPrepError(Exception):
@@ -64,7 +65,8 @@ async def transcode_for_upload(input_path: str, output_dir: str, bitrate_kbps: i
         )
 
     base = os.path.splitext(os.path.basename(input_path))[0]
-    output_path = os.path.join(output_dir, f"{base}_16k.mp3")
+    suffix = uuid.uuid4().hex
+    output_path = os.path.join(output_dir, f"{base}_{suffix}_16k.mp3")
 
     cmd = [
         _ffmpeg_bin(), "-y",
@@ -99,7 +101,8 @@ async def transcode_stereo_for_diarization(input_path: str, output_dir: str) -> 
         )
 
     base = os.path.splitext(os.path.basename(input_path))[0]
-    output_path = os.path.join(output_dir, f"{base}_16k_stereo.flac")
+    suffix = uuid.uuid4().hex
+    output_path = os.path.join(output_dir, f"{base}_{suffix}_16k_stereo.flac")
 
     cmd = [
         _ffmpeg_bin(), "-y",
@@ -247,6 +250,7 @@ async def extract_clips_concat(
 
     duration = get_audio_duration(audio_path)
     base = os.path.splitext(os.path.basename(audio_path))[0]
+    suffix = uuid.uuid4().hex
 
     selected = []
     total = 0.0
@@ -265,11 +269,11 @@ async def extract_clips_concat(
 
     def _run():
         part_paths = []
-        list_path = os.path.join(output_dir, f"{base}_seed_list.txt")
-        out_path = os.path.join(output_dir, f"{base}_seed.wav")
+        list_path = os.path.join(output_dir, f"{base}_{suffix}_seed_list.txt")
+        out_path = os.path.join(output_dir, f"{base}_{suffix}_seed.wav")
         try:
             for i, (start, end) in enumerate(selected):
-                part = os.path.join(output_dir, f"{base}_seed_part{i}.wav")
+                part = os.path.join(output_dir, f"{base}_{suffix}_seed_part{i}.wav")
                 result = subprocess.run(
                     [
                         _ffmpeg_bin(), "-y", "-i", audio_path,
@@ -344,12 +348,13 @@ async def chunk_audio(
     boundaries = [0.0] + cut_points + [total_duration]
 
     base = os.path.splitext(os.path.basename(audio_path))[0]
+    suffix = uuid.uuid4().hex
     chunks = []
 
     def _cut_one(index: int, seg_start: float, seg_end: float) -> dict:
         cut_start = max(0.0, seg_start - (overlap_seconds if index > 0 else 0))
         cut_end = min(total_duration, seg_end + (overlap_seconds if seg_end < total_duration else 0))
-        chunk_path = os.path.join(output_dir, f"{base}_chunk{index}.mp3")
+        chunk_path = os.path.join(output_dir, f"{base}_{suffix}_chunk{index}.mp3")
         cmd = [
             _ffmpeg_bin(), "-y",
             "-i", audio_path,
