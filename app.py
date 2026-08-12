@@ -2306,6 +2306,17 @@ async def update_transcript(transcript_id: int, data: dict = Body(...), db: Sess
         # earlier ones. Only allow changing kind on settled transcripts.
         if data["kind"] != t.kind and t.status == "processing":
             raise HTTPException(status_code=409, detail="Cannot change mode while transcription is running")
+        # Guard against orphaning dependent rows (issue #299): any
+        # PATCH that would hide the Dump Review / Notes tab must not
+        # silently detach its rows, even if the transcript is already
+        # orphaned by a prior bug.
+        if data["kind"] != t.kind:
+            if data["kind"] != "voice_dump":
+                if db.query(VoiceDumpItem).filter(VoiceDumpItem.transcript_id == t.id).first() is not None:
+                    raise HTTPException(status_code=409, detail="Cannot change kind: voice dump items exist for this transcript")
+            if data["kind"] != "voice_note":
+                if db.query(VoiceNote).filter(VoiceNote.transcript_id == t.id).first() is not None:
+                    raise HTTPException(status_code=409, detail="Cannot change kind: voice note exists for this transcript")
         if data["kind"] == "auto":
             # Revert to auto-classification: store placeholder kind + pending
             # status, same as _run_transcription_pipeline for a fresh 'auto'
