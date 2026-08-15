@@ -601,6 +601,7 @@ async def register(request: Request, data: dict = Body(...), db: Session = Depen
         raise HTTPException(status_code=400, detail="Username already taken")
     if mode == "invite":
         mark_invite_used(db, invite_token, user.id)
+    request.session.clear()
     request.session["user_id"] = user.id
     rotate_csrf_token(request.session)
     return {"ok": True, "username": user.username}
@@ -638,6 +639,7 @@ async def login(request: Request, data: dict = Body(...), db: Session = Depends(
         if user_key:
             rate_limiter.record(user_key)
         raise HTTPException(status_code=401, detail="Invalid username or password")
+    request.session.clear()
     request.session["user_id"] = user.id
     rotate_csrf_token(request.session)
     return {"ok": True, "username": user.username}
@@ -960,6 +962,7 @@ async def reset_password_route(request: Request, data: dict = Body(...), db: Ses
     user = reset_password(db, token, new_password)
     if not user:
         raise HTTPException(status_code=400, detail="Invalid or expired reset token")
+    request.session.clear()
     request.session["user_id"] = user.id
     rotate_csrf_token(request.session)
     return {"ok": True, "username": user.username}
