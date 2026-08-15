@@ -43,7 +43,7 @@ from services.settings import get_user_settings, update_user_settings
 from services.transcription import TranscriptionService
 from services.diarization import DiarizationService, MissingTokenError, degraded_error_text
 from services.voice_id import voice_id_service
-from services.audio_prep import transcode_for_upload, AudioPrepError, chunk_audio, get_audio_duration, extract_clips_concat, has_video_stream, transcode_stereo_for_diarization, evaluate_diarization_eligibility
+from services.audio_prep import transcode_for_upload, AudioPrepError, chunk_audio, get_audio_duration, extract_clips_concat, has_video_stream, transcode_stereo_for_diarization, evaluate_diarization_eligibility_async
 from services.audio_cleanup import cleanup_audio, filter_hallucinations
 from services.queue import (
     create_chunk_jobs, retry_failed_chunks, queue_worker_loop, compute_queue_status,
@@ -1316,7 +1316,7 @@ async def _run_transcription_pipeline(
     if kind in ("dictation", "voice_note", "voice_dump"):
         diarize = False
     if diarize:
-        eligibility = evaluate_diarization_eligibility(str(save_path))
+        eligibility = await evaluate_diarization_eligibility_async(str(save_path))
         if not eligibility.eligible:
             diarize = False
     if capture_source not in (None, "live_stereo"):
@@ -3025,7 +3025,7 @@ async def rediarize_transcript(
     # for an explicit request, so an explicit rediarize does not override it.
     # Stricter than voice-match, which decision 11 row 10 exempts from this
     # condition (voice-match doesn't depend on diarization method).
-    eligibility = evaluate_diarization_eligibility(t.audio_path)
+    eligibility = await evaluate_diarization_eligibility_async(t.audio_path)
     if not eligibility.eligible:
         raise HTTPException(status_code=400, detail=f"Re-diarize doesn't apply — {eligibility.reason}")
     # The job reads its parameters from the transcript row (LlmJob has no

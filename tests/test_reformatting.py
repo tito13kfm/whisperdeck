@@ -331,7 +331,7 @@ def test_transcribe_forces_diarize_false_even_when_prepass_reports_eligible(clie
     with patch("app.get_audio_duration", return_value=1800.0), \
          patch("app.transcode_for_upload", AsyncMock(side_effect=lambda path, *a, **k: path)), \
          patch("app.chunk_audio", AsyncMock(return_value=_fake_chunks(2))), \
-         patch("app.evaluate_diarization_eligibility", return_value=DiarizationEligibility(True)), \
+         patch("app.evaluate_diarization_eligibility_async", new_callable=AsyncMock, return_value=DiarizationEligibility(True)), \
          patch("os.path.getsize", return_value=1_000_000):
         r = client.post(
             "/api/transcribe",
@@ -351,7 +351,7 @@ def test_transcribe_prepass_forces_diarize_false_for_ineligible_meeting(client, 
     with patch("app.get_audio_duration", return_value=1800.0), \
          patch("app.transcode_for_upload", AsyncMock(side_effect=lambda path, *a, **k: path)), \
          patch("app.chunk_audio", AsyncMock(return_value=_fake_chunks(2))), \
-         patch("app.evaluate_diarization_eligibility",
+         patch("app.evaluate_diarization_eligibility_async", new_callable=AsyncMock,
                return_value=DiarizationEligibility(False, "too long a monologue")), \
          patch("os.path.getsize", return_value=1_000_000):
         r = client.post(
@@ -373,7 +373,7 @@ def test_transcribe_prepass_keeps_diarize_true_for_eligible_meeting(client, db_s
     with patch("app.get_audio_duration", return_value=1800.0), \
          patch("app.transcode_for_upload", AsyncMock(side_effect=lambda path, *a, **k: path)), \
          patch("app.chunk_audio", AsyncMock(return_value=_fake_chunks(2))), \
-         patch("app.evaluate_diarization_eligibility", return_value=DiarizationEligibility(True)), \
+         patch("app.evaluate_diarization_eligibility_async", new_callable=AsyncMock, return_value=DiarizationEligibility(True)), \
          patch("os.path.getsize", return_value=1_000_000):
         r = client.post(
             "/api/transcribe",

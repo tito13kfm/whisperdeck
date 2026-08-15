@@ -7,6 +7,8 @@ guard in _run_transcription_pipeline, rediarize's pre-pass gate) live in
 tests/test_reformatting.py and tests/test_pending_classification_guards.py,
 next to the existing tests for those guards.
 """
+import asyncio
+
 from unittest.mock import patch
 
 import pytest
@@ -19,6 +21,7 @@ from services.audio_prep import (
     detect_silence_gaps,
     detect_silence_midpoints,
     evaluate_diarization_eligibility,
+    evaluate_diarization_eligibility_async,
 )
 
 
@@ -152,6 +155,74 @@ def test_silence_gaps_probe_audio_prep_error_fails_open():
          patch("services.audio_prep.detect_silence_gaps", side_effect=AudioPrepError("ffmpeg failed")):
         result = evaluate_diarization_eligibility("fake.mp3")
     assert result.eligible is True
+
+
+class _FailedProbe:
+    """subprocess.run result for an ffmpeg invocation that exited nonzero."""
+    returncode = 1
+    stdout = ""
+    stderr = "Invalid data found when processing input\n"
+
+
+def test_failed_silence_probe_fails_open_instead_of_vetoing():
+    """Regression, PR #418 review: a silence probe that EXITS NONZERO produces
+    no silence_end lines, which is byte-identical to a recording that genuinely
+    has no pauses. Reading the empty result as "no pauses" vetoed any recording
+    over the continuous-speech cap on the strength of a tool failure alone.
+
+    The tests above this one all mock detect_silence_gaps itself, so they could
+    never see this — the bug lived one layer below them, in how a nonzero exit
+    was (not) distinguished from a clean scan. This one mocks subprocess.run.
+    """
+    with patch("services.audio_prep.get_audio_duration", return_value=600.0), \
+         patch("services.audio_prep.subprocess.run", return_value=_FailedProbe()):
+        result = evaluate_diarization_eligibility("fake.mp3")
+    assert result.eligible is True
+    assert result.reason == ""
+
+
+def test_detect_silence_gaps_strict_raises_on_probe_failure():
+    with patch("services.audio_prep.subprocess.run", return_value=_FailedProbe()):
+        with pytest.raises(AudioPrepError):
+            detect_silence_gaps("fake.mp3", strict=True)
+
+
+def test_async_wrapper_runs_the_probe_off_the_event_loop():
+    """PR #418 review, should-fix: both guard sites are async handlers, and the
+    probe is two ffmpeg subprocesses (one decodes the whole file). Running that
+    inline stalls every other request on the loop.
+
+    The route-level tests can't see this — they patch the wrapper itself with an
+    AsyncMock, so its body never runs. Assert the hop directly instead: without
+    asyncio.to_thread the coroutine still awaits fine and every other test stays
+    green, which is exactly why this needs its own check.
+    """
+    real_to_thread = asyncio.to_thread
+    threaded = []
+
+    async def spy(fn, *args, **kwargs):
+        threaded.append(fn)
+        return await real_to_thread(fn, *args, **kwargs)
+
+    with patch("services.audio_prep.get_audio_duration", return_value=600.0), \
+         patch("services.audio_prep.detect_silence_gaps",
+               return_value=[_gap(60.0 * i, 60.0 * i + 1.0) for i in range(1, 10)]), \
+         patch("services.audio_prep.asyncio.to_thread", spy):
+        result = asyncio.run(evaluate_diarization_eligibility_async("fake.mp3"))
+
+    assert threaded == [evaluate_diarization_eligibility]
+    assert result.eligible is True
+
+
+def test_detect_silence_gaps_lenient_returns_empty_on_probe_failure():
+    """chunk_audio() has always relied on the lenient default: an empty list
+    makes it fall back to fixed-interval cuts. Raising there instead would turn
+    graceful degradation into a failed transcription, so the default must stay
+    lenient even though the eligibility caller needs the opposite.
+    """
+    with patch("services.audio_prep.subprocess.run", return_value=_FailedProbe()):
+        assert detect_silence_gaps("fake.mp3") == []
+        assert detect_silence_midpoints("fake.mp3") == []
 
 
 # ── detect_silence_midpoints must still behave identically post-refactor ──

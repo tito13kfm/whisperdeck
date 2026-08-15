@@ -6,7 +6,7 @@ states (only blocked once confirmed voice_note); reformat, rediarize,
 voice-match, and the voice-note rerun all stay BLOCKED across all three (the
 stricter, safety-relevant set) -- issue #268's acceptance criterion:
 'classification failure cannot silently enable an unsafe capability'."""
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -94,7 +94,7 @@ def test_rediarize_blocked_when_prepass_rejects(client, db_session, tmp_path):
     an accepted meeting with stored audio that the pre-pass rejects must
     still 400, with the rejection reason surfaced in the detail message."""
     t = _transcript_with_audio(db_session, tmp_path, classification_status="success", kind="meeting")
-    with patch("app.evaluate_diarization_eligibility",
+    with patch("app.evaluate_diarization_eligibility_async", new_callable=AsyncMock,
                return_value=DiarizationEligibility(False, "too short to diarize")):
         r = client.post(f"/api/transcripts/{t.id}/rediarize")
     assert r.status_code == 400
@@ -106,7 +106,7 @@ def test_rediarize_allowed_when_prepass_reports_eligible(client, db_session, tmp
     patched eligible, still reaches job enqueue (200) -- proves the gate
     isn't an unconditional veto."""
     t = _transcript_with_audio(db_session, tmp_path, classification_status="success", kind="meeting")
-    with patch("app.evaluate_diarization_eligibility", return_value=DiarizationEligibility(True)):
+    with patch("app.evaluate_diarization_eligibility_async", new_callable=AsyncMock, return_value=DiarizationEligibility(True)):
         r = client.post(f"/api/transcripts/{t.id}/rediarize")
     assert r.status_code == 200
 

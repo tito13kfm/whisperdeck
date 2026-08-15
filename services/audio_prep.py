@@ -205,7 +205,9 @@ def is_silent_audio(audio_path: str, threshold_db: float = -50.0) -> bool:
     return peak_db < threshold_db
 
 
-def detect_silence_gaps(audio_path: str, noise_db: str = "-30dB", min_duration: float = 0.5) -> list[dict]:
+def detect_silence_gaps(
+    audio_path: str, noise_db: str = "-30dB", min_duration: float = 0.5, strict: bool = False
+) -> list[dict]:
     """Return each detected silence gap as {"start", "end", "duration"}
     (seconds), in order.
 
@@ -216,6 +218,18 @@ def detect_silence_gaps(audio_path: str, noise_db: str = "-30dB", min_duration: 
     scan; this one keeps the gap boundaries the midpoint average throws away,
     which is what a caller reasoning about pause *structure* (rather than
     where to cut) needs.
+
+    strict decides what a failed probe means, because the two callers need
+    opposite answers and an empty list cannot tell them apart:
+
+    - strict=False (default, and what chunk_audio has always relied on): a
+      nonzero ffmpeg exit yields an empty list, same as a recording with no
+      gaps. chunk_audio degrades to fixed-interval cuts on an empty list, so
+      silence is the safe failure mode there.
+    - strict=True: a nonzero exit raises AudioPrepError. An eligibility caller
+      must not read "the probe broke" as "this recording has no pauses at
+      all" — that inference vetoes a long recording on the strength of a tool
+      failure.
     """
     result = subprocess.run(
         [
@@ -225,6 +239,8 @@ def detect_silence_gaps(audio_path: str, noise_db: str = "-30dB", min_duration: 
         ],
         capture_output=True, text=True,
     )
+    if strict and result.returncode != 0:
+        raise AudioPrepError(f"ffmpeg silencedetect failed: {result.stderr[-500:]}")
     gaps = []
     for match in _SILENCE_END_RE.finditer(result.stderr):
         silence_end = float(match.group(1))
@@ -314,7 +330,7 @@ def evaluate_diarization_eligibility(
         )
 
     try:
-        gaps = detect_silence_gaps(audio_path)
+        gaps = detect_silence_gaps(audio_path, strict=True)
     except (AudioPrepError, OSError, ValueError, subprocess.SubprocessError):
         return DiarizationEligibility(True)
 
@@ -336,6 +352,18 @@ def evaluate_diarization_eligibility(
         )
 
     return DiarizationEligibility(True)
+
+
+async def evaluate_diarization_eligibility_async(audio_path: str, **kwargs) -> DiarizationEligibility:
+    """Await evaluate_diarization_eligibility() off the event loop.
+
+    Both guard sites are async request handlers, and the eligibility probe is
+    two ffmpeg/ffprobe subprocesses — the silencedetect one decodes the whole
+    file. Running that inline would stall every other request on the loop for
+    its duration, so it goes to a worker thread the same way
+    transcode_for_upload() does.
+    """
+    return await asyncio.to_thread(evaluate_diarization_eligibility, audio_path, **kwargs)
 
 
 async def extract_clips_concat(
