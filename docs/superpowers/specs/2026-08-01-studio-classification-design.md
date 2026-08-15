@@ -157,7 +157,7 @@ job-type discriminator) is untouched by this design.
 | Site | Current behavior | Future predicate | Change |
 |---|---|---|---|
 | `database/__init__.py:38` | `Transcript.kind` column, default `"meeting"` | unchanged value set; add `status`, `confidence`, `provenance` columns alongside (decision 6) | **changed** (additive) |
-| `app.py:1050` (`if kind in ("dictation","voice_note"): diarize = False`) | diarization forced off by kind | **decoupled from kind entirely** — replaced by decision 1's pre-pass result (`diarize = prepass.eligible`) | **changed** (re-based, not just converted) |
+| `app.py:1050` (`if kind in ("dictation","voice_note","voice_dump"): diarize = False`) | diarization forced off by kind | decision 1's pre-pass **ANDed onto** the existing kind veto, not replacing it — `diarize = diarize and prepass.eligible and kind not in (...)`. See the amendment below. | **changed** (pre-pass added; kind veto retained for explicit overrides) |
 | `app.py:1269-1277` (correction/classify/voice-note-chain/tagging dispatch) | `if kind != "voice_note": correction+classify else: voice-note chain`; tagging always | correction always runs; voice-note chain gated on **accepted** kind == `voice_note` (deferred while pending, triggered retroactively on acceptance, see #267 item 3 and #270/queue.py:565 sibling); tagging unchanged | **changed** |
 | `app.py:1307`, `app.py:1400` (kind validation on upload / bulk-transcribe) | must be one of the 3 kinds | add `"auto"` as a valid sentinel meaning "defer to classifier"; explicit values behave exactly as today (recorded as override) | **changed** (additive, back-compat preserved) |
 | `app.py:369-399` (`_dictation_job_fields` serializer) | branches on `t.kind` for job-field shape | branches on **effective kind** (accepted classification or override); shape/fields unchanged | **preserved** (input source changes, output contract doesn't) |
@@ -173,6 +173,45 @@ job-type discriminator) is untouched by this design.
 | `services/transcription.py:187,221` (kind-specific summary/prompt selection) | branches on `transcript.kind` | branches on accepted kind; template selection logic itself unchanged | **preserved** |
 | `services/reformatting.py:88` (`classify_intent`) | dictation-only reformat-tab hint, unrelated to routing | **untouched** — explicitly out of scope, do not rename or merge with decision 2's classifier | **preserved, unrelated** |
 | `static/rack.js:1714,1727-1731,1811,4207,4246,4275,4379-4404` | mode/speaker controls, detail label, kind toggle | frontend mirror of the predicates above; owned by #269's implementation, not re-derived here | **changed** (#269's scope) |
+
+## Amendment 2026-08-15 (#416 / PR #418): row 2's kind veto is retained
+
+Row 2 above originally read "decoupled from kind entirely", with
+`diarize = prepass.eligible`. The implementation deliberately does not do that.
+Recording why here, because the doc otherwise describes behavior the code does
+not have.
+
+The pre-pass may use only duration and silence/pause pattern (decision 1 rules
+out transcript text and ML). Those signals cannot distinguish a dictation's
+thinking-pauses from a meeting's conversational turn-taking — both are
+speech-pause-speech, and silence detection cannot see whether the speaker
+changed across a pause. So a pre-pass permissive enough not to reject real
+meetings is also permissive enough to pass an ordinary dictation. Dropping the
+kind veto would have made a dictation start diarizing, which it never did
+before: a looser gate, not the tighter one this design intends.
+
+What ships instead is both conditions ANDed, so the gate is strictly tighter
+than the pre-#416 one and never looser. This is a narrower deviation than it
+reads as: `kind == "auto"` is resolved to `"meeting"` before this guard, so the
+kind veto can only fire on an **explicit** single-speaker choice, which decision
+5 says to honor. Kind-as-classification is no longer a factor here, as row 2
+intended; kind-as-explicit-user-intent still is.
+
+`voice_dump` is included in the veto. It postdates this document by one day
+(doc `92ea93a` 2026-08-01, `voice_dump` `f28e254` 2026-08-02) and appears
+nowhere in the original text, so its treatment is stated rather than inherited.
+
+Row 9 (rediarize) shipped as written: kind veto retained, pre-pass ANDed on
+top, and its "additionally requires" wording read as admitting no override for
+an explicit rediarize request. Row 10 (voice-match) is unchanged and stays
+exempt from the pre-pass.
+
+Revisit if a cheap speaker-change signal ever becomes available (a fast VAD, a
+lightweight embedding pass). Row 2 as originally written becomes achievable
+then, and the kind veto can come out.
+
+`/api/diarize` is a third diarization entry point with no kind or eligibility
+guard, absent from the table above. Tracked as #417.
 
 ## Explicitly out of scope (tracked separately)
 
