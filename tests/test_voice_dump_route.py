@@ -364,9 +364,13 @@ def test_format_route_rejects_voice_dump(client):
 
 
 def test_rediarize_route_rejects_voice_dump(client):
+    """Issue #416: voice_dump gets its own explicit rejection message now,
+    not the generic "classification hasn't completed" fall-through, which
+    would be factually wrong for a confirmed kind."""
     tid = _upload_voice_dump(client).json()["id"]
     r = client.post(f"/api/transcripts/{tid}/rediarize")
     assert r.status_code == 400
+    assert r.json()["detail"] == "Voice dumps are single-speaker — re-diarize doesn't apply"
 
 
 def test_summarize_route_rejects_voice_dump(client):

@@ -14,6 +14,7 @@ import pytest
 
 from backends import ProviderError
 from database import Transcript, User
+from services.audio_prep import DiarizationEligibility
 from services.llm_jobs import enqueue_llm_job, run_llm_job
 from services.reformatting import (
     format_as_markdown, format_as_email, format_as_coding_prompt, classify_intent,
@@ -318,6 +319,72 @@ def test_transcribe_forces_diarize_false_server_side_for_dictation(client, db_se
     t = db_session.query(Transcript).filter(Transcript.id == transcript_id).first()
     assert t.kind == "dictation"
     assert t.diarize_requested is False
+
+
+@pytest.mark.parametrize("kind", ["dictation", "voice_note", "voice_dump"])
+def test_transcribe_forces_diarize_false_even_when_prepass_reports_eligible(client, db_session, kind):
+    """Issue #416: the audio-feature pre-pass sits AFTER the kind veto in
+    _run_transcription_pipeline and can only narrow eligibility further,
+    never widen it back open. Patch the pre-pass to explicitly report the
+    audio as eligible, so a pass here proves the kind veto -- not a lucky
+    pre-pass rejection -- is what keeps these single-speaker kinds off."""
+    with patch("app.get_audio_duration", return_value=1800.0), \
+         patch("app.transcode_for_upload", AsyncMock(side_effect=lambda path, *a, **k: path)), \
+         patch("app.chunk_audio", AsyncMock(return_value=_fake_chunks(2))), \
+         patch("app.evaluate_diarization_eligibility_async", new_callable=AsyncMock, return_value=DiarizationEligibility(True)), \
+         patch("os.path.getsize", return_value=1_000_000):
+        r = client.post(
+            "/api/transcribe",
+            files={"file": (f"{kind}.wav", io.BytesIO(b"fake"), "audio/wav")},
+            data={"provider": "moonshine", "kind": kind, "diarize": "true"},
+        )
+    assert r.status_code == 200
+    transcript_id = r.json()["id"]
+    t = db_session.query(Transcript).filter(Transcript.id == transcript_id).first()
+    assert t.kind == kind
+    assert t.diarize_requested is False
+
+
+def test_transcribe_prepass_forces_diarize_false_for_ineligible_meeting(client, db_session):
+    """Issue #416: a meeting upload with diarize=true must end up with
+    diarization off when the audio-feature pre-pass rejects it."""
+    with patch("app.get_audio_duration", return_value=1800.0), \
+         patch("app.transcode_for_upload", AsyncMock(side_effect=lambda path, *a, **k: path)), \
+         patch("app.chunk_audio", AsyncMock(return_value=_fake_chunks(2))), \
+         patch("app.evaluate_diarization_eligibility_async", new_callable=AsyncMock,
+               return_value=DiarizationEligibility(False, "too long a monologue")), \
+         patch("os.path.getsize", return_value=1_000_000):
+        r = client.post(
+            "/api/transcribe",
+            files={"file": ("meeting.wav", io.BytesIO(b"fake"), "audio/wav")},
+            data={"provider": "moonshine", "kind": "meeting", "diarize": "true"},
+        )
+    assert r.status_code == 200
+    transcript_id = r.json()["id"]
+    t = db_session.query(Transcript).filter(Transcript.id == transcript_id).first()
+    assert t.kind == "meeting"
+    assert t.diarize_requested is False
+
+
+def test_transcribe_prepass_keeps_diarize_true_for_eligible_meeting(client, db_session):
+    """Complement of the test above: when the pre-pass reports the audio
+    eligible, a meeting upload with diarize=true keeps diarization on --
+    proves the pre-pass isn't just an unconditional veto."""
+    with patch("app.get_audio_duration", return_value=1800.0), \
+         patch("app.transcode_for_upload", AsyncMock(side_effect=lambda path, *a, **k: path)), \
+         patch("app.chunk_audio", AsyncMock(return_value=_fake_chunks(2))), \
+         patch("app.evaluate_diarization_eligibility_async", new_callable=AsyncMock, return_value=DiarizationEligibility(True)), \
+         patch("os.path.getsize", return_value=1_000_000):
+        r = client.post(
+            "/api/transcribe",
+            files={"file": ("meeting.wav", io.BytesIO(b"fake"), "audio/wav")},
+            data={"provider": "moonshine", "kind": "meeting", "diarize": "true"},
+        )
+    assert r.status_code == 200
+    transcript_id = r.json()["id"]
+    t = db_session.query(Transcript).filter(Transcript.id == transcript_id).first()
+    assert t.kind == "meeting"
+    assert t.diarize_requested is True
 
 
 def test_meeting_transcript_serializer_omits_dictation_job_fields(client):

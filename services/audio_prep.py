@@ -205,13 +205,31 @@ def is_silent_audio(audio_path: str, threshold_db: float = -50.0) -> bool:
     return peak_db < threshold_db
 
 
-def detect_silence_midpoints(audio_path: str, noise_db: str = "-30dB", min_duration: float = 0.5) -> list[float]:
-    """Return timestamps (seconds) at the midpoint of each detected silence
-    gap, in order. Cutting a chunk boundary at one of these midpoints keeps
-    the cut roughly equidistant from speech on either side.
+def detect_silence_gaps(
+    audio_path: str, noise_db: str = "-30dB", min_duration: float = 0.5, strict: bool = False
+) -> list[dict]:
+    """Return each detected silence gap as {"start", "end", "duration"}
+    (seconds), in order.
 
     A single-pass ffmpeg filter — no decode-to-file, no ML model, adds low
     single-digit seconds even on a multi-hour recording.
+
+    detect_silence_midpoints() below is the chunk-splitting view of this same
+    scan; this one keeps the gap boundaries the midpoint average throws away,
+    which is what a caller reasoning about pause *structure* (rather than
+    where to cut) needs.
+
+    strict decides what a failed probe means, because the two callers need
+    opposite answers and an empty list cannot tell them apart:
+
+    - strict=False (default, and what chunk_audio has always relied on): a
+      nonzero ffmpeg exit yields an empty list, same as a recording with no
+      gaps. chunk_audio degrades to fixed-interval cuts on an empty list, so
+      silence is the safe failure mode there.
+    - strict=True: a nonzero exit raises AudioPrepError. An eligibility caller
+      must not read "the probe broke" as "this recording has no pauses at
+      all" — that inference vetoes a long recording on the strength of a tool
+      failure.
     """
     result = subprocess.run(
         [
@@ -221,13 +239,131 @@ def detect_silence_midpoints(audio_path: str, noise_db: str = "-30dB", min_durat
         ],
         capture_output=True, text=True,
     )
-    midpoints = []
+    if strict and result.returncode != 0:
+        raise AudioPrepError(f"ffmpeg silencedetect failed: {result.stderr[-500:]}")
+    gaps = []
     for match in _SILENCE_END_RE.finditer(result.stderr):
         silence_end = float(match.group(1))
         silence_duration = float(match.group(2))
-        silence_start = silence_end - silence_duration
-        midpoints.append((silence_start + silence_end) / 2)
-    return midpoints
+        gaps.append({
+            "start": silence_end - silence_duration,
+            "end": silence_end,
+            "duration": silence_duration,
+        })
+    return gaps
+
+
+def detect_silence_midpoints(audio_path: str, noise_db: str = "-30dB", min_duration: float = 0.5) -> list[float]:
+    """Return timestamps (seconds) at the midpoint of each detected silence
+    gap, in order. Cutting a chunk boundary at one of these midpoints keeps
+    the cut roughly equidistant from speech on either side.
+
+    A single-pass ffmpeg filter — no decode-to-file, no ML model, adds low
+    single-digit seconds even on a multi-hour recording.
+    """
+    return [
+        (gap["start"] + gap["end"]) / 2
+        for gap in detect_silence_gaps(audio_path, noise_db=noise_db, min_duration=min_duration)
+    ]
+
+
+# Diarization eligibility pre-pass (design decision 1 of
+# docs/superpowers/specs/2026-08-01-studio-classification-design.md).
+#
+# Both thresholds are deliberately conservative: the pre-pass is an opt-out
+# gate with no ground truth to calibrate against, so it only vetoes recordings
+# whose audio shape makes speaker separation meaningless, never ones that
+# merely look single-speaker. Anything it isn't sure about stays eligible.
+MIN_DIARIZATION_DURATION_SECONDS = 30.0
+MAX_CONTINUOUS_SPEECH_SECONDS = 300.0
+
+
+class DiarizationEligibility:
+    """Result of the diarization pre-pass: whether the audio is worth
+    diarizing, plus a human-readable reason suitable for an API rejection
+    message (empty when eligible)."""
+
+    __slots__ = ("eligible", "reason")
+
+    def __init__(self, eligible: bool, reason: str = ""):
+        self.eligible = eligible
+        self.reason = reason
+
+    def __repr__(self) -> str:
+        return f"DiarizationEligibility(eligible={self.eligible!r}, reason={self.reason!r})"
+
+
+def evaluate_diarization_eligibility(
+    audio_path: str,
+    *,
+    min_duration_seconds: float = MIN_DIARIZATION_DURATION_SECONDS,
+    max_continuous_speech_seconds: float = MAX_CONTINUOUS_SPEECH_SECONDS,
+) -> DiarizationEligibility:
+    """Decide whether a recording is worth diarizing, from audio features
+    only — no transcript text, no ML, no classification input.
+
+    Two narrow vetoes, both computed from machinery this module already has:
+
+    (a) Below min_duration_seconds. A clip that short carries too little
+        speech for speaker clustering to separate anything meaningfully.
+    (b) A continuous speech run longer than max_continuous_speech_seconds
+        with no pause at all. Conversational turn-taking cannot happen
+        without pauses, so an unbroken stretch that long is a single
+        continuous source, not a discussion.
+
+    Everything else is eligible. So is any recording whose probes fail:
+    ffmpeg being unavailable or a container being unreadable is a tool
+    problem, and failing open leaves today's behavior intact rather than
+    silently switching diarization off (same fail-open reasoning as
+    is_silent_audio above).
+    """
+    try:
+        duration = get_audio_duration(audio_path)
+    except (AudioPrepError, OSError, ValueError, subprocess.SubprocessError):
+        return DiarizationEligibility(True)
+
+    if duration < min_duration_seconds:
+        return DiarizationEligibility(
+            False,
+            f"Recording is too short to diarize ({duration:.1f}s, "
+            f"minimum {min_duration_seconds:.0f}s)",
+        )
+
+    try:
+        gaps = detect_silence_gaps(audio_path, strict=True)
+    except (AudioPrepError, OSError, ValueError, subprocess.SubprocessError):
+        return DiarizationEligibility(True)
+
+    # Speech runs are the spans between gaps, including the head (start of
+    # file to the first gap) and the tail (last gap to end of file). With no
+    # gaps at all the whole recording is one run.
+    longest_run = 0.0
+    cursor = 0.0
+    for gap in gaps:
+        longest_run = max(longest_run, gap["start"] - cursor)
+        cursor = gap["end"]
+    longest_run = max(longest_run, duration - cursor)
+
+    if longest_run > max_continuous_speech_seconds:
+        return DiarizationEligibility(
+            False,
+            f"Recording has {longest_run / 60:.1f} minutes of unbroken speech "
+            "with no pauses — that's a continuous single source, not a conversation",
+        )
+
+    return DiarizationEligibility(True)
+
+
+async def evaluate_diarization_eligibility_async(audio_path: str, **kwargs) -> DiarizationEligibility:
+    """Await evaluate_diarization_eligibility() off the event loop.
+
+    Both guard sites are async request handlers, and the eligibility probe is
+    two ffmpeg/ffprobe subprocesses — the silencedetect one decodes the whole
+    file. Running that inline would stall every other request on the loop for
+    its duration, so it goes to a worker thread the same way
+    transcode_for_upload() does.
+    """
+    return await asyncio.to_thread(evaluate_diarization_eligibility, audio_path, **kwargs)
 
 
 async def extract_clips_concat(
