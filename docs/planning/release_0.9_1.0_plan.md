@@ -29,6 +29,7 @@ Both were greenfield before the audit. The search bug that would have blocked th
 Today search only finds exact words. If you search "grocery run" it only finds "grocery run."
 Embeddings turn every sentence into numbers that capture meaning. Then "grocery run" finds "buy milk" because they mean the same thing, even though no words match.
 To do that we need: a small AI model that makes those numbers (runs locally or via API), and a place to save them (a new table in the database). That's all #218 is.
+Decided Aug 15: embeddings will be **a picker in the service panel** (like STT/LLM) — `local | openai | none`, per-machine, default `local` where the machine can handle it. Weak machines that can't run a local model can use the API instead. Vectors from different providers don't mix, so the choice has to stay consistent per library.
 
 **Ramble classifier (for #245 and friends)**
 You record one long ramble. We split it into smaller pieces, and each piece gets its own label (task, idea, note, etc.). You asked for two things here — both are yes:
@@ -97,6 +98,9 @@ Dependency: independent from Tracks A and B.
 
 #404, #403, #406, #417, #405 — duplicated code found by audit. No dependencies. Do when someone has a free hour.
 
+### Multi-machine sync (new, not for 0.9 or 1.0 at launch)
+#421 — one searchable library from any machine. Brainstormed three options (A: home server + senders, B: full sync, C: cloud folder). Decided to write a one-page design doc first and lean toward A (home + senders with offline queue). See #421.
+
 ### Explicitly not 1.0
 
 About 20 issues marked `Future:` (#195-203, #219-224, #227, #236-239, #263, plus the container #196, #322). Audit said defer. Keep them as 2.0.
@@ -116,7 +120,7 @@ About 20 issues marked `Future:` (#195-203, #219-224, #227, #236-239, #263, plus
 - Repo is on `master` at 31d9fc2, clean. Worktrees: none (5 merged branches cleaned up Aug 15 — #263, #304, #308, #369, #391).
 - 70 open issues (see `.omo/runs/open-70.txt` dump from this session).
 - `worklist.md` is stale — do not use. `studio-framing.md` and `server-client-mobile-expansion.md` are marked exploratory, not scheduled.
-- No code was changed this session. Next step is to pick the first 0.9 issue (#123) and start a branch for it, or jump to Track A/B design for 1.0 if you want to design first.
+- No code was changed this session. New issue #421 opened for multi-machine sync (design before code), and #218 commented re embedding picker. Next step is to pick the first 0.9 issue (#123) and start a branch for it, or jump to Track A/B design for 1.0 if you want to design first.
 
 ## Order to tackle everything (one list)
 
