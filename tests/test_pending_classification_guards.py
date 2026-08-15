@@ -6,9 +6,12 @@ states (only blocked once confirmed voice_note); reformat, rediarize,
 voice-match, and the voice-note rerun all stay BLOCKED across all three (the
 stricter, safety-relevant set) -- issue #268's acceptance criterion:
 'classification failure cannot silently enable an unsafe capability'."""
+from unittest.mock import patch
+
 import pytest
 
 from database import LlmJob, Transcript, User
+from services.audio_prep import DiarizationEligibility
 
 
 # The three classification_status values design decision 6/8 treats as "not
@@ -82,6 +85,29 @@ def test_rediarize_allowed_when_accepted_meeting(client, db_session, tmp_path):
     400 a fixture without audio would give either way."""
     t = _transcript_with_audio(db_session, tmp_path, classification_status="success", kind="meeting")
     r = client.post(f"/api/transcripts/{t.id}/rediarize")
+    assert r.status_code == 200
+
+
+def test_rediarize_blocked_when_prepass_rejects(client, db_session, tmp_path):
+    """Issue #416: the audio-feature pre-pass is ANDed on top of the kind
+    allow-list, and is NOT overridable by an explicit rediarize request --
+    an accepted meeting with stored audio that the pre-pass rejects must
+    still 400, with the rejection reason surfaced in the detail message."""
+    t = _transcript_with_audio(db_session, tmp_path, classification_status="success", kind="meeting")
+    with patch("app.evaluate_diarization_eligibility",
+               return_value=DiarizationEligibility(False, "too short to diarize")):
+        r = client.post(f"/api/transcripts/{t.id}/rediarize")
+    assert r.status_code == 400
+    assert "too short to diarize" in r.json()["detail"]
+
+
+def test_rediarize_allowed_when_prepass_reports_eligible(client, db_session, tmp_path):
+    """Complement of the test above: same accepted meeting, pre-pass
+    patched eligible, still reaches job enqueue (200) -- proves the gate
+    isn't an unconditional veto."""
+    t = _transcript_with_audio(db_session, tmp_path, classification_status="success", kind="meeting")
+    with patch("app.evaluate_diarization_eligibility", return_value=DiarizationEligibility(True)):
+        r = client.post(f"/api/transcripts/{t.id}/rediarize")
     assert r.status_code == 200
 
 

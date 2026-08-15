@@ -43,7 +43,7 @@ from services.settings import get_user_settings, update_user_settings
 from services.transcription import TranscriptionService
 from services.diarization import DiarizationService, MissingTokenError, degraded_error_text
 from services.voice_id import voice_id_service
-from services.audio_prep import transcode_for_upload, AudioPrepError, chunk_audio, get_audio_duration, extract_clips_concat, has_video_stream, transcode_stereo_for_diarization
+from services.audio_prep import transcode_for_upload, AudioPrepError, chunk_audio, get_audio_duration, extract_clips_concat, has_video_stream, transcode_stereo_for_diarization, evaluate_diarization_eligibility
 from services.audio_cleanup import cleanup_audio, filter_hallucinations
 from services.queue import (
     create_chunk_jobs, retry_failed_chunks, queue_worker_loop, compute_queue_status,
@@ -1265,7 +1265,9 @@ async def _run_transcription_pipeline(
     summarize prompt and reformatting features assume it) — diarize is
     forced off here, server-side, rather than trusting the client to have
     sent diarize=false. Enforced once at this convergence point so it can't
-    be bypassed by calling either entry point directly."""
+    be bypassed by calling either entry point directly. Since #416 the
+    audio-feature pre-pass (design decision 1) narrows it further; see the
+    guard itself for how the two combine."""
     # "auto" (design decision 11) defers kind to the pipeline classifier —
     # store a placeholder kind (never read while classification_status is
     # "pending", see effective_kind()) and leave classification_status at
@@ -1291,8 +1293,32 @@ async def _run_transcription_pipeline(
         classification_status = "override"
     else:
         classification_status = None  # leave column default; #271's territory
+    # Diarization eligibility (design decision 1 / decision 11's first guard
+    # row). Two independent reasons to force diarize off, ANDed:
+    #
+    #   - the kind veto below, kept from before the pre-pass existed. Note
+    #     "auto" already resolved to "meeting" above, so by this line the veto
+    #     can only fire on an *explicit* single-speaker choice, which decision
+    #     5 says to honor. Kind-as-classification is no longer a factor here;
+    #     kind-as-explicit-user-intent still is. voice_dump is included
+    #     deliberately: it postdates the design doc (which never mentions it)
+    #     and is as single-speaker as the two kinds the doc does name.
+    #   - the audio-feature pre-pass, which vetoes recordings whose shape
+    #     makes speaker separation meaningless regardless of kind.
+    #
+    # Decision 11 row 2 reads "kind no longer a factor" for this site. Keeping
+    # the kind veto is a deliberate deviation: the pre-pass's signals (duration
+    # + pause structure) cannot distinguish dictation thinking-pauses from
+    # conversational turn-taking, so dropping the kind veto would start
+    # diarizing dictation/voice_note/voice_dump uploads that never diarize
+    # today. This gate is strictly tighter than the one it replaces, never
+    # looser.
     if kind in ("dictation", "voice_note", "voice_dump"):
         diarize = False
+    if diarize:
+        eligibility = evaluate_diarization_eligibility(str(save_path))
+        if not eligibility.eligible:
+            diarize = False
     if capture_source not in (None, "live_stereo"):
         capture_source = None  # unknown values from stale clients are ignored, not errors
     user_settings = get_user_settings(db, current_user.id)
@@ -2981,6 +3007,11 @@ async def rediarize_transcript(
             raise HTTPException(status_code=400, detail="Voice notes are single-speaker — re-diarize doesn't apply")
         if ek == "dictation":
             raise HTTPException(status_code=400, detail="Dictation transcripts are single-speaker — re-diarize doesn't apply")
+        if ek == "voice_dump":
+            # Explicit case rather than the fall-through below: a voice_dump
+            # is a confirmed kind, so "classification hasn't completed" would
+            # be factually wrong for it.
+            raise HTTPException(status_code=400, detail="Voice dumps are single-speaker — re-diarize doesn't apply")
         raise HTTPException(status_code=400, detail="Re-diarize isn't available yet — classification hasn't completed")
     if t.status not in ("completed", "partial"):
         raise HTTPException(status_code=400, detail=f"Transcript {transcript_id} is not completed")
@@ -2989,6 +3020,14 @@ async def rediarize_transcript(
             status_code=400,
             detail="No stored audio for this transcript — it predates audio retention or the file was removed",
         )
+    # Decision 1's pre-pass, ANDed on top of the kind allow-list above.
+    # Decision 11 row 9 words it as "additionally requires", with no carve-out
+    # for an explicit request, so an explicit rediarize does not override it.
+    # Stricter than voice-match, which decision 11 row 10 exempts from this
+    # condition (voice-match doesn't depend on diarization method).
+    eligibility = evaluate_diarization_eligibility(t.audio_path)
+    if not eligibility.eligible:
+        raise HTTPException(status_code=400, detail=f"Re-diarize doesn't apply — {eligibility.reason}")
     # The job reads its parameters from the transcript row (LlmJob has no
     # params column), so persist the requested count before enqueueing.
     t.num_speakers = num_speakers
