@@ -616,18 +616,20 @@ class TestSessionFixation:
 
         app_module.app.dependency_overrides[app_module.get_db] = _override
         app_module.rate_limiter._buckets.clear()
-        seeder = TestClient(app_module.app)
-        seeder.headers["X-CSRF-Token"] = seeder.get("/api/csrf-token").json()["token"]
-        assert seeder.post("/api/register", json={"username": "fix_login_victim4", "password": "pass1234"}).status_code == 200
-        anon = TestClient(app_module.app)
-        csrf = anon.get("/api/csrf-token").json()["token"]
-        anon.headers["X-CSRF-Token"] = csrf
-        assert anon.post("/_test/session-plant", json={"attacker_key": "evil"}).status_code == 200
-        assert anon.get("/_test/session-read").json().get("attacker_key") == "evil"
-        r = anon.post("/api/login", json={"username": "fix_login_victim4", "password": "pass1234"})
-        assert r.status_code == 200, r.text
-        assert "attacker_key" not in anon.get("/_test/session-read").json()
-        app_module.app.dependency_overrides.clear()
+        try:
+            seeder = TestClient(app_module.app)
+            seeder.headers["X-CSRF-Token"] = seeder.get("/api/csrf-token").json()["token"]
+            assert seeder.post("/api/register", json={"username": "fix_login_victim4", "password": "pass1234"}).status_code == 200
+            anon = TestClient(app_module.app)
+            csrf = anon.get("/api/csrf-token").json()["token"]
+            anon.headers["X-CSRF-Token"] = csrf
+            assert anon.post("/_test/session-plant", json={"attacker_key": "evil"}).status_code == 200
+            assert anon.get("/_test/session-read").json().get("attacker_key") == "evil"
+            r = anon.post("/api/login", json={"username": "fix_login_victim4", "password": "pass1234"})
+            assert r.status_code == 200, r.text
+            assert "attacker_key" not in anon.get("/_test/session-read").json()
+        finally:
+            app_module.app.dependency_overrides.clear()
 
     def test_register_drops_attacker_session_keys(self, client, db_session):
         import app as app_module
@@ -640,15 +642,17 @@ class TestSessionFixation:
 
         app_module.app.dependency_overrides[app_module.get_db] = _override
         app_module.rate_limiter._buckets.clear()
-        anon = TestClient(app_module.app)
-        csrf = anon.get("/api/csrf-token").json()["token"]
-        anon.headers["X-CSRF-Token"] = csrf
-        assert anon.post("/_test/session-plant", json={"attacker_key": "evil2"}).status_code == 200
-        assert anon.get("/_test/session-read").json().get("attacker_key") == "evil2"
-        r = anon.post("/api/register", json={"username": "fix_reg_victim4", "password": "pass1234"})
-        assert r.status_code == 200, r.text
-        assert "attacker_key" not in anon.get("/_test/session-read").json()
-        app_module.app.dependency_overrides.clear()
+        try:
+            anon = TestClient(app_module.app)
+            csrf = anon.get("/api/csrf-token").json()["token"]
+            anon.headers["X-CSRF-Token"] = csrf
+            assert anon.post("/_test/session-plant", json={"attacker_key": "evil2"}).status_code == 200
+            assert anon.get("/_test/session-read").json().get("attacker_key") == "evil2"
+            r = anon.post("/api/register", json={"username": "fix_reg_victim4", "password": "pass1234"})
+            assert r.status_code == 200, r.text
+            assert "attacker_key" not in anon.get("/_test/session-read").json()
+        finally:
+            app_module.app.dependency_overrides.clear()
 
     def test_reset_password_drops_attacker_session_keys(self, client, db_session):
         import app as app_module
@@ -664,12 +668,14 @@ class TestSessionFixation:
 
         app_module.app.dependency_overrides[app_module.get_db] = _override
         app_module.rate_limiter._buckets.clear()
-        anon = TestClient(app_module.app)
-        csrf = anon.get("/api/csrf-token").json()["token"]
-        anon.headers["X-CSRF-Token"] = csrf
-        assert anon.post("/_test/session-plant", json={"attacker_key": "evil3"}).status_code == 200
-        assert anon.get("/_test/session-read").json().get("attacker_key") == "evil3"
-        rr = anon.post("/api/reset-password", json={"token": token, "new_password": "newpass12"})
-        assert rr.status_code == 200, rr.text
-        assert "attacker_key" not in anon.get("/_test/session-read").json()
-        app_module.app.dependency_overrides.clear()
+        try:
+            anon = TestClient(app_module.app)
+            csrf = anon.get("/api/csrf-token").json()["token"]
+            anon.headers["X-CSRF-Token"] = csrf
+            assert anon.post("/_test/session-plant", json={"attacker_key": "evil3"}).status_code == 200
+            assert anon.get("/_test/session-read").json().get("attacker_key") == "evil3"
+            rr = anon.post("/api/reset-password", json={"token": token, "new_password": "newpass12"})
+            assert rr.status_code == 200, rr.text
+            assert "attacker_key" not in anon.get("/_test/session-read").json()
+        finally:
+            app_module.app.dependency_overrides.clear()
