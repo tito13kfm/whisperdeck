@@ -239,11 +239,19 @@ async def enforce_csrf(request: Request, call_next):
         # only widen the CSRF-skip surface for no reason. Whether the
         # token is actually valid is decided downstream by whichever auth
         # dependency the route uses (still 401s on a bad or unhonored token).
+        # Additionally, a request that also carries a session cookie (any
+        # non-empty session dict) must still present a valid CSRF token even
+        # if it includes an Authorization header. get_current_user_or_device
+        # prefers the session over the bearer token, so a cookie-authenticated
+        # POST could otherwise bypass CSRF entirely by adding any Bearer
+        # header (issue #303). An empty session means no session cookie was
+        # sent, which is the expected shape for a headless device caller.
         has_bearer = (
             request.url.path == "/api/transcribe"
             and (request.headers.get("authorization") or "").lower().startswith("bearer ")
         )
-        if not has_bearer:
+        should_skip_csrf = has_bearer and not request.session
+        if not should_skip_csrf:
             csrf = request.headers.get("x-csrf-token") or ""
             if not validate_csrf_token(request.session, csrf):
                 # This literal string is matched by the client retry logic in rack.js api().
