@@ -418,6 +418,14 @@ point relative to a render or poll cycle, and client-side filtering
 re-implemented over a response the backend already paginates or filters
 server-side. One search before writing catches both.
 
+**Committing the fix:** once tests pass, commit on the worktree branch
+before any audit/PR work. No `Co-Authored-By` trailer, no
+"Generated with..." footer. Commit as the normal configured git user
+only. No em/en dashes in the message; plain language, repo writing
+style. (Restated at Phase 4 as a backstop, but the commit happens
+here; the rule has to be honored when you commit, not learned after
+the fact at PR time.)
+
 ## Phase 3.5: self-audit checklist (mandatory, before Phase 4)
 
 Before opening/pushing anything, create
@@ -431,6 +439,15 @@ each concrete promise, write one line:
 [x] <item> — delivered, confirmed at <file:line or test name>
 [ ] <item> — NOT delivered: <reason>
 ```
+
+**Files that must exist before Phase 4. Create them here, not backfilled
+at the end.** Phase 5 finalizes these; Phase 3.5 is where they are first
+written. If you only write `investigation.md` and then open the PR, you have
+skipped this phase. The four run-dir files are:
+`investigation.md` (Phase 1), `self-audit.md` (this file), `wrong-directions.md`
+(start it now; log each wrong instruction the moment you hit it), and
+`token-usage.md` (start it now; one row per sub-agent spawned plus an
+`orchestrator` row for your own turns).
 
 **Cite a literal identifier, not just prose.** Whenever the item names
 actual code — a function, a state field, a CSS class, a data attribute —
@@ -677,6 +694,17 @@ fast-tier tests. Don't skip this because you're confident the fix is
 right — confidence is not evidence.
 
 ## Phase 4: PR
+
+**Hard gate before `gh pr create`.** Confirm ALL of these. If any is
+missing, go back and complete the phase that owns it; do NOT open the PR
+until every box is checked. A model that opens a PR with these unmet is
+correcting the bug report, not shipping.
+
+- [ ] `self-audit.md` exists in `.omo/runs/issue-<N>/<your-branch-name>/`
+- [ ] `python scripts/verify_self_audit.py .omo/runs/issue-<N>/<your-branch-name>/self-audit.md` exited 0
+- [ ] Phase 3.75 Oracle verdict recorded in `self-audit.md` (or documented manual fallback per Phase 3.75)
+- [ ] `wrong-directions.md` and `token-usage.md` exist in the run dir
+- [ ] The fix is already committed on the worktree branch (per the "Committing the fix" block at the end of Phase 3) with no AI-authorship trailer
 
 Open against `master`, `Closes #<N>` in the body (the real target issue
 number from Phase 0, not the tracking issue's number) so it auto-closes on
