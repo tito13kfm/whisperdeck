@@ -3,7 +3,6 @@ still require CSRF even when an Authorization: Bearer header is present."""
 
 import io
 
-import pytest
 from fastapi.testclient import TestClient
 
 import app as app_module
@@ -30,8 +29,6 @@ def test_cookie_plus_bearer_without_csrf_is_rejected(client, db_session):
 
     # With valid CSRF, even cookie+bearer should succeed past the CSRF gate if file is valid
     # (but we test gate separately: without CSRF, cookie+bearer must 403)
-    bare = TestClient(app_module.app)
-    # Re-wire bare to same DB/user context but share cookies? Use the same client with bearer+no-CSRF.
     # Simpler: use the authenticated client, drop CSRF header, add Bearer.
     old = client.headers.pop("X-CSRF-Token", None)
     try:
