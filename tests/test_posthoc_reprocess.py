@@ -483,6 +483,30 @@ def test_context_route_extracts_terms(client, db_session):
     fake_extract.assert_awaited_once()
 
 
+def test_context_route_502_when_extraction_raises(client, db_session):
+    """POST /context (app.py, issue #406 dedup) shares _resolve_hotword_extraction
+    with the upload-time path, but reacts differently to extraction failure:
+    an explicit user action gets a 502 the user can act on, rather than the
+    upload path's silent swallow. This failure class had no coverage before.
+
+    Mutation check: fails if the try/except around extract_hotwords_from_doc
+    stops raising HTTPException(502) (e.g. swallowed like the upload path, or
+    the status code changed).
+    """
+    client.put("/api/providers/groq", json={"api_key": "fake-groq-key"})
+    user = _test_user(db_session)
+    t = Transcript(user_id=user.id, title="c", filename="c.mp3", status="completed", full_text="x")
+    db_session.add(t)
+    db_session.commit()
+
+    fake_extract = AsyncMock(side_effect=RuntimeError("boom"))
+    with patch("app.extract_hotwords_from_doc", fake_extract):
+        r = client.post(f"/api/transcripts/{t.id}/context",
+                        data={"context_doc": "Agenda: Acme Corp roadmap review"})
+    assert r.status_code == 502
+    assert "Context extraction failed" in r.json()["detail"]
+
+
 def test_context_route_400_without_provider_key(client, db_session):
     # correction_provider defaults to local_llm (keyless) — force a
     # key-requiring provider to exercise the missing-key error path.
