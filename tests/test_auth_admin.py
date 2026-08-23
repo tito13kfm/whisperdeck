@@ -6,7 +6,7 @@ import datetime
 import pytest
 
 from database import User
-from services.auth import hash_reset_token
+from services.auth import _hash_token
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────
@@ -100,7 +100,7 @@ class TestForgotPassword:
         resp = client.post("/api/forgot-password", json={"username": "hashcheck"})
         plaintext = resp.json()["reset_token"]
         user = db_session.query(User).filter(User.username == "hashcheck").first()
-        assert user.reset_token == hash_reset_token(plaintext)
+        assert user.reset_token == _hash_token(plaintext)
         assert user.reset_token != plaintext
 
     def test_csrf_required(self, client, db_session):

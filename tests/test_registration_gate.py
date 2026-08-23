@@ -24,7 +24,7 @@ from database import InviteToken, User, init_db
 from services.auth import (
     create_user,
     generate_invite_token,
-    hash_invite_token,
+    _hash_token,
     registration_mode,
     utcnow,
 )
@@ -127,7 +127,7 @@ class TestRegisterGate:
         assert resp.status_code == 200
         db_session.expire_all()
         row = db_session.query(InviteToken).filter(
-            InviteToken.token_hash == hash_invite_token(token)
+            InviteToken.token_hash == _hash_token(token)
         ).first()
         new_user = db_session.query(User).filter(User.username == "invited").first()
         assert row.used_at is not None
@@ -147,7 +147,7 @@ class TestRegisterGate:
         admin = db_session.query(User).filter(User.username == "testuser").first()
         token, _ = generate_invite_token(db_session, admin)
         row = db_session.query(InviteToken).filter(
-            InviteToken.token_hash == hash_invite_token(token)
+            InviteToken.token_hash == _hash_token(token)
         ).first()
         row.expires_at = utcnow() - datetime.timedelta(hours=1)
         db_session.commit()
@@ -165,7 +165,7 @@ class TestRegisterGate:
         assert "Username already taken" in resp.json()["detail"]
         db_session.expire_all()
         row = db_session.query(InviteToken).filter(
-            InviteToken.token_hash == hash_invite_token(token)
+            InviteToken.token_hash == _hash_token(token)
         ).first()
         assert row.used_at is None
         # And a weak password mustn't either (policy check precedes consume).
@@ -187,7 +187,7 @@ class TestRegisterGate:
         token, _ = generate_invite_token(db_session, admin)
         row = db_session.query(InviteToken).first()
         assert row.token_hash != token
-        assert row.token_hash == hash_invite_token(token)
+        assert row.token_hash == _hash_token(token)
 
 
 # ── mint endpoint ───────────────────────────────────────────────────────────

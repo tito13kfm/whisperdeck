@@ -20,10 +20,17 @@ REGISTRATION_MODES = ("open", "invite", "closed")
 INVITE_TOKEN_TTL_HOURS = 72
 
 
-def hash_reset_token(token: str) -> str:
-    """Hash a reset token for storage. Uses SHA-256 (not PBKDF2) because
-    the token itself is 256-bit random — no need for slow key derivation.
-    Prevents account takeover if the database is leaked within the TTL."""
+def _hash_token(token: str) -> str:
+    """Hash a high-entropy bearer/reset/invite token for storage.
+
+    SHA-256 rather than PBKDF2 **only** because every token this hashes is a
+    256-bit random value from secrets.token_hex(32) — slow key derivation buys
+    nothing against a value that cannot be guessed or dictionary-attacked. It
+    still makes a leaked database useless within the token's TTL.
+
+    Do not reuse this for anything low-entropy (passwords, PINs, user-chosen
+    secrets): those need hash_password's PBKDF2 instead.
+    """
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
@@ -49,19 +56,12 @@ def generate_device_token() -> str:
     return secrets.token_hex(32)
 
 
-def hash_device_token(token: str) -> str:
-    """Hash a device bearer token for storage. SHA-256, not PBKDF2, same
-    reasoning as hash_reset_token: the token is already a 256-bit random
-    value, not a low-entropy password, so slow key derivation buys nothing."""
-    return hashlib.sha256(token.encode("utf-8")).hexdigest()
-
-
 def set_device_token(db, user: User) -> str:
     """Generate and store a new device token for *user*, invalidating any
     previous one (single token per user). Returns the plaintext token,
     the only time it is ever visible outside the request that created it."""
     token = generate_device_token()
-    user.local_device_token_hash = hash_device_token(token)
+    user.local_device_token_hash = _hash_token(token)
     user.local_device_token_created_at = utcnow()
     db.commit()
     return token
@@ -79,7 +79,7 @@ def get_user_by_device_token(db, token: str) -> Optional[User]:
     token set at all."""
     if not token:
         return None
-    token_hash = hash_device_token(token)
+    token_hash = _hash_token(token)
     return db.query(User).filter(User.local_device_token_hash == token_hash).first()
 
 
@@ -159,13 +159,6 @@ def registration_mode(db) -> str:
     return "invite"
 
 
-def hash_invite_token(token: str) -> str:
-    """Same construction and rationale as hash_reset_token: the token is
-    256-bit random, so plain SHA-256 (not PBKDF2) is enough to make a DB
-    leak useless within the TTL."""
-    return hashlib.sha256(token.encode("utf-8")).hexdigest()
-
-
 def generate_invite_token(db, admin_user: User) -> Optional[tuple[str, datetime.datetime]]:
     """Admin mints a single-use registration invite. Returns
     (plaintext_token, expires_at) for one-time display, or None if the
@@ -175,7 +168,7 @@ def generate_invite_token(db, admin_user: User) -> Optional[tuple[str, datetime.
     token = secrets.token_hex(32)
     expires_at = utcnow() + datetime.timedelta(hours=INVITE_TOKEN_TTL_HOURS)
     db.add(InviteToken(
-        token_hash=hash_invite_token(token),
+        token_hash=_hash_token(token),
         created_by=admin_user.id,
         expires_at=expires_at,
     ))
@@ -188,7 +181,7 @@ def get_valid_invite_token(db, token: str) -> Optional[InviteToken]:
     report a bad token before password-policy errors, mirroring the
     reset-password ordering convention."""
     return db.query(InviteToken).filter(
-        InviteToken.token_hash == hash_invite_token(token),
+        InviteToken.token_hash == _hash_token(token),
         InviteToken.used_at.is_(None),
         InviteToken.expires_at > utcnow(),
     ).first()
@@ -206,7 +199,7 @@ def consume_invite_token(db, token: str) -> bool:
             "UPDATE invite_tokens SET used_at = :now "
             "WHERE token_hash = :h AND used_at IS NULL AND expires_at > :now"
         ),
-        {"h": hash_invite_token(token), "now": utcnow()},
+        {"h": _hash_token(token), "now": utcnow()},
     )
     return res.rowcount == 1
 
@@ -218,7 +211,7 @@ def mark_invite_used(db, token: str, user_id: int) -> None:
     SQLite write lock) must not turn a successful registration into a 500."""
     try:
         row = db.query(InviteToken).filter(
-            InviteToken.token_hash == hash_invite_token(token)
+            InviteToken.token_hash == _hash_token(token)
         ).first()
         if row:
             row.used_by = user_id
@@ -251,7 +244,7 @@ def generate_reset_token(db, admin_user: User, target_username: str) -> Optional
     if not target:
         return None
     token = secrets.token_hex(32)
-    target.reset_token = hash_reset_token(token)
+    target.reset_token = _hash_token(token)
     target.reset_token_expires_at = utcnow() + datetime.timedelta(hours=RESET_TOKEN_TTL_HOURS)
     db.commit()
     return token
@@ -263,7 +256,7 @@ def get_user_by_reset_token(db, token: str) -> Optional[User]:
     validate the token BEFORE checking password policy, so a bad token +
     weak password reports the token error, not the password error.
     """
-    token_hash = hash_reset_token(token)
+    token_hash = _hash_token(token)
     return db.query(User).filter(
         User.reset_token == token_hash,
         User.reset_token_expires_at > utcnow(),
