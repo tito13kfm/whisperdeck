@@ -28,6 +28,47 @@ PROVIDER_LIMITS = {
 DEFAULT_LIMITS = {"rpm": 20, "rpd": 2000, "ash": 7200, "asd": 28800}
 
 
+def _contributing_rows(db, user_id: int, provider: str, window_seconds: int):
+    """The two row sets that count toward this user's audio-second usage for
+    `provider` within the trailing `window_seconds`, as
+    `(transcript_rows, job_rows)`.
+
+    Both callers below need the same two queries and differ only in what they
+    reduce off the rows (a duration sum vs the oldest updated_at), so the
+    filters live here once — the status sets and the window boundary are the
+    part that must not drift between them. See compute_audio_seconds_used's
+    docstring for why the two status filters are strict complements.
+
+    Returns ORM rows, not scalars, so each caller can read whichever column
+    it needs without a second round trip.
+    """
+    cutoff = utcnow_naive() - datetime.timedelta(seconds=window_seconds)
+
+    transcript_rows = (
+        db.query(Transcript)
+        .filter(
+            Transcript.user_id == user_id,
+            Transcript.provider == provider,
+            Transcript.status.in_(["completed", "partial"]),
+            Transcript.updated_at >= cutoff,
+        )
+        .all()
+    )
+    job_rows = (
+        db.query(TranscriptionJob)
+        .join(Transcript, TranscriptionJob.transcript_id == Transcript.id)
+        .filter(
+            Transcript.user_id == user_id,
+            Transcript.provider == provider,
+            Transcript.status.notin_(["completed", "partial"]),
+            TranscriptionJob.status.in_(["running", "completed"]),
+            TranscriptionJob.updated_at >= cutoff,
+        )
+        .all()
+    )
+    return transcript_rows, job_rows
+
+
 def compute_audio_seconds_used(db, user_id: int, provider: str, window_seconds: int) -> float:
     """Sum audio-seconds this user has sent to `provider` within the
     trailing `window_seconds`, combining two sources that are strict
@@ -53,32 +94,8 @@ def compute_audio_seconds_used(db, user_id: int, provider: str, window_seconds: 
         the individual TranscriptionJob.status values remain 'completed'
         permanently — only the transcript-side sum counts it from then on.
     """
-    cutoff = utcnow_naive() - datetime.timedelta(seconds=window_seconds)
-
-    transcript_total = (
-        db.query(Transcript)
-        .filter(
-            Transcript.user_id == user_id,
-            Transcript.provider == provider,
-            Transcript.status.in_(["completed", "partial"]),
-            Transcript.updated_at >= cutoff,
-        )
-        .all()
-    )
+    transcript_total, job_rows = _contributing_rows(db, user_id, provider, window_seconds)
     transcript_seconds = sum(t.duration_seconds or 0 for t in transcript_total)
-
-    job_rows = (
-        db.query(TranscriptionJob)
-        .join(Transcript, TranscriptionJob.transcript_id == Transcript.id)
-        .filter(
-            Transcript.user_id == user_id,
-            Transcript.provider == provider,
-            Transcript.status.notin_(["completed", "partial"]),
-            TranscriptionJob.status.in_(["running", "completed"]),
-            TranscriptionJob.updated_at >= cutoff,
-        )
-        .all()
-    )
     job_seconds = sum((j.end_time - j.start_time) for j in job_rows)
 
     return transcript_seconds + job_seconds
@@ -103,31 +120,8 @@ def _oldest_contributing_timestamp(db, user_id: int, provider: str, window_secon
     would count for this user+provider within the trailing window_seconds —
     i.e. the row whose usage will be the next to age out. Returns None if
     nothing is currently contributing (budget isn't actually constrained)."""
-    cutoff = utcnow_naive() - datetime.timedelta(seconds=window_seconds)
-
-    transcript_times = [
-        t.updated_at for t in db.query(Transcript).filter(
-            Transcript.user_id == user_id,
-            Transcript.provider == provider,
-            Transcript.status.in_(["completed", "partial"]),
-            Transcript.updated_at >= cutoff,
-        ).all()
-    ]
-    job_times = [
-        j.updated_at for j in (
-            db.query(TranscriptionJob)
-            .join(Transcript, TranscriptionJob.transcript_id == Transcript.id)
-            .filter(
-                Transcript.user_id == user_id,
-                Transcript.provider == provider,
-                Transcript.status.notin_(["completed", "partial"]),
-                TranscriptionJob.status.in_(["running", "completed"]),
-                TranscriptionJob.updated_at >= cutoff,
-            )
-            .all()
-        )
-    ]
-    all_times = transcript_times + job_times
+    transcript_rows, job_rows = _contributing_rows(db, user_id, provider, window_seconds)
+    all_times = [r.updated_at for r in transcript_rows] + [j.updated_at for j in job_rows]
     return min(all_times) if all_times else None
 
 
