@@ -3,7 +3,7 @@ from sqlalchemy import inspect
 from database import User
 from services.auth import (
     create_user, set_device_token, revoke_device_token, get_user_by_device_token,
-    hash_device_token,
+    _hash_token,
 )
 
 
@@ -17,7 +17,7 @@ def test_users_table_has_device_token_columns(db_session):
 def test_set_device_token_stores_hash_not_plaintext(db_session):
     user = create_user(db_session, "devtok_user", "pass1234")
     token = set_device_token(db_session, user)
-    assert user.local_device_token_hash == hash_device_token(token)
+    assert user.local_device_token_hash == _hash_token(token)
     assert user.local_device_token_hash != token
     assert user.local_device_token_created_at is not None
 

@@ -551,6 +551,27 @@ def _serialize_summary(s: Summary) -> dict:
 
 # ── Auth ──────────────────────────────────────────────────────────────────
 
+def _enforce_rate_limit(enabled, key: str, *, max_requests: int, window_seconds: int, detail: str) -> None:
+    """Consume one slot in `key`'s bucket, and 429 with `detail` once it is full.
+
+    `enabled` is the calling route's own skip condition, passed through
+    unchanged rather than derived here, because the routes do not agree on
+    what it is: the IP-keyed buckets pass `client_ip`, which is falsy under
+    TestClient (no real client IP) so the whole suite doesn't share one
+    bucket, while the device-upload bucket passes `is_device_call` and keys
+    off the user id instead.
+
+    Deliberately a plain call, not a FastAPI dependency: two routes
+    (forgot-password, admin/invites) run their admin-only 403 check first,
+    and a dependency would hoist the rate limit above it, letting a non-admin
+    fill a bucket they currently can never reach.
+    """
+    if not enabled:
+        return
+    if not rate_limiter.check(key, max_requests=max_requests, window_seconds=window_seconds):
+        raise HTTPException(status_code=429, detail=detail)
+
+
 @app.get("/api/csrf-token")
 async def csrf_token(request: Request):
     """Return the session's CSRF token for the X-CSRF-Token header.
@@ -564,10 +585,8 @@ async def csrf_token(request: Request):
 @app.post("/api/register")
 async def register(request: Request, data: dict = Body(...), db: Session = Depends(get_db)):
     client_ip = request.client.host if request.client else None
-    # Skip rate limiting for TestClient (no real client IP) so tests don't
-    # share a single bucket across the whole suite.
-    if client_ip and not rate_limiter.check(f"register:{client_ip}", max_requests=5, window_seconds=300):
-        raise HTTPException(status_code=429, detail="Too many registration attempts — try again later")
+    _enforce_rate_limit(client_ip, f"register:{client_ip}", max_requests=5, window_seconds=300,
+                        detail="Too many registration attempts — try again later")
     username = (data.get("username") or "").strip()
     password = data.get("password") or ""
     if not username or not password:
@@ -618,8 +637,8 @@ async def register(request: Request, data: dict = Body(...), db: Session = Depen
 @app.post("/api/login")
 async def login(request: Request, data: dict = Body(...), db: Session = Depends(get_db)):
     client_ip = request.client.host if request.client else None
-    if client_ip and not rate_limiter.check(f"login:{client_ip}", max_requests=10, window_seconds=60):
-        raise HTTPException(status_code=429, detail="Too many login attempts — try again later")
+    _enforce_rate_limit(client_ip, f"login:{client_ip}", max_requests=10, window_seconds=60,
+                        detail="Too many login attempts — try again later")
     username = (data.get("username") or "").strip()
     password = data.get("password") or ""
     # Per-account failure throttle (issue #124), keyed on (username, client):
@@ -925,8 +944,8 @@ async def forgot_username(request: Request, db: Session = Depends(get_db)):
     identify their own account. Rate-limited to prevent enumeration per
     client IP, but usernames aren't secrets in a self-hosted app."""
     client_ip = request.client.host if request.client else None
-    if client_ip and not rate_limiter.check(f"forgot-username:{client_ip}", max_requests=5, window_seconds=300):
-        raise HTTPException(status_code=429, detail="Too many requests — try again later")
+    _enforce_rate_limit(client_ip, f"forgot-username:{client_ip}", max_requests=5, window_seconds=300,
+                        detail="Too many requests — try again later")
     return {"usernames": list_usernames(db)}
 
 
@@ -938,8 +957,8 @@ async def forgot_password(request: Request, data: dict = Body(...), db: Session 
     if not current_user.is_admin:
         raise HTTPException(status_code=403, detail="Only administrators can generate password reset tokens")
     client_ip = request.client.host if request.client else None
-    if client_ip and not rate_limiter.check(f"forgot-password:{client_ip}", max_requests=10, window_seconds=60):
-        raise HTTPException(status_code=429, detail="Too many attempts — try again later")
+    _enforce_rate_limit(client_ip, f"forgot-password:{client_ip}", max_requests=10, window_seconds=60,
+                        detail="Too many attempts — try again later")
     target_username = (data.get("username") or "").strip()
     if not target_username:
         raise HTTPException(status_code=400, detail="username is required")
@@ -954,8 +973,8 @@ async def forgot_password(request: Request, data: dict = Body(...), db: Session 
 async def reset_password_route(request: Request, data: dict = Body(...), db: Session = Depends(get_db)):
     """Reset a password using a valid one-time token. Auto-logs in on success."""
     client_ip = request.client.host if request.client else None
-    if client_ip and not rate_limiter.check(f"reset-password:{client_ip}", max_requests=5, window_seconds=300):
-        raise HTTPException(status_code=429, detail="Too many attempts — try again later")
+    _enforce_rate_limit(client_ip, f"reset-password:{client_ip}", max_requests=5, window_seconds=300,
+                        detail="Too many attempts — try again later")
     token = (data.get("token") or "").strip()
     new_password = data.get("new_password") or ""
     if not token or not new_password:
@@ -1009,8 +1028,8 @@ async def admin_create_invite(request: Request, db: Session = Depends(get_db), c
     if not current_user.is_admin:
         raise HTTPException(status_code=403, detail="Administrator access required")
     client_ip = request.client.host if request.client else None
-    if client_ip and not rate_limiter.check(f"invite-mint:{client_ip}", max_requests=10, window_seconds=60):
-        raise HTTPException(status_code=429, detail="Too many attempts — try again later")
+    _enforce_rate_limit(client_ip, f"invite-mint:{client_ip}", max_requests=10, window_seconds=60,
+                        detail="Too many attempts — try again later")
     minted = generate_invite_token(db, current_user)
     if minted is None:
         raise HTTPException(status_code=403, detail="Administrator access required")
@@ -1075,6 +1094,24 @@ def _serialize_hotword(h) -> dict:
         "source": h.source,
         "created_at": h.created_at.isoformat() if h.created_at else None,
     }
+
+
+def _resolve_hotword_extraction(db: Session, user_id: int) -> tuple[str, str | None, dict | None, bool]:
+    """Resolve which provider extracts hotwords from a context doc for this
+    user, and its credentials: `(provider, api_key, provider_config, usable)`.
+
+    `usable` is False when the provider needs a key and none is configured.
+    Both context-doc paths need exactly this chain and exactly this
+    predicate; they differ only in what they do when it comes back False,
+    which stays at the call site — the upload path is a silent glossary side
+    effect that must never block a transcription, while POST /context is an
+    explicit user action that reports a 400 the user can act on.
+    """
+    from services.settings import resolve_provider_key, KEYLESS_PROVIDERS
+    user_settings = get_user_settings(db, user_id)
+    provider = user_settings.get("correction_provider", "groq")
+    api_key, provider_config = resolve_provider_key(db, user_id, provider)
+    return provider, api_key, provider_config, bool(api_key) or provider in KEYLESS_PROVIDERS
 
 
 @app.get("/api/hotwords")
@@ -1669,8 +1706,8 @@ async def transcribe_audio(
     if kind not in ("meeting", "dictation", "voice_note", "voice_dump", "auto"):
         raise HTTPException(status_code=400, detail="kind must be 'meeting', 'dictation', 'voice_note', 'voice_dump', or 'auto'")
     is_device_call = getattr(request.state, "device_authenticated", False)
-    if is_device_call and not rate_limiter.check(f"device-upload:{current_user.id}", max_requests=30, window_seconds=3600):
-        raise HTTPException(status_code=429, detail="Too many device uploads, try again later")
+    _enforce_rate_limit(is_device_call, f"device-upload:{current_user.id}", max_requests=30, window_seconds=3600,
+                        detail="Too many device uploads, try again later")
     # Save uploaded file
     file_ext = os.path.splitext(file.filename or "audio.mp3")[1] or ".mp3"
     safe_name = f"{utcnow_naive().strftime('%Y%m%d_%H%M%S')}_{hash(file.filename or 'audio')}{file_ext}"
@@ -1681,11 +1718,8 @@ async def transcribe_audio(
         f.write(content)
 
     if context_doc and context_doc.strip():
-        from services.settings import resolve_provider_key, KEYLESS_PROVIDERS
-        user_settings = get_user_settings(db, current_user.id)
-        extraction_provider = user_settings.get("correction_provider", "groq")
-        extraction_key, extraction_cfg = resolve_provider_key(db, current_user.id, extraction_provider)
-        if extraction_key or extraction_provider in KEYLESS_PROVIDERS:
+        extraction_provider, extraction_key, extraction_cfg, usable = _resolve_hotword_extraction(db, current_user.id)
+        if usable:
             try:
                 await extract_hotwords_from_doc(
                     db, current_user.id, context_doc, api_key=extraction_key,
@@ -3479,11 +3513,8 @@ async def add_transcript_context(
         raise HTTPException(status_code=404, detail="Transcript not found")
     if not context_doc.strip():
         raise HTTPException(status_code=400, detail="Context document is empty")
-    from services.settings import resolve_provider_key, KEYLESS_PROVIDERS
-    user_settings = get_user_settings(db, current_user.id)
-    extraction_provider = user_settings.get("correction_provider", "groq")
-    extraction_key, extraction_cfg = resolve_provider_key(db, current_user.id, extraction_provider)
-    if not extraction_key and extraction_provider not in KEYLESS_PROVIDERS:
+    extraction_provider, extraction_key, extraction_cfg, usable = _resolve_hotword_extraction(db, current_user.id)
+    if not usable:
         raise HTTPException(
             status_code=400,
             detail=f"Context extraction needs a {extraction_provider.capitalize()} API key (service panel)",

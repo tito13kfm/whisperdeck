@@ -3855,11 +3855,25 @@ async function loadTranscriptDetail(id, opts = {}) {
   scheduleDetailPoll();
 }
 
+// The LLM job slots the detail page polls on, in one place so a new job kind
+// can't reach the fingerprint but miss the poll gate or the active-snapshot —
+// which is how #246 (tagging_job) happened. Every site below derives from
+// this array; none of them re-types the names.
+//
+// The backend serializes two further job fields that are deliberately absent
+// here: classify_pipeline_job (internal kind determination, never read
+// anywhere in this file) and voice_note_job (read and rendered, but never
+// polled — see #426). Adding a slot here starts polling it, so #426 is a
+// behavior change and belongs in its own PR, not a rename of this list.
+const DETAIL_JOB_SLOTS = [
+  'correction_job', 'summary_job', 'voice_match_job',
+  'format_markdown_job', 'format_email_job', 'format_coding_prompt_job',
+  'classify_intent_job', 'tagging_job', 'voice_dump_job',
+];
+
 function _jobFingerprint(t) {
   const f = (j) => j ? j.status + ':' + (j.progress ? j.progress.done : 0) : '-';
-  return f(t.correction_job) + '|' + f(t.summary_job) + '|' + f(t.voice_match_job) + '|' +
-    f(t.format_markdown_job) + '|' + f(t.format_email_job) + '|' + f(t.format_coding_prompt_job) + '|' +
-    f(t.classify_intent_job) + '|' + f(t.tagging_job) + '|' + f(t.voice_dump_job);
+  return DETAIL_JOB_SLOTS.map(slot => f(t[slot])).join('|');
 }
 
 // While an LLM job is active for the open transcript, refresh quietly and
@@ -3867,10 +3881,7 @@ function _jobFingerprint(t) {
 function scheduleDetailPoll() {
   clearTimeout(detailPollTimer);
   const t = detailData;
-  if (!t || !(llmJobActive(t.correction_job) || llmJobActive(t.summary_job) || llmJobActive(t.voice_match_job) ||
-    llmJobActive(t.format_markdown_job) || llmJobActive(t.format_email_job) || llmJobActive(t.format_coding_prompt_job) ||
-    llmJobActive(t.classify_intent_job) || llmJobActive(t.tagging_job) ||
-    llmJobActive(t.voice_dump_job))) return;
+  if (!t || !DETAIL_JOB_SLOTS.some(slot => llmJobActive(t[slot]))) return;
   const fp = _jobFingerprint(t), id = t.id, prevActive = jobActiveSnapshot(t);
   detailPollTimer = setTimeout(async () => {
     if (S.page !== 'detail' || !detailData || detailData.id !== id) return;
@@ -4311,23 +4322,16 @@ function llmJobActive(job) {
   return job && (job.status === 'pending' || job.status === 'running');
 }
 
-// Snapshot of which jobs are active, keyed by the same fields _jobFingerprint
-// tracks. Used to detect a job crossing into or out of "active" between poll
-// ticks — the one case that needs a full detail-body rebuild (completed
-// content appearing, voice-match relabeling segments, a Format-tab "Suggested"
-// badge changing once classify_intent_job lands).
+// Snapshot of which jobs are active, over the same DETAIL_JOB_SLOTS
+// _jobFingerprint tracks. Used to detect a job crossing into or out of
+// "active" between poll ticks — the one case that needs a full detail-body
+// rebuild (completed content appearing, voice-match relabeling segments, a
+// Format-tab "Suggested" badge changing once classify_intent_job lands).
+// Keys drop the _job suffix, so the shape stays what callers already compare.
 function jobActiveSnapshot(t) {
-  return {
-    correction: llmJobActive(t.correction_job),
-    summary: llmJobActive(t.summary_job),
-    voice_match: llmJobActive(t.voice_match_job),
-    format_markdown: llmJobActive(t.format_markdown_job),
-    format_email: llmJobActive(t.format_email_job),
-    format_coding_prompt: llmJobActive(t.format_coding_prompt_job),
-    classify_intent: llmJobActive(t.classify_intent_job),
-    tagging: llmJobActive(t.tagging_job),
-    voice_dump: llmJobActive(t.voice_dump_job),
-  };
+  const snap = {};
+  for (const slot of DETAIL_JOB_SLOTS) snap[slot.replace(/_job$/, '')] = llmJobActive(t[slot]);
+  return snap;
 }
 
 // Poll-tick DOM patch: update the status badge, the three job-gated action
