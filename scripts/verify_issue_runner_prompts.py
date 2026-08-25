@@ -61,6 +61,10 @@ def extract_phase0_body(text: str) -> str | None:
     return m.group(1) + m.group(2)
 
 
+def list_headings(text: str) -> list[str]:
+    return [line.strip() for line in text.splitlines() if line.startswith("## ")]
+
+
 def check_shared_sections() -> list[str]:
     errors: list[str] = []
 
@@ -104,9 +108,17 @@ def check_shared_sections() -> list[str]:
     claude_p0 = extract_phase0_body(claude_text)
     omo_p0 = extract_phase0_body(omo_text)
     if claude_p0 is None:
-        errors.append("Could not extract Phase 0 from Claude prompt")
+        errors.append(
+            "Could not extract Phase 0 from Claude prompt (expected a "
+            "'## Phase 0: resolve the real target issue' heading followed by a "
+            f"'## Setup...' heading); headings found: {list_headings(claude_text)}"
+        )
     if omo_p0 is None:
-        errors.append("Could not extract Phase 0 from OMO prompt")
+        errors.append(
+            "Could not extract Phase 0 from OMO prompt (expected a "
+            "'## Phase 0: resolve the real target issue' heading followed by a "
+            f"'## Setup...' heading); headings found: {list_headings(omo_text)}"
+        )
     if claude_p0 is not None and omo_p0 is not None and claude_p0 != omo_p0:
         diff = difflib.unified_diff(
             claude_p0.splitlines(keepends=True),
@@ -122,6 +134,9 @@ def check_stale_backup() -> list[str]:
     # Machine-local backup that Nothing reads. Issue #384 says delete or refresh.
     # We only warn here; the file is outside the repo so a CI failure would be
     # unfixable via PR. The warning surfaces the drift without blocking.
+    # pathlib.Path.home() resolves correctly on Windows (verified: C:\Users\<user>),
+    # and this repo's own docs (AGENTS.md, docs/OMO-SETUP.md) use ~/.config/opencode/
+    # as the literal, platform-uniform opencode config convention — not POSIX-only.
     candidates = [
         pathlib.Path.home() / ".config" / "opencode" / "prompts" / "whisperdesk-issue-runner-prompt.backup.md",
     ]
