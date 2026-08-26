@@ -92,10 +92,12 @@ class Transcript(Base):
     jobs = relationship("TranscriptionJob", back_populates="transcript", cascade="all, delete-orphan")
     # ORM-level cascade is load-bearing: the FK's ondelete="CASCADE" never
     # fires because SQLite's foreign_keys pragma is off (never enabled by
-    # this app), and without it deleting a transcript orphans its history —
+    # this app), and without it deleting a transcript orphans its children —
     # then SQLite's rowid reuse can hand the next transcript the dead one's
-    # id, resurrecting a foreign undo entry onto the wrong transcript.
+    # id, resurrecting foreign rows onto the wrong transcript.
     relabel_history = relationship("RelabelHistory", cascade="all, delete-orphan")
+    llm_jobs = relationship("LlmJob", cascade="all, delete-orphan")
+    transcript_tags = relationship("TranscriptTag", cascade="all, delete-orphan")
 
 
 class TranscriptionJob(Base):
