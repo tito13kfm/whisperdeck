@@ -3860,15 +3860,13 @@ async function loadTranscriptDetail(id, opts = {}) {
 // which is how #246 (tagging_job) happened. Every site below derives from
 // this array; none of them re-types the names.
 //
-// The backend serializes two further job fields that are deliberately absent
+// The backend serializes one further job field that is deliberately absent
 // here: classify_pipeline_job (internal kind determination, never read
-// anywhere in this file) and voice_note_job (read and rendered, but never
-// polled — see #426). Adding a slot here starts polling it, so #426 is a
-// behavior change and belongs in its own PR, not a rename of this list.
+// anywhere in this file). Every other serialized job slot is polled.
 const DETAIL_JOB_SLOTS = [
   'correction_job', 'summary_job', 'voice_match_job',
   'format_markdown_job', 'format_email_job', 'format_coding_prompt_job',
-  'classify_intent_job', 'tagging_job', 'voice_dump_job',
+  'classify_intent_job', 'tagging_job', 'voice_dump_job', 'voice_note_job',
 ];
 
 function _jobFingerprint(t) {
