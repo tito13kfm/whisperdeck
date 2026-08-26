@@ -206,7 +206,7 @@ def test_retranscribe_links_root_even_if_pipeline_fails_after_commit(client, db_
     original = _upload(client, text="first pass").json()
 
     p1, p2, p3 = _pipeline_patches(text="second pass")
-    with p1, p2, p3, patch("app.enqueue_auto_correction", side_effect=RuntimeError("boom")):
+    with p1, p2, p3, patch("app.enqueue_post_transcription_jobs", side_effect=RuntimeError("boom")):
         r = client.post(
             f"/api/transcripts/{original['id']}/retranscribe",
             data={"provider": "groq", "model": "whisper-large-v3"},
