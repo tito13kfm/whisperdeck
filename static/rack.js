@@ -6658,4 +6658,17 @@ document.addEventListener('DOMContentLoaded', () => {
    makes the supported test-hook surface self-documenting. */
 if (typeof window !== 'undefined') {
   Object.assign(window, { navigate, S, syncTranscribe, renderDetail, curProv, logout, api, loadCostsPage, _jobFingerprint, startJob });
+  // Detail-poll test hooks for issue #435: expose the schedule gate without
+  // leaking internal lets onto window in non-test builds. Each hook is a
+  // thin closure over the surrounding scope so a test can drive
+  // scheduleDetailPoll through its real predicate (DETAIL_JOB_SLOTS +
+  // llmJobActive + S.page) without re-implementing it.
+  window.__testDetailPoll = {
+    setDetailData(data) { detailData = data; },
+    setPage(page) { S.page = page; },
+    schedule() { scheduleDetailPoll(); },
+    scheduled() { return detailPollTimer !== null; },
+    clear() { clearTimeout(detailPollTimer); detailPollTimer = null; },
+    slots() { return DETAIL_JOB_SLOTS.slice(); },
+  };
 }

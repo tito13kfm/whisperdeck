@@ -1,4 +1,4 @@
-"""e2e regression for issue #426: _jobFingerprint and scheduleDetailPoll must include voice_note_job
+"""e2e regression for issue #426 (fixed) and #435 (gate coverage):
 
 _jobFingerprint and scheduleDetailPoll derive from DETAIL_JOB_SLOTS in
 static/rack.js. When voice_note shipped, voice_note_job was not added to that
@@ -6,14 +6,11 @@ array, so a running voice-note chain never triggered a detail-page poll and
 its progress never surfaced without leaving the page. Same class as #246
 (tagging_job).
 
-This test asserts the fingerprint string itself changes when only
-voice_note_job.progress.done changes, and that voice_note_job can keep the
-poll gate open. It loads rack.js in a real browser (so the real
-_jobFingerprint + llmJobActive run, not a reimplementation) and compares
-payloads that differ only in voice_note_job.progress.done. Against the
-pre-fix array (no voice_note_job term) both payloads produce the same
-fingerprint and the gate stays closed, so this test fails on the old code
-and passes on the fixed code.
+Part 1 asserts the fingerprint string itself changes when only
+voice_note_job.progress.done changes. Part 2 exercises the actual
+scheduleDetailPoll gate via window.__testDetailPoll (added for #435) so a
+future edit that keeps the fingerprint but drops the gate is caught. A
+negative control asserts an all-null payload does NOT schedule a poll.
 """
 import http.cookiejar
 import json
@@ -55,10 +52,10 @@ def _login(page, username, password):
     page.wait_for_selector("#app-shell", state="visible", timeout=10000)
 
 
-def test_jobfingerprint_changes_when_only_voice_note_progress_updates(page, registered_user, live_server):
-    """Regression test for issue #426: _jobFingerprint must differ when only
-    voice_note_job.progress.done changes, and voice_note_job keeps the poll
-    gate open.
+def test_jobfingerprint_changes_when_only_voice_note_progress_updates(page, registered_user):
+    """Regression test for #426/#435: _jobFingerprint must differ when only
+    voice_note_job.progress.done changes, and scheduleDetailPoll must schedule
+    a poll for a voice_note-only running transcript.
 
     Mutation check: if _jobFingerprint's body were replaced with `return`,
     both fingerprints would be undefined/None and equal, so the regression
@@ -67,7 +64,6 @@ def test_jobfingerprint_changes_when_only_voice_note_progress_updates(page, regi
     """
     username, password = registered_user
     _login(page, username, password)
-    page.wait_for_selector("#app-shell", state="visible", timeout=10000)
 
     result = page.evaluate(
         """() => {
@@ -86,8 +82,6 @@ def test_jobfingerprint_changes_when_only_voice_note_progress_updates(page, regi
             const a = JSON.parse(JSON.stringify(base));
             const b = JSON.parse(JSON.stringify(base));
             b.voice_note_job.progress.done = 2;
-            // Also check the gate: a voice_note-only payload must be considered
-            // active (otherwise scheduleDetailPoll returns before scheduling).
             const onlyVoiceNote = {
                 correction_job: null,
                 summary_job: null,
@@ -112,13 +106,6 @@ def test_jobfingerprint_changes_when_only_voice_note_progress_updates(page, regi
                 voice_dump_job: null,
                 voice_note_job: null,
             };
-            function llmJobActive(job) {
-                return !!(job && (job.status === 'pending' || job.status === 'running'));
-            }
-            // Derive what the poll gate would compute: DETAIL_JOB_SLOTS
-            // is not exported, so ask the real _jobFingerprint indirectly:
-            // the fingerprint of onlyVoiceNote must differ from empty's, and
-            // from a. Progress-only change must flip it.
             return {
                 fa: window._jobFingerprint(a),
                 fb: window._jobFingerprint(b),
@@ -141,4 +128,65 @@ def test_jobfingerprint_changes_when_only_voice_note_progress_updates(page, regi
         f"_jobFingerprint for a voice_note-only payload is identical to empty: "
         f"{result['fVoiceOnly']!r} == {result['fEmpty']!r} "
         f"(voice_note_job not in fingerprint, so scheduleDetailPoll gate stays closed)"
+    )
+
+    # Part 2: exercise the actual scheduleDetailPoll gate via test hooks
+    # (issue #435 — the previous version only proved the fingerprint, not that
+    # the poll timer is scheduled for a voice_note-only running job).
+    gate = page.evaluate(
+        """() => {
+            const voiceOnly = {
+                id: 99991,
+                correction_job: null,
+                summary_job: null,
+                voice_match_job: null,
+                format_markdown_job: null,
+                format_email_job: null,
+                format_coding_prompt_job: null,
+                classify_intent_job: null,
+                tagging_job: null,
+                voice_dump_job: null,
+                voice_note_job: { status: 'running', progress: { done: 1, total: 3 } },
+            };
+            const empty = {
+                id: 99992,
+                correction_job: null,
+                summary_job: null,
+                voice_match_job: null,
+                format_markdown_job: null,
+                format_email_job: null,
+                format_coding_prompt_job: null,
+                classify_intent_job: null,
+                tagging_job: null,
+                voice_dump_job: null,
+                voice_note_job: null,
+            };
+            const hook = window.__testDetailPoll;
+            if (!hook) return { error: 'window.__testDetailPoll missing — rack.js test hooks not exposed' };
+            // voice_note-only running job must schedule a poll
+            hook.setDetailData(voiceOnly);
+            hook.setPage('detail');
+            hook.clear();
+            hook.schedule();
+            const voiceScheduled = hook.scheduled();
+            hook.clear();
+            // all-null must NOT schedule
+            hook.setDetailData(empty);
+            hook.setPage('detail');
+            hook.clear();
+            hook.schedule();
+            const emptyScheduled = hook.scheduled();
+            hook.clear();
+            hook.setDetailData(null);
+            return { voiceScheduled, emptyScheduled };
+        }"""
+    )
+    assert "error" not in gate, gate.get("error", "")
+    assert gate["voiceScheduled"] is True, (
+        "scheduleDetailPoll did not schedule a timer for a voice_note-only "
+        "running payload — voice_note_job is missing from the poll gate"
+    )
+    assert gate["emptyScheduled"] is False, (
+        "scheduleDetailPoll scheduled a timer for an all-null payload — "
+        "gate should stay closed when no job is active"
     )
