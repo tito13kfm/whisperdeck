@@ -703,36 +703,11 @@ async def _finalize_if_done(db, transcript_id: int, diarization_service) -> None
 
     if new_status in ("completed", "partial") and should_fire_side_effects:
         from services.settings import get_user_settings  # local import avoids a module-load cycle with app.py
+
         user_settings = get_user_settings(db, transcript.user_id)
-        # Mirror the inline-path branch in app.py:_run_transcription_pipeline
-        # (design decision 11): correction runs unconditional of kind now,
-        # gated only by auto_correct; enqueue_auto_classify and the
-        # voice-note-chain enqueue below both no-op on the wrong kind via
-        # effective_kind(), so calling them unconditionally is safe. A long
-        # voice-note recording (above LOCAL_CHUNK_SECONDS) takes this path,
-        # so the same voice-note-chain enqueue needs to fire here too.
-        from services.llm_jobs import enqueue_auto_correction, enqueue_auto_classify, enqueue_auto_voice_note, enqueue_auto_voice_dump, enqueue_pipeline_classify
-        from services.classification import effective_kind
-        if user_settings.get("auto_correct", True):
-            # Queued as a background LlmJob — the LLM worker loop picks it
-            # up, so chunk finalization never blocks on a correction pass.
-            enqueue_auto_correction(db, transcript, user_settings)
-        else:
-            # No correction pass means correction-completion (the usual
-            # classify_pipeline trigger) never fires — trigger it directly,
-            # matching the inline path's identical fallback (issue #268
-            # comment 2's gap). No-ops via its own status guard when kind
-            # was explicitly chosen.
-            enqueue_pipeline_classify(db, transcript, user_settings)
-        enqueue_auto_classify(db, transcript, user_settings)
-        if effective_kind(transcript) == "voice_note":
-            enqueue_auto_voice_note(db, transcript, user_settings)
-        if effective_kind(transcript) == "voice_dump":
-            enqueue_auto_voice_dump(db, transcript, user_settings)
-        # Tagging fires for every kind — keep this site in lockstep
-        # with app.py:_run_transcription_pipeline (issue #171).
-        from services.llm_jobs import enqueue_auto_tagging
-        enqueue_auto_tagging(db, transcript, user_settings)
+        from services.llm_jobs import enqueue_post_transcription_jobs
+
+        enqueue_post_transcription_jobs(db, transcript, user_settings)
 
     _cleanup_completed_chunk_files(db, jobs)
 

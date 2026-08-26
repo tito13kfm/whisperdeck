@@ -177,21 +177,57 @@ def clear_finished_llm_jobs(db, user_id: int) -> int:
     return len(jobs)
 
 
+def _enqueue_auto(
+    db,
+    transcript,
+    user_settings: dict,
+    *,
+    kind: str,
+    provider_setting: str,
+    model_setting: str,
+    default_provider: str = "groq",
+    default_model: str = "llama-3.3-70b-versatile",
+    skip_message: str,
+) -> LlmJob:
+    """Shared helper for the auto-enqueue wrappers — read settings,
+    resolve key, guard on keyless providers, enqueue."""
+    from services.settings import KEYLESS_PROVIDERS, resolve_provider_key
+
+    provider = user_settings.get(provider_setting, default_provider)
+    model = user_settings.get(model_setting, default_model)
+    api_key, _ = resolve_provider_key(db, transcript.user_id, provider)
+    error = None
+    if provider not in KEYLESS_PROVIDERS and not api_key:
+        error = f"{skip_message}: no {provider} API key saved (see service panel)"
+    return enqueue_llm_job(db, transcript.user_id, transcript.id, kind, provider, model, error=error)
+
+
 def enqueue_auto_correction(db, transcript, user_settings: dict) -> LlmJob:
     """Auto-correct entry point for the inline and chunked-finalize paths.
     Keyless providers fail the job immediately with the skip reason (also
     recorded on the transcript so the corrected tab explains itself)."""
-    from services.settings import resolve_provider_key, KEYLESS_PROVIDERS
-
     provider = user_settings.get("correction_provider", "groq")
     model = user_settings.get("correction_model", "llama-3.3-70b-versatile")
+    from services.settings import KEYLESS_PROVIDERS, resolve_provider_key
+
     api_key, _ = resolve_provider_key(db, transcript.user_id, provider)
     error = None
     if provider not in KEYLESS_PROVIDERS and not api_key:
         error = f"auto-correct skipped: no {provider} API key saved (see service panel)"
         transcript.correction_error = error
         db.commit()
-    return enqueue_llm_job(db, transcript.user_id, transcript.id, "correction", provider, model, error=error)
+        return enqueue_llm_job(
+            db, transcript.user_id, transcript.id, "correction", provider, model, error=error
+        )
+    return _enqueue_auto(
+        db,
+        transcript,
+        user_settings,
+        kind="correction",
+        provider_setting="correction_provider",
+        model_setting="correction_model",
+        skip_message="auto-correct skipped",
+    )
 
 
 def enqueue_auto_classify(db, transcript, user_settings: dict) -> LlmJob | None:
@@ -205,17 +241,18 @@ def enqueue_auto_classify(db, transcript, user_settings: dict) -> LlmJob | None:
     — naturally no-ops while a pipeline classification is pending/uncertain/
     failed, same as every other capability guard."""
     from services.classification import effective_kind
+
     if effective_kind(transcript) != "dictation":
         return None
-    from services.settings import resolve_provider_key, KEYLESS_PROVIDERS
-
-    provider = user_settings.get("format_provider", "groq")
-    model = user_settings.get("format_model", "llama-3.3-70b-versatile")
-    api_key, _ = resolve_provider_key(db, transcript.user_id, provider)
-    error = None
-    if provider not in KEYLESS_PROVIDERS and not api_key:
-        error = f"auto-classify skipped: no {provider} API key saved (see service panel)"
-    return enqueue_llm_job(db, transcript.user_id, transcript.id, "classify_intent", provider, model, error=error)
+    return _enqueue_auto(
+        db,
+        transcript,
+        user_settings,
+        kind="classify_intent",
+        provider_setting="format_provider",
+        model_setting="format_model",
+        skip_message="auto-classify skipped",
+    )
 
 
 def enqueue_auto_voice_note(db, transcript, user_settings: dict) -> LlmJob | None:
@@ -232,17 +269,18 @@ def enqueue_auto_voice_note(db, transcript, user_settings: dict) -> LlmJob | Non
     pending transcript's classification resolves to voice_note (see
     run_llm_job's classify_pipeline branch)."""
     from services.classification import effective_kind
+
     if effective_kind(transcript) != "voice_note":
         return None
-    from services.settings import resolve_provider_key, KEYLESS_PROVIDERS
-
-    provider = user_settings.get("format_provider", "groq")
-    model = user_settings.get("format_model", "llama-3.3-70b-versatile")
-    api_key, _ = resolve_provider_key(db, transcript.user_id, provider)
-    error = None
-    if provider not in KEYLESS_PROVIDERS and not api_key:
-        error = f"voice-note chain skipped: no {provider} API key saved (see service panel)"
-    return enqueue_llm_job(db, transcript.user_id, transcript.id, "voice_note", provider, model, error=error)
+    return _enqueue_auto(
+        db,
+        transcript,
+        user_settings,
+        kind="voice_note",
+        provider_setting="format_provider",
+        model_setting="format_model",
+        skip_message="voice-note chain skipped",
+    )
 
 
 def enqueue_auto_voice_dump(db, transcript, user_settings: dict) -> LlmJob | None:
@@ -259,17 +297,18 @@ def enqueue_auto_voice_dump(db, transcript, user_settings: dict) -> LlmJob | Non
     pending transcript's classification resolves to voice_dump (see
     run_llm_job's classify_pipeline branch)."""
     from services.classification import effective_kind
+
     if effective_kind(transcript) != "voice_dump":
         return None
-    from services.settings import resolve_provider_key, KEYLESS_PROVIDERS
-
-    provider = user_settings.get("format_provider", "groq")
-    model = user_settings.get("format_model", "llama-3.3-70b-versatile")
-    api_key, _ = resolve_provider_key(db, transcript.user_id, provider)
-    error = None
-    if provider not in KEYLESS_PROVIDERS and not api_key:
-        error = f"voice-dump chain skipped: no {provider} API key saved (see service panel)"
-    return enqueue_llm_job(db, transcript.user_id, transcript.id, "voice_dump", provider, model, error=error)
+    return _enqueue_auto(
+        db,
+        transcript,
+        user_settings,
+        kind="voice_dump",
+        provider_setting="format_provider",
+        model_setting="format_model",
+        skip_message="voice-dump chain skipped",
+    )
 
 
 def enqueue_auto_tagging(db, transcript, user_settings: dict) -> LlmJob:
@@ -280,15 +319,15 @@ def enqueue_auto_tagging(db, transcript, user_settings: dict) -> LlmJob:
     other auto-enqueue helpers. Uses `format_provider`/`format_model`
     since tagging is the same flavor of pure text-in/text-out LLM work
     as the dictation reformat and voice-note chains."""
-    from services.settings import resolve_provider_key, KEYLESS_PROVIDERS
-
-    provider = user_settings.get("format_provider", "groq")
-    model = user_settings.get("format_model", "llama-3.3-70b-versatile")
-    api_key, _ = resolve_provider_key(db, transcript.user_id, provider)
-    error = None
-    if provider not in KEYLESS_PROVIDERS and not api_key:
-        error = f"auto-tag skipped: no {provider} API key saved (see service panel)"
-    return enqueue_llm_job(db, transcript.user_id, transcript.id, "tagging", provider, model, error=error)
+    return _enqueue_auto(
+        db,
+        transcript,
+        user_settings,
+        kind="tagging",
+        provider_setting="format_provider",
+        model_setting="format_model",
+        skip_message="auto-tag skipped",
+    )
 
 
 def enqueue_pipeline_classify(db, transcript, user_settings: dict) -> LlmJob | None:
@@ -311,6 +350,37 @@ def enqueue_pipeline_classify(db, transcript, user_settings: dict) -> LlmJob | N
     if provider not in KEYLESS_PROVIDERS and not api_key:
         error = f"classification skipped: no {provider} API key saved (see service panel)"
     return enqueue_llm_job(db, transcript.user_id, transcript.id, "classify_pipeline", provider, model, error=error)
+
+
+def enqueue_post_transcription_jobs(
+    db, transcript, user_settings: dict, *, auto_correct_override: bool | None = None
+) -> None:
+    """One shared post-transcription enqueue sequence (issue #403).
+
+    Replaces the duplicated ~9-line blocks in
+    ``app.py:_run_transcription_pipeline`` and
+    ``services/queue.py:_finalize_if_done``. ``auto_correct_override``
+    mirrors the inline path's caller-supplied override (``None`` falls back
+    to ``user_settings["auto_correct"]``); the chunked path passes no
+    override and reads straight from settings. ``should_fire_side_effects``
+    stays at the ``queue.py`` call site — it is specific to the chunked
+    re-finalize guard (issue #328), not a concern of this function."""
+    if auto_correct_override is None:
+        auto_correct = user_settings.get("auto_correct", True)
+    else:
+        auto_correct = auto_correct_override
+    if auto_correct:
+        enqueue_auto_correction(db, transcript, user_settings)
+    else:
+        enqueue_pipeline_classify(db, transcript, user_settings)
+    enqueue_auto_classify(db, transcript, user_settings)
+    from services.classification import effective_kind
+
+    if effective_kind(transcript) == "voice_note":
+        enqueue_auto_voice_note(db, transcript, user_settings)
+    if effective_kind(transcript) == "voice_dump":
+        enqueue_auto_voice_dump(db, transcript, user_settings)
+    enqueue_auto_tagging(db, transcript, user_settings)
 
 
 def cancel_llm_job(db, user_id: int, job_id: int) -> LlmJob:

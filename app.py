@@ -54,7 +54,7 @@ from services.hotwords import list_hotwords, add_hotword, delete_hotword
 from services.correction import extract_hotwords_from_doc
 from services.model_catalog import get_correction_models
 from services.llm_jobs import (
-    enqueue_llm_job, enqueue_auto_correction, enqueue_auto_classify, enqueue_auto_voice_note, enqueue_auto_voice_dump, enqueue_auto_tagging,
+    enqueue_llm_job, enqueue_post_transcription_jobs,
     enqueue_pipeline_classify,
     serialize_llm_job, latest_job,
     cancel_llm_job, rerun_llm_job, llm_worker_loop, reset_stuck_llm_jobs,
@@ -1644,35 +1644,9 @@ async def _run_transcription_pipeline(
                     transcript.status = "partial"
                 db.commit()
 
-        # Post-hoc correction pass — queued as a background LlmJob (visible
-        # on the Queue screen) instead of blocking this response. Runs
-        # unconditionally of kind now (design decision 11): classification
-        # needs corrected text (decision 2) even for a not-yet-classified
-        # 'auto' transcript, and voice_note no longer opts out. Only the
-        # auto_correct user setting gates it. enqueue_auto_classify and the
-        # voice-note-chain enqueue below both no-op on the wrong kind via
-        # effective_kind(), so calling them unconditionally is safe.
-        if auto_correct is None:
-            auto_correct = user_settings.get("auto_correct", True)
-        if auto_correct:
-            enqueue_auto_correction(db, transcript, user_settings)
-        else:
-            # No correction pass means correction-completion (the usual
-            # classify_pipeline trigger, services/llm_jobs.py's "correction"
-            # branch) never fires — trigger classification directly instead,
-            # or an auto-kind transcript would stay pending forever
-            # (issue #268 comment 2's gap). No-ops via its own status guard
-            # when kind was explicitly chosen (classification_status is
-            # already 'override', never 'pending').
-            enqueue_pipeline_classify(db, transcript, user_settings)
-        enqueue_auto_classify(db, transcript, user_settings)
-        if effective_kind(transcript) == "voice_note":
-            enqueue_auto_voice_note(db, transcript, user_settings)
-        if effective_kind(transcript) == "voice_dump":
-            enqueue_auto_voice_dump(db, transcript, user_settings)
-        # Tagging fires for every kind — keep this site in lockstep
-        # with services/queue.py:_finalize_if_done (issue #171).
-        enqueue_auto_tagging(db, transcript, user_settings)
+        enqueue_post_transcription_jobs(
+            db, transcript, user_settings, auto_correct_override=auto_correct
+        )
 
         return _serialize_transcript(db, transcript, jobs_map=_batch_latest_jobs(db, [transcript.id]))
 

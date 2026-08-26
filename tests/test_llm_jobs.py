@@ -10,6 +10,7 @@ from database import LlmJob, Transcript, User, ProviderConfig, utcnow_naive
 from services.llm_jobs import (
     enqueue_llm_job, run_llm_job, cancel_llm_job, rerun_llm_job, llm_worker_tick,
     reset_stuck_llm_jobs, dismiss_llm_job, clear_finished_llm_jobs, serialize_llm_job,
+    enqueue_post_transcription_jobs,
 )
 from services.queue import MAX_ATTEMPTS
 
@@ -1187,3 +1188,123 @@ def test_rerun_route_works_on_permanently_failed_job(client, db_session):
     rerun = client.post(f"/api/jobs/{job_id}/rerun").json()
     assert rerun["job"]["status"] == "pending"
     assert rerun["job"]["id"] != job_id
+
+
+# ── enqueue_post_transcription_jobs: the shared entry point that replaces
+# the duplicated inline (app.py) and chunked (queue.py) blocks (issue #403)
+
+
+def _post_tx_user(db_session, **settings_overrides):
+    """User whose settings exercise every branch of the shared function."""
+    user = User(username="posttx", password_hash="x", password_salt="y")
+    db_session.add(user)
+    db_session.commit()
+    db_session.add(ProviderConfig(user_id=user.id, name="groq", api_key="fake-key"))
+    db_session.commit()
+    return user
+
+
+def _post_tx_transcript(db_session, user, kind="dictation"):
+    t = Transcript(
+        user_id=user.id, title="ptx", filename="ptx.mp3", status="completed",
+        full_text="hello world", kind=kind, classification_status="override",
+    )
+    db_session.add(t)
+    db_session.commit()
+    return t
+
+
+def test_enqueue_post_transcription_jobs_auto_correct_true_enqueues_correction(db_session):
+    user = _post_tx_user(db_session)
+    t = _post_tx_transcript(db_session, user, kind="dictation")
+    enqueue_post_transcription_jobs(db_session, t, {"auto_correct": True})
+    kinds = {j.kind for j in db_session.query(LlmJob).filter(LlmJob.transcript_id == t.id).all()}
+    assert "correction" in kinds
+    assert "classify_pipeline" not in kinds
+
+
+def test_enqueue_post_transcription_jobs_auto_correct_false_noops_pipeline_when_override(db_session):
+    """auto_correct=False should trigger pipeline classify, but that helper
+    no-ops when classification_status is already 'override'."""
+    user = _post_tx_user(db_session)
+    t = _post_tx_transcript(db_session, user, kind="dictation")
+    t.classification_status = "override"
+    db_session.commit()
+    enqueue_post_transcription_jobs(db_session, t, {"auto_correct": False})
+    kinds = {j.kind for j in db_session.query(LlmJob).filter(LlmJob.transcript_id == t.id).all()}
+    assert "correction" not in kinds
+    assert "classify_pipeline" not in kinds
+
+
+def test_enqueue_post_transcription_jobs_auto_correct_false_fires_pipeline_when_pending(db_session):
+    user = _post_tx_user(db_session)
+    t = _post_tx_transcript(db_session, user, kind="dictation")
+    t.classification_status = "pending"
+    db_session.commit()
+    enqueue_post_transcription_jobs(db_session, t, {"auto_correct": False})
+    kinds = {j.kind for j in db_session.query(LlmJob).filter(LlmJob.transcript_id == t.id).all()}
+    assert "classify_pipeline" in kinds
+
+
+def test_enqueue_post_transcription_jobs_override_param_wins_over_settings(db_session):
+    user = _post_tx_user(db_session)
+    t = _post_tx_transcript(db_session, user, kind="dictation")
+    # settings say auto_correct=False but caller override says True → correction
+    enqueue_post_transcription_jobs(db_session, t, {"auto_correct": False}, auto_correct_override=True)
+    kinds = {j.kind for j in db_session.query(LlmJob).filter(LlmJob.transcript_id == t.id).all()}
+    assert "correction" in kinds
+
+    # and the reverse
+    t2 = _post_tx_transcript(db_session, user, kind="dictation")
+    t2.classification_status = "pending"
+    db_session.commit()
+    enqueue_post_transcription_jobs(db_session, t2, {"auto_correct": True}, auto_correct_override=False)
+    kinds2 = {j.kind for j in db_session.query(LlmJob).filter(LlmJob.transcript_id == t2.id).all()}
+    assert "correction" not in kinds2
+    assert "classify_pipeline" in kinds2
+
+
+def test_enqueue_post_transcription_jobs_gates_voice_note_on_effective_kind(db_session):
+    user = _post_tx_user(db_session)
+    # dictation should not trigger voice_note
+    t_dict = _post_tx_transcript(db_session, user, kind="dictation")
+    enqueue_post_transcription_jobs(db_session, t_dict, {"auto_correct": True})
+    assert not any(j.kind == "voice_note" for j in db_session.query(LlmJob).filter(LlmJob.transcript_id == t_dict.id).all())
+    # voice_note with override should
+    t_vn = _post_tx_transcript(db_session, user, kind="voice_note")
+    enqueue_post_transcription_jobs(db_session, t_vn, {"auto_correct": True})
+    assert any(j.kind == "voice_note" for j in db_session.query(LlmJob).filter(LlmJob.transcript_id == t_vn.id).all())
+
+
+def test_enqueue_post_transcription_jobs_gates_voice_dump_on_effective_kind(db_session):
+    user = _post_tx_user(db_session)
+    t_vd = _post_tx_transcript(db_session, user, kind="voice_dump")
+    enqueue_post_transcription_jobs(db_session, t_vd, {"auto_correct": True})
+    assert any(j.kind == "voice_dump" for j in db_session.query(LlmJob).filter(LlmJob.transcript_id == t_vd.id).all())
+    t_other = _post_tx_transcript(db_session, user, kind="meeting")
+    enqueue_post_transcription_jobs(db_session, t_other, {"auto_correct": True})
+    assert not any(j.kind == "voice_dump" for j in db_session.query(LlmJob).filter(LlmJob.transcript_id == t_other.id).all())
+
+
+def test_enqueue_post_transcription_jobs_always_tags(db_session):
+    user = _post_tx_user(db_session)
+    for kind in ("meeting", "dictation", "voice_note", "voice_dump"):
+        t = _post_tx_transcript(db_session, user, kind=kind)
+        enqueue_post_transcription_jobs(db_session, t, {"auto_correct": True})
+        assert any(j.kind == "tagging" for j in db_session.query(LlmJob).filter(LlmJob.transcript_id == t.id).all()), f"missing tagging for {kind}"
+
+
+def test_enqueue_post_transcription_jobs_mutation_check(db_session):
+    """Replacing the shared function body with `return None` must break at
+    least one observable branch — otherwise the tests above are vacuous."""
+    user = _post_tx_user(db_session)
+    t = _post_tx_transcript(db_session, user, kind="dictation")
+    with patch("services.llm_jobs.enqueue_post_transcription_jobs", return_value=None):
+        from services.llm_jobs import enqueue_post_transcription_jobs as patched
+        patched(db_session, t, {"auto_correct": True})
+    # patched version enqueued nothing
+    assert db_session.query(LlmJob).filter(LlmJob.transcript_id == t.id).count() == 0
+    # real version does
+    t2 = _post_tx_transcript(db_session, user, kind="dictation")
+    enqueue_post_transcription_jobs(db_session, t2, {"auto_correct": True})
+    assert db_session.query(LlmJob).filter(LlmJob.transcript_id == t2.id).count() > 0
