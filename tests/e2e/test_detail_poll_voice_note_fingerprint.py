@@ -9,8 +9,7 @@ its progress never surfaced without leaving the page. Same class as #246
 Part 1 asserts the fingerprint string itself changes when only
 voice_note_job.progress.done changes. Part 2 exercises the actual
 scheduleDetailPoll gate via window.__testDetailPoll (added for #435) so a
-future edit that keeps the fingerprint but drops the gate is caught. A
-negative control asserts an all-null payload does NOT schedule a poll.
+future edit that keeps the fingerprint but drops the gate is caught. Value space: pending/running schedule, completed/failed/null do not; cross-checked via correction_job running.
 """
 import http.cookiejar
 import json
@@ -131,62 +130,47 @@ def test_jobfingerprint_changes_when_only_voice_note_progress_updates(page, regi
     )
 
     # Part 2: exercise the actual scheduleDetailPoll gate via test hooks
-    # (issue #435 — the previous version only proved the fingerprint, not that
+    # (issue #435 - the previous version only proved the fingerprint, not that
     # the poll timer is scheduled for a voice_note-only running job).
     gate = page.evaluate(
         """() => {
-            const voiceOnly = {
-                id: 99991,
-                correction_job: null,
-                summary_job: null,
-                voice_match_job: null,
-                format_markdown_job: null,
-                format_email_job: null,
-                format_coding_prompt_job: null,
-                classify_intent_job: null,
-                tagging_job: null,
-                voice_dump_job: null,
-                voice_note_job: { status: 'running', progress: { done: 1, total: 3 } },
-            };
-            const empty = {
-                id: 99992,
-                correction_job: null,
-                summary_job: null,
-                voice_match_job: null,
-                format_markdown_job: null,
-                format_email_job: null,
-                format_coding_prompt_job: null,
-                classify_intent_job: null,
-                tagging_job: null,
-                voice_dump_job: null,
-                voice_note_job: null,
-            };
             const hook = window.__testDetailPoll;
-            if (!hook) return { error: 'window.__testDetailPoll missing — rack.js test hooks not exposed' };
-            // voice_note-only running job must schedule a poll
-            hook.setDetailData(voiceOnly);
+            if (!hook) return { error: 'window.__testDetailPoll missing - rack.js test hooks not exposed' };
+            const make = (status) => ({
+                id: 1,
+                correction_job: null,
+                summary_job: null,
+                voice_match_job: null,
+                format_markdown_job: null,
+                format_email_job: null,
+                format_coding_prompt_job: null,
+                classify_intent_job: null,
+                tagging_job: null,
+                voice_dump_job: null,
+                voice_note_job: status === null ? null : { status },
+            });
+            const out = {};
+            for (const s of ['pending', 'running', 'completed', 'failed', null]) {
+                hook.setDetailData(make(s));
+                hook.setPage('detail');
+                hook.clear();
+                hook.schedule();
+                out[String(s)] = hook.scheduled();
+                hook.clear();
+            }
+            hook.setDetailData(null);
+            // Cross-check: correction_job running must also schedule (slot sanity)
+            hook.setDetailData({ id: 2, correction_job: { status: 'running' }, summary_job: null, voice_match_job: null, format_markdown_job: null, format_email_job: null, format_coding_prompt_job: null, classify_intent_job: null, tagging_job: null, voice_dump_job: null, voice_note_job: null });
             hook.setPage('detail');
             hook.clear();
             hook.schedule();
-            const voiceScheduled = hook.scheduled();
-            hook.clear();
-            // all-null must NOT schedule
-            hook.setDetailData(empty);
-            hook.setPage('detail');
-            hook.clear();
-            hook.schedule();
-            const emptyScheduled = hook.scheduled();
+            const correctionRunning = hook.scheduled();
             hook.clear();
             hook.setDetailData(null);
-            return { voiceScheduled, emptyScheduled };
+            return { ...out, correctionRunning };
         }"""
     )
     assert "error" not in gate, gate.get("error", "")
-    assert gate["voiceScheduled"] is True, (
-        "scheduleDetailPoll did not schedule a timer for a voice_note-only "
-        "running payload — voice_note_job is missing from the poll gate"
-    )
-    assert gate["emptyScheduled"] is False, (
-        "scheduleDetailPoll scheduled a timer for an all-null payload — "
-        "gate should stay closed when no job is active"
+    assert gate == {"pending": True, "running": True, "completed": False, "failed": False, "null": False, "correctionRunning": True}, (
+        f"scheduleDetailPoll gate mismatch: expected pending/running True, completed/failed/null False, correctionRunning True, got {gate!r}"
     )
