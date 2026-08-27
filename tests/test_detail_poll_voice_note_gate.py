@@ -1,11 +1,11 @@
-"""Retained mutation sibling for issue #435 — mirrors the JS gate in static/rack.js:3882.
+"""Retained mutation sibling for issue #435 -- mirrors the JS gate in static/rack.js:3882.
 
 The e2e twin `tests/e2e/test_detail_poll_voice_note_fingerprint.py:128-180`
 exercises the same predicate via window.__testDetailPoll but needs Playwright.
 This sibling runs in the default pytest config (no browser) so the
 mutation transcript in self-audit.md points at a retained artifact.
 
-Mutates by replacing the gate body with `return False` — then the
+Mutates by replacing the gate body with `return False` -- then the
 pending/running cases fail.
 """
 
