@@ -30,7 +30,7 @@ EXPECTED_KEYS = {
     "duration_seconds", "provider", "model", "language", "status",
     "full_text", "segments", "speaker_count", "diarization_method",
     "num_speakers", "error", "corrected_text", "correction_error",
-    "correction_model", "created_at", "updated_at", "has_summary",
+    "correction_model", "context_extraction_error", "created_at", "updated_at", "has_summary",
     "has_audio", "has_video", "job_progress", "processed_size_bytes",
     "queue_status",
     "correction_job", "summary_job", "voice_match_job", "classify_pipeline_job",

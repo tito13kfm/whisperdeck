@@ -449,6 +449,7 @@ def _serialize_transcript(db: Session, t: Transcript, *, jobs_map: dict[tuple[in
         "corrected_text": t.corrected_text,
         "correction_error": t.correction_error,
         "correction_model": t.correction_model,
+        "context_extraction_error": getattr(t, "context_extraction_error", None),
         "created_at": t.created_at.isoformat() if t.created_at else None,
         "updated_at": t.updated_at.isoformat() if t.updated_at else None,
         "has_summary": t.summary is not None,
@@ -1298,6 +1299,7 @@ async def _run_transcription_pipeline(
     batch_id: Optional[str] = None,
     kind: str = "meeting",
     capture_source: Optional[str] = None,
+    context_extraction_error: Optional[str] = None,
 ) -> dict:
     """Everything after the source audio is on disk: transcode decision,
     chunk-vs-inline branch, inline diarization, auto-correct enqueue.
@@ -1535,6 +1537,8 @@ async def _run_transcription_pipeline(
                 transcript.classification_status = classification_status
             transcript.num_speakers = num_speakers
             transcript.stereo_audio_path = stereo_audio_path
+            if context_extraction_error:
+                transcript.context_extraction_error = context_extraction_error
             transcript.duration_seconds = duration_seconds
             db.commit()
             stereo_persisted = True
@@ -1566,6 +1570,8 @@ async def _run_transcription_pipeline(
             transcript.batch_id = batch_id
             if classification_status is not None:
                 transcript.classification_status = classification_status
+            if context_extraction_error:
+                transcript.context_extraction_error = context_extraction_error
             db.commit()
         except Exception:
             _discard_stereo_copy()
@@ -1598,6 +1604,8 @@ async def _run_transcription_pipeline(
             transcript.classification_status = classification_status
         transcript.num_speakers = num_speakers
         transcript.stereo_audio_path = stereo_audio_path
+        if context_extraction_error:
+            transcript.context_extraction_error = context_extraction_error
         db.commit()
         stereo_persisted = True
 
@@ -1691,6 +1699,7 @@ async def transcribe_audio(
         content = await file.read()
         f.write(content)
 
+    context_extraction_error = None
     if context_doc and context_doc.strip():
         extraction_provider, extraction_key, extraction_cfg, usable = _resolve_hotword_extraction(db, current_user.id)
         if usable:
@@ -1701,7 +1710,10 @@ async def transcribe_audio(
                 )
             except Exception as e:
                 # Non-fatal: glossary-building side effect, never blocks transcription.
+                # Persisted on the transcript row so the detail page can surface it
+                # rather than silently acting as if no glossary was pasted (#310).
                 print(f"[correction] non-fatal hotword extraction failure: {e}")
+                context_extraction_error = str(e)[:500]
 
     return await _run_transcription_pipeline(
         db, current_user, save_path,
@@ -1716,6 +1728,7 @@ async def transcribe_audio(
         num_speakers=num_speakers,
         kind=kind,
         capture_source=capture_source,
+        context_extraction_error=context_extraction_error,
     )
 
 
