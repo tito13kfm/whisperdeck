@@ -3302,6 +3302,8 @@ async def rerun_voice_dump_chain(
         raise HTTPException(status_code=400, detail="Voice-dump chain only applies to voice_dump transcripts")
     if t.status not in ("completed", "partial"):
         raise HTTPException(status_code=400, detail=f"Transcript {transcript_id} is not completed")
+    if db.query(VoiceDumpItem).filter(VoiceDumpItem.transcript_id == transcript_id).first() is not None:
+        raise HTTPException(status_code=409, detail="Already finalized — rerun not allowed")
     from services.settings import resolve_provider_key, KEYLESS_PROVIDERS
     api_key, _ = resolve_provider_key(db, current_user.id, provider)
     if provider not in KEYLESS_PROVIDERS and not api_key:
@@ -3330,6 +3332,12 @@ async def save_voice_dump_draft(
     job = latest_job(db, transcript_id, "voice_dump")
     if not job:
         raise HTTPException(status_code=404, detail="No voice_dump job found for this transcript")
+    if job.status != "completed":
+        raise HTTPException(status_code=409, detail="Draft can only be saved from a completed job")
+    if db.query(VoiceDumpItem).filter(VoiceDumpItem.transcript_id == transcript_id).first() is not None:
+        raise HTTPException(status_code=409, detail="Already finalized — save not allowed")
+    if not isinstance(items, list):
+        raise HTTPException(status_code=400, detail="Expected a JSON array of items")
     if not job.result_json:
         job.result_json = {}
     job.result_json = {**job.result_json, "items": items}
@@ -3361,14 +3369,29 @@ async def finalize_voice_dump(
     if source_job:
         source_job_id = source_job.id
 
+    if source_job_id is not None and db.query(VoiceDumpItem).filter(
+        VoiceDumpItem.transcript_id == transcript_id,
+        VoiceDumpItem.source_job_id == source_job_id,
+    ).first() is not None:
+        raise HTTPException(status_code=409, detail="Already finalized for this draft")
+
+    existing_max = db.query(func.max(VoiceDumpItem.sequence_index)).filter(
+        VoiceDumpItem.transcript_id == transcript_id,
+    ).scalar()
+    seq_base = (existing_max + 1) if existing_max is not None else 0
+
+    from services.voice_notes import NOTE_TYPES
+
     created = []
     for idx, item in enumerate(kept):
+        raw_type = item.get("type", "general")
+        note_type = raw_type if raw_type in NOTE_TYPES else "general"
         vdi = VoiceDumpItem(
             user_id=current_user.id,
             transcript_id=transcript_id,
             source_job_id=source_job_id,
-            sequence_index=idx,
-            note_type=item.get("type", "general"),
+            sequence_index=seq_base + idx,
+            note_type=note_type,
             title=item.get("title", ""),
             body=item.get("body", ""),
             structured=item.get("structured", {}),
@@ -3402,7 +3425,7 @@ async def get_transcript_voice_dump_items(
     items = (
         db.query(VoiceDumpItem)
         .filter(VoiceDumpItem.transcript_id == transcript_id)
-        .order_by(VoiceDumpItem.sequence_index)
+        .order_by(VoiceDumpItem.sequence_index, VoiceDumpItem.id)
         .all()
     )
     return {"items": [_serialize_voice_dump_item(it) for it in items]}

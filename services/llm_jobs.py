@@ -783,6 +783,9 @@ async def run_llm_job(SessionLocal, job_id: int, transcription_service, diarizat
                     })
                     job.progress_done = i + 1
                     db.commit()
+                db.refresh(job)
+                if job.status == "cancelled":
+                    return
                 job.result_json = {"items": items}
                 job.progress_done = len(segments) + 1
                 _finish(db, job, "completed")
