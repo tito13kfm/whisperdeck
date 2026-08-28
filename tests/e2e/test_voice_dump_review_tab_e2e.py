@@ -478,3 +478,47 @@ def test_voice_note_detail_tab_unaffected_by_kind_tabs_refactor(page, registered
     assert page.locator("#detail-body [data-dact='rerun-voice-note']").count() == 1
     assert page.locator("#detail-body [data-dact='delete-voice-note']").count() == 1
     assert errors == []
+
+
+def test_voice_note_notes_buttons_are_bound(page_no_sw, registered_user):
+    """Deleting the renderDetailBody notes-branch
+    `body.querySelectorAll('[data-dact]')…addEventListener` binding leaves
+    both buttons in the HTML but makes clicks inert. This test drives
+    Rerun chain through the browser and asserts the POST is issued
+    (page_no_sw is needed so page-level route interception sees /api/*)."""
+    page = page_no_sw
+    username, password = registered_user
+    _login(page, username, password)
+    errors: list[str] = []
+    page.on("pageerror", lambda exc: errors.append(str(exc)))
+
+    tid = _seed_transcript(username, "voice_note", "Notes binding check")
+    _seed_voice_note_row(username, tid, "todo", "Bind check", "check body", {"items": []})
+    _goto_detail(page, tid, "Bind check")
+    page.click("[data-tab='notes']")
+    page.wait_for_selector("#detail-body h2", timeout=10000)
+    assert page.locator("#detail-body [data-dact='rerun-voice-note']").count() == 1
+    # Override fetch so the rerun POST is intercepted in-page without
+    # needing to mock the whole server. The service worker reissues
+    # fetch() from its own scope and page.route never sees it; stubbing
+    # fetch() in-page (as test_detail_rapid_clicks does) sidesteps that.
+    saw_rerun = page.evaluate(
+        "() => {"
+        "  window.__sawRerun = false;"
+        "  const orig = window.fetch;"
+        "  window.fetch = (url, opts) => {"
+        "    const u = String(url);"
+        "    if (u.includes('/voice-note/rerun') && opts && opts.method === 'POST') {"
+        "      window.__sawRerun = true;"
+        "      return Promise.resolve(new Response(JSON.stringify({job:{status:'pending'}}), {status:200, headers:{'Content-Type':'application/json'}}));"
+        "    }"
+        "    return orig(url, opts);"
+        "  };"
+        "  return true;"
+        "}"
+    )
+    assert saw_rerun
+    page.click("#detail-body [data-dact='rerun-voice-note']")
+    page.wait_for_function("() => window.__sawRerun === true", timeout=5000)
+    assert page.evaluate("() => window.__sawRerun") is True
+    assert errors == []

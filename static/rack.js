@@ -5261,7 +5261,9 @@ async function renderDetailBody() {
     body.innerHTML = (t.corrected_text ? exportToolbarHtml('corrected') : '') + correctedHtml(t);
   } else if (S.detailTab === 'format' && t.kind === 'dictation') {
     body.innerHTML = '<div class="empty-unit">Loading…</div>';
-    body.innerHTML = await formatHtml(t);
+    const html = await formatHtml(t);
+    if (detailData !== t || S.detailTab !== 'format') return;
+    body.innerHTML = html;
     body.querySelectorAll('[data-dact]').forEach(b => b.addEventListener('click', () => detailAction(b.dataset.dact, b)));
   } else if (S.detailTab === 'format') {
     // Stale S.detailTab from a previously-open dictation transcript, left
@@ -5271,13 +5273,17 @@ async function renderDetailBody() {
     body.innerHTML = '<div class="empty-unit">Not available for meeting transcripts</div>';
   } else if (S.detailTab === 'notes' && t.kind === 'voice_note') {
     body.innerHTML = '<div class="empty-unit">Loading voice note…</div>';
-    body.innerHTML = await voiceNoteHtml(t);
+    const html = await voiceNoteHtml(t);
+    if (detailData !== t || S.detailTab !== 'notes') return;
+    body.innerHTML = html;
     body.querySelectorAll('[data-dact]').forEach(b => b.addEventListener('click', () => detailAction(b.dataset.dact, b)));
   } else if (S.detailTab === 'notes') {
     body.innerHTML = '<div class="empty-unit">Not available for non-voice-note transcripts</div>';
   } else if (S.detailTab === 'review' && t.kind === 'voice_dump') {
     body.innerHTML = '<div class="empty-unit">Loading dump items…</div>';
-    body.innerHTML = await dumpReviewHtml(t);
+    const html = await dumpReviewHtml(t);
+    if (detailData !== t || S.detailTab !== 'review') return;
+    body.innerHTML = html;
     // #detail-body's delegated click handler only dispatches export and
     // segment buttons, so [data-dact] has to be bound here — renderDetail's
     // own pass ran before this async branch filled the body.
