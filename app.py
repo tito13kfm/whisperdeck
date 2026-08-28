@@ -1537,7 +1537,7 @@ async def _run_transcription_pipeline(
                 transcript.classification_status = classification_status
             transcript.num_speakers = num_speakers
             transcript.stereo_audio_path = stereo_audio_path
-            if context_extraction_error:
+            if context_extraction_error is not None:
                 transcript.context_extraction_error = context_extraction_error
             transcript.duration_seconds = duration_seconds
             db.commit()
@@ -1570,7 +1570,7 @@ async def _run_transcription_pipeline(
             transcript.batch_id = batch_id
             if classification_status is not None:
                 transcript.classification_status = classification_status
-            if context_extraction_error:
+            if context_extraction_error is not None:
                 transcript.context_extraction_error = context_extraction_error
             db.commit()
         except Exception:
@@ -1604,7 +1604,7 @@ async def _run_transcription_pipeline(
             transcript.classification_status = classification_status
         transcript.num_speakers = num_speakers
         transcript.stereo_audio_path = stereo_audio_path
-        if context_extraction_error:
+        if context_extraction_error is not None:
             transcript.context_extraction_error = context_extraction_error
         db.commit()
         stereo_persisted = True
@@ -1713,7 +1713,7 @@ async def transcribe_audio(
                 # Persisted on the transcript row so the detail page can surface it
                 # rather than silently acting as if no glossary was pasted (#310).
                 print(f"[correction] non-fatal hotword extraction failure: {e}")
-                context_extraction_error = str(e)[:500]
+                context_extraction_error = (str(e).strip()[:500] or f"{type(e).__name__}: extraction failed")
 
     return await _run_transcription_pipeline(
         db, current_user, save_path,

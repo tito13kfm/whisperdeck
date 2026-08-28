@@ -2403,9 +2403,11 @@ async function startJob() {
     }
     if (finalData.status === 'cancelled') {
       toast('Transcription cancelled — resume from the channel bank', 'info');
+      if (finalData.context_extraction_error) toast('Context glossary failed: ' + finalData.context_extraction_error, 'error');
       S.pct = 0;
     } else if (finalData.status === 'partial') {
       toast('Partially complete — some sections failed; retry from the channel bank', 'error');
+      if (finalData.context_extraction_error) toast('Context glossary failed: ' + finalData.context_extraction_error, 'error');
       S.jobDone = true;
       S.doneId = finalData.id;
       S.doneDuration = finalData.duration_seconds;
