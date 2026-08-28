@@ -162,6 +162,18 @@ If you're ever unsure which root a path belongs to: code changes go where
 your cwd already is; report writes go to the absolute main-repo path
 above, regardless of cwd.
 
+**Don't hand-roll what `EnterWorktree` already gives you.** Setting a
+`workdir`-style variable, or running a manual `cd`, is not the same thing
+and does not reliably persist the way `EnterWorktree`'s cwd switch does —
+the OMO port of this workflow (opencode, not Claude Code) hit exactly this:
+a fix cycle set a path variable, never actually changed into it, and every
+subsequent git/grep command silently ran against `<MAIN>` on stale `master`
+while `Read`/`Write` calls (absolute paths, unaffected by cwd) correctly hit
+the worktree — burning an entire cycle on a phantom contradiction between
+the two. If a git/grep result ever looks like it disagrees with what a Read
+call just showed you, run `pwd` and `git rev-parse --show-toplevel` before
+trusting either — that split is this exact bug, not a real inconsistency.
+
 **Never run `git checkout`, `git switch`, or `git checkout -b` in `<MAIN>`.**
 This repo's `CLAUDE.md` already covers why (run artifacts hide under a
 branch switch there) and what enforces it (`post-checkout` hook,

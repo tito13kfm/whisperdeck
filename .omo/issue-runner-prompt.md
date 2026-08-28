@@ -187,6 +187,24 @@ from the directory path.
 worktree's checked-out branch, so a near-miss name can resolve to a
 different checkout and verify the wrong code.
 
+**Shell state does not persist between tool calls, including cwd.** A
+`workdir="<path>"` variable assignment does nothing on its own — it is not a
+`cd`, and even a real `cd` from one shell invocation has no effect on the
+next one, which starts fresh. This has actually happened: a fix cycle set
+`workdir` to the worktree path, never `cd`'d into it, and every bare
+`git status`/`git diff`/`grep file.py` afterward silently ran against
+`<MAIN>` on stale `master` instead — while `Read`/`Write` calls (which take
+absolute paths as arguments, unaffected by shell cwd) correctly hit the
+worktree. That split produced a contradiction (files that look edited via
+Read, but "missing" the edit via grep) that burned an entire fix cycle
+chasing a phantom bug instead of touching the real one. Every command that
+touches repo files must self-contain its path in that same invocation:
+`cd "<worktree-path>" && <command>`, or `git -C "<worktree-path>" <command>`,
+or an absolute path built from `<worktree-path>`. If a git/grep result ever
+looks like it contradicts what a Read call just showed you, suspect this
+exact bug before suspecting the code — re-run with an explicit path pin
+before trusting either.
+
 **Never run `git checkout`, `git switch`, or `git checkout -b` in `<MAIN>`.**
 The main checkout stays on `master` for the whole run. Branches come from
 `git worktree add <path> -b <name> origin/master`, never from switching the
