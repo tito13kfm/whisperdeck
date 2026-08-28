@@ -465,26 +465,14 @@ def test_voice_note_detail_tab_unaffected_by_kind_tabs_refactor(page, registered
 
     page.click("[data-tab='notes']")
     page.wait_for_selector("#detail-body .empty-unit, #detail-body h2", timeout=5000)
-    # .empty-unit has text-transform: uppercase in CSS -- lower-case before
-    # comparing, matching this repo's existing e2e convention (see
-    # test_voice_dump_board_e2e.py's _badge_label / .lower() usage).
-    body_text = page.locator("#detail-body").inner_text().lower()
+    body_text = page.locator("#detail-body").inner_text()
+    body_lower = body_text.lower()
 
-    # This is NOT the "Not available for non-voice-note transcripts"
-    # kind-mismatch fallback (that would indicate KIND_TABS regressed) --
-    # it's voiceNoteHtml()'s own "no result yet" empty state (rack.js:4600).
-    # Confirmed pre-existing and unrelated to this branch: voiceNoteHtml
-    # reads job.result_json directly off the transcript payload, but
-    # serialize_llm_job() (services/llm_jobs.py:48-70) never includes a
-    # result_json key -- the same gap dumpReviewHtml avoids by fetching
-    # GET /runs/voice_dump instead (see loadDumpReview's comment). This
-    # bug predates and is untouched by this branch (git diff never touches
-    # voiceNoteHtml, lines 4577-4656) -- reported to the calling agent as
-    # an out-of-scope, pre-existing bug, not fixed here per the "do not
-    # modify services/ or its frontend contract" scope of this task. The
-    # assertion below pins today's actual (broken) behavior so a real fix
-    # elsewhere shows up here as an intentional test update, not a silent
-    # behavior change slipping through.
-    assert "not available" not in body_text
-    assert "no voice-note result yet" in body_text
+    assert "not available" not in body_lower
+    assert "no voice-note result yet" not in body_lower
+    assert "Grocery run" in body_text
+    assert "Need milk and eggs." in body_text
+    assert "Buy milk" in body_text
+    assert page.locator("#detail-body [data-dact='rerun-voice-note']").count() == 1
+    assert page.locator("#detail-body [data-dact='delete-voice-note']").count() == 1
     assert errors == []

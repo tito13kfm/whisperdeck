@@ -4732,11 +4732,12 @@ const NOTE_TYPE_COLORS = {
 };
 
 async function voiceNoteHtml(t) {
-  // The chain writes to a VoiceNote row AND a LlmJob result_json. The
-  // serializer already exposes voice_note_job.result_json, so we read
-  // from there to avoid a follow-up /voice-note fetch — same shape
-  // either way (the API endpoint and the serializer populate
-  // identical JSON).
+  // Status state (pending/running/failed) comes straight off
+  // t.voice_note_job — those fields the serializer does expose. The
+  // completed payload does NOT live on that job object (serialize_llm_job
+  // has no result_json key) — read the durable VoiceNote row instead
+  // (GET /api/transcripts/{id}/voice-note), mirroring how dumpReviewHtml
+  // fetches /runs/voice_dump for its own payload.
   const job = t.voice_note_job;
   const inFlight = job && (job.status === 'pending' || job.status === 'running');
   if (inFlight) {
@@ -4754,11 +4755,20 @@ async function voiceNoteHtml(t) {
       '<div style="margin-top:14px"><button class="btn" data-dact="rerun-voice-note" style="font-size:12px;padding:7px 14px;border-color:var(--inset-edge)">Rerun chain</button></div>' +
     '</div>';
   }
-  if (!job || !job.result_json) {
+  if (!job || job.status !== 'completed') {
     return '<div class="empty-unit">No voice-note result yet. The chain runs automatically after transcription completes.</div>';
   }
-  const r = job.result_json;
-  const noteType = r.type || 'general';
+  let r;
+  try {
+    const data = await api('/api/transcripts/' + t.id + '/voice-note');
+    r = data.voice_note;
+  } catch (_) {
+    return '<div class="empty-unit">No voice-note result yet. The chain runs automatically after transcription completes.</div>';
+  }
+  if (!r) {
+    return '<div class="empty-unit">No voice-note result yet. The chain runs automatically after transcription completes.</div>';
+  }
+  const noteType = r.type || r.note_type || 'general';
   const typeLabel = NOTE_TYPE_LABELS[noteType] || noteType;
   const typeColor = NOTE_TYPE_COLORS[noteType] || NOTE_TYPE_COLORS.general;
   const title = r.title || t.title || 'Voice note';
@@ -5262,6 +5272,7 @@ async function renderDetailBody() {
   } else if (S.detailTab === 'notes' && t.kind === 'voice_note') {
     body.innerHTML = '<div class="empty-unit">Loading voice note…</div>';
     body.innerHTML = await voiceNoteHtml(t);
+    body.querySelectorAll('[data-dact]').forEach(b => b.addEventListener('click', () => detailAction(b.dataset.dact, b)));
   } else if (S.detailTab === 'notes') {
     body.innerHTML = '<div class="empty-unit">Not available for non-voice-note transcripts</div>';
   } else if (S.detailTab === 'review' && t.kind === 'voice_dump') {
