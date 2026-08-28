@@ -464,7 +464,9 @@ def test_voice_note_detail_tab_unaffected_by_kind_tabs_refactor(page, registered
     assert page.locator("[data-tab='review']").count() == 0
 
     page.click("[data-tab='notes']")
-    page.wait_for_selector("#detail-body .empty-unit, #detail-body h2", timeout=5000)
+    # The Notes tab briefly shows a loading placeholder before the
+    # /voice-note fetch completes; wait for the final rendered title.
+    page.wait_for_selector("#detail-body h2", timeout=10000)
     body_text = page.locator("#detail-body").inner_text()
     body_lower = body_text.lower()
 
