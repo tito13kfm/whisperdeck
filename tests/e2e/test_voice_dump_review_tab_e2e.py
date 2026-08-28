@@ -494,7 +494,7 @@ def test_voice_note_notes_buttons_are_bound(page_no_sw, registered_user):
 
     tid = _seed_transcript(username, "voice_note", "Notes binding check")
     _seed_voice_note_row(username, tid, "todo", "Bind check", "check body", {"items": []})
-    _goto_detail(page, tid, "Bind check")
+    _goto_detail(page, tid, "Notes binding check")
     page.click("[data-tab='notes']")
     page.wait_for_selector("#detail-body h2", timeout=10000)
     assert page.locator("#detail-body [data-dact='rerun-voice-note']").count() == 1
