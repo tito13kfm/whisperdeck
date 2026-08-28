@@ -80,6 +80,7 @@ class Transcript(Base):
     corrected_text = Column(Text, nullable=True)
     correction_error = Column(Text, nullable=True)
     correction_model = Column(String(128), nullable=True)  # e.g. "groq/llama-3.3-70b-versatile"
+    context_extraction_error = Column(Text, nullable=True)  # upload-time hotword extraction failure; transcription still runs (issue #310)
     queue_dismissed = Column(Boolean, default=False)  # hides a terminal transcription entry from the Queue screen only
     source_transcript_id = Column(Integer, ForeignKey("transcripts.id"), nullable=True)  # root transcript this was retranscribed from, for version comparison
     batch_id = Column(String(64), nullable=True, index=True)  # groups transcripts from one bulk upload; NULL for single-file uploads
@@ -715,7 +716,7 @@ def init_db(db_path: str = "data/whisperdesk.db") -> tuple:
     # trg_transcripts_fts_update for a pre-#108 row that has no index entry yet.
     # Dropping the column would take that lever away and leave old installs
     # unsearchable. Never read it for content — it is NULL on anything recent.
-    ensure_columns(engine, "transcripts", {"audio_path": "TEXT", "diarize_requested": "BOOLEAN", "num_speakers": "INTEGER", "processed_size_bytes": "INTEGER", "corrected_text": "TEXT", "correction_error": "TEXT", "correction_model": "TEXT", "queue_dismissed": "BOOLEAN DEFAULT 0", "source_transcript_id": "INTEGER", "batch_id": "TEXT", "video_path": "TEXT", "kind": "TEXT DEFAULT 'meeting'", "diarization_method": "TEXT", "stereo_audio_path": "TEXT", "segment_text": "TEXT", "classification_status": "TEXT DEFAULT 'override'", "classification_confidence": "REAL", "classification_provenance": "JSON"})
+    ensure_columns(engine, "transcripts", {"audio_path": "TEXT", "diarize_requested": "BOOLEAN", "num_speakers": "INTEGER", "processed_size_bytes": "INTEGER", "corrected_text": "TEXT", "correction_error": "TEXT", "correction_model": "TEXT", "context_extraction_error": "TEXT", "queue_dismissed": "BOOLEAN DEFAULT 0", "source_transcript_id": "INTEGER", "batch_id": "TEXT", "video_path": "TEXT", "kind": "TEXT DEFAULT 'meeting'", "diarization_method": "TEXT", "stereo_audio_path": "TEXT", "segment_text": "TEXT", "classification_status": "TEXT DEFAULT 'override'", "classification_confidence": "REAL", "classification_provenance": "JSON"})
     ensure_columns(engine, "llm_jobs", {"dismissed": "BOOLEAN DEFAULT 0", "result_json": "JSON", "attempts": "INTEGER DEFAULT 0"})
     ensure_nullable_llm_job_transcript_id(engine)
     ensure_columns(engine, "summaries", {"provider": "TEXT"})

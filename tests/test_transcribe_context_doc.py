@@ -47,6 +47,31 @@ def test_transcribe_with_context_doc_extraction_failure_is_silent(client):
 
     assert response.status_code == 200
     fake_extract.assert_awaited_once()
+    body = response.json()
+    assert "boom" in (body.get("context_extraction_error") or "")
+
+
+def test_transcribe_context_doc_failure_persists_on_transcript(client):
+    client.put("/api/providers/groq", json={"api_key": "fake-groq-key"})
+    fake_extract = AsyncMock(side_effect=RuntimeError("quota exceeded"))
+    with patch("app.extract_hotwords_from_doc", fake_extract), \
+         patch("app.transcode_for_upload", AsyncMock(side_effect=lambda path, *a, **k: path)), \
+         patch("app.transcription_service.transcribe", AsyncMock(side_effect=_stub_transcribe)):
+        response = client.post(
+            "/api/transcribe",
+            files={"file": ("meeting.mp3", io.BytesIO(b"fake audio bytes"), "audio/mpeg")},
+            data={"provider": "groq", "context_doc": "Agenda: Acme Corp kickoff"},
+        )
+    assert response.status_code == 200
+    tid = response.json()["id"]
+    fetched = client.get(f"/api/transcripts/{tid}").json()
+    assert "quota exceeded" in (fetched.get("context_extraction_error") or "")
+    none_ctx = client.post(
+        "/api/transcribe",
+        files={"file": ("meeting.mp3", io.BytesIO(b"fake audio bytes 2"), "audio/mpeg")},
+        data={"provider": "groq"},
+    ).json()
+    assert none_ctx.get("context_extraction_error") is None
 
 
 def test_transcribe_without_context_doc_skips_extraction(client):

@@ -2403,14 +2403,19 @@ async function startJob() {
     }
     if (finalData.status === 'cancelled') {
       toast('Transcription cancelled — resume from the channel bank', 'info');
+      if (finalData.context_extraction_error) toast('Context glossary failed: ' + finalData.context_extraction_error, 'error');
       S.pct = 0;
     } else if (finalData.status === 'partial') {
       toast('Partially complete — some sections failed; retry from the channel bank', 'error');
+      if (finalData.context_extraction_error) toast('Context glossary failed: ' + finalData.context_extraction_error, 'error');
       S.jobDone = true;
       S.doneId = finalData.id;
       S.doneDuration = finalData.duration_seconds;
     } else {
       toast('Transcription complete');
+      if (finalData.context_extraction_error) {
+        toast('Context glossary failed: ' + finalData.context_extraction_error, 'error');
+      }
       S.jobDone = true;
       S.doneId = finalData.id;
       S.doneDuration = finalData.duration_seconds;
@@ -5163,6 +5168,7 @@ function renderDetail() {
     <div id="retranscribe-picker" style="display:none;margin:0 36px 14px"></div>
     <div id="rediarize-picker" style="display:none;margin:0 36px 14px"></div>
     <div id="context-picker" style="display:none;margin:0 36px 14px"></div>
+    ${t.context_extraction_error ? '<div style="margin:0 36px 14px;padding:12px 16px;border-radius:3px;background:var(--panel);border:1px solid var(--inset-edge);font-size:12.5px;color:var(--body)"><span style="font-family:var(--f-mono);font-size:10px;text-transform:uppercase;letter-spacing:0.08em;color:var(--label-dim)">Context glossary failed</span><div style="margin-top:6px;white-space:pre-wrap;word-break:break-word;font-family:var(--f-mono);font-size:11.5px">' + escapeHtml(t.context_extraction_error) + '</div><div style="margin-top:10px"><button class="btn" style="font-size:11px;padding:6px 12px;border-color:var(--inset-edge)" data-dact="context">Retry — paste again</button></div></div>' : ''}
     <div class="unit" style="border-radius:3px;margin-bottom:14px;padding:14px 22px 14px 34px">
       <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:14px">
         <div style="font-size:12.5px"><div style="font-family:var(--f-mono);font-size:10px;text-transform:uppercase;letter-spacing:0.08em;color:var(--label-dim);margin-bottom:3px">Duration</div>${formatDur(t.duration_seconds)}</div>
