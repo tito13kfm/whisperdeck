@@ -1889,7 +1889,14 @@ async def list_batches(
     current_user: User = Depends(get_current_user),
 ):
     """List batches for the current user, newest first. Each batch entry
-    includes aggregate status counts, total duration, and a first_title."""
+    includes aggregate status counts, total duration, and a first_title.
+
+    Note: not currently called by the bundled frontend — the Queue's
+    batch-progress UI derives its counts client-side via
+    computeBatchAggregate (static/batch_aggregate.js) over GET /api/jobs.
+    Retained as a public API for external tooling / scripting (see
+    issue #405). If this changes, update the frontend grep note there.
+    """
     rows = (
         db.query(
             Transcript.batch_id,
@@ -1962,7 +1969,11 @@ async def get_batch(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Return full detail for one batch including all transcripts."""
+    """Return full detail for one batch including all transcripts.
+
+    Note: same note as GET /api/batches — not called by the bundled
+    frontend today (see issue #405), kept as a public API.
+    """
     transcripts = (
         db.query(Transcript)
         .filter(
