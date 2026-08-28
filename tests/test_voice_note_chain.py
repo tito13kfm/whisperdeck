@@ -60,7 +60,7 @@ def test_voice_note_is_auto_retry_eligible():
 
 
 def test_note_types_includes_all_five_classes():
-    assert set(NOTE_TYPES) == {"todo", "idea", "reminder", "journal", "general"}
+    assert set(NOTE_TYPES) == {"todo", "idea", "reminder", "journal", "general", "bug"}
 
 
 # ── classify_voice_note ───────────────────────────────────────────────────

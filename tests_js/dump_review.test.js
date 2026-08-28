@@ -9,11 +9,11 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { DUMP_NOTE_TYPES, normalizeDumpItems, materializeDumpItems } = require('../static/dump_review.js');
 
-// The five values services/voice_notes.py NOTE_TYPES defines. finalize does
-// item.get("type", "general") with no enum check, so this list is the only
-// guard on the dropdown.
+// The values services/voice_notes.py NOTE_TYPES defines. finalize normalizes
+// any type not in NOTE_TYPES to "general", so this list is the vocabulary
+// the dropdown offers.
 test('DUMP_NOTE_TYPES matches the backend NOTE_TYPES vocabulary exactly', () => {
-  assert.deepEqual(DUMP_NOTE_TYPES, ['todo', 'idea', 'reminder', 'journal', 'general']);
+  assert.deepEqual(DUMP_NOTE_TYPES, ['todo', 'idea', 'reminder', 'journal', 'general', 'bug']);
 });
 
 /* ── normalizeDumpItems ── */

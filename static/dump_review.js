@@ -12,7 +12,7 @@
 // thing keeping the type dropdown honest -- see the unknown-value handling
 // in dumpReviewHtml, which round-trips a value outside this list rather
 // than silently rewriting it.
-const DUMP_NOTE_TYPES = ['todo', 'idea', 'reminder', 'journal', 'general'];
+const DUMP_NOTE_TYPES = ['todo', 'idea', 'reminder', 'journal', 'general', 'bug'];
 
 // Draft items come off job.result_json.items with the keys the job runner
 // wrote (services/llm_jobs.py): index, type, title, body, structured,

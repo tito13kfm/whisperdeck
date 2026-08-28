@@ -4721,7 +4721,7 @@ const FORMAT_TARGETS = [
 ];
 
 const NOTE_TYPE_LABELS = {
-  todo: 'Todo', idea: 'Idea', reminder: 'Reminder', journal: 'Journal', general: 'Note',
+  todo: 'Todo', idea: 'Idea', reminder: 'Reminder', journal: 'Journal', general: 'Note', bug: 'Bug',
 };
 const NOTE_TYPE_COLORS = {
   todo: '#FF8A3D',       // nixie amber
@@ -4729,6 +4729,7 @@ const NOTE_TYPE_COLORS = {
   reminder: '#FFCB6B',   // yellow
   journal: '#C8A6FF',    // violet
   general: '#A9ACAF',    // neutral
+  bug: '#FF5A5A',        // red
 };
 
 async function voiceNoteHtml(t) {
