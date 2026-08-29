@@ -456,8 +456,10 @@ async def extract_segment_clips(
     Unlike ``extract_clips_concat`` (which joins them into one file for
     roster enrollment), this returns one path per input clip — the layout
     ``voice_match`` needs so each segment can be identified independently.
-    Batching reduces the number of ``get_audio_duration`` calls from O(n)
-    to O(n / batch_size) and groups temp-file lifecycle.
+    Each batch of up to ``batch_size`` clips is extracted with a single
+    ffmpeg invocation (one process, multiple ``-ss``/``-to`` output groups)
+    instead of one process per clip, so an n-segment transcript spawns
+    roughly ``n / batch_size`` ffmpeg processes rather than ``n``.
 
     Each resulting WAV must be deleted by the caller when done (mirrors
     ``extract_clips_concat``'s contract). A per-clip extraction failure
@@ -491,38 +493,48 @@ async def extract_segment_clips(
 
     for batch_start in range(0, len(validated), batch_size):
         batch_slice = validated[batch_start: batch_start + batch_size]
+        indexed = [
+            (offset, item) for offset, item in enumerate(batch_slice) if item is not None
+        ]
+        if not indexed:
+            continue
 
-        def _run_batch() -> list[str | None]:
-            batch_paths: list[str | None] = [None] * len(batch_slice)
-            for offset, item in enumerate(batch_slice):
-                if item is None:
-                    continue
-                start, end = item
+        def _run_batch(indexed=indexed) -> dict[int, str]:
+            cmd = [_ffmpeg_bin(), "-y", "-i", audio_path]
+            paths: dict[int, str] = {}
+            for offset, (start, end) in indexed:
                 part = os.path.join(
                     output_dir, f"{base}_{suffix}_seg{batch_start + offset}.wav"
                 )
-                result = subprocess.run(
-                    [
-                        _ffmpeg_bin(), "-y", "-i", audio_path,
-                        "-ss", str(start), "-to", str(end),
-                        "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le",
-                        part,
-                    ],
-                    capture_output=True,
-                    text=True,
-                )
-                if result.returncode != 0:
+                cmd += [
+                    "-ss", str(start), "-to", str(end),
+                    "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le",
+                    part,
+                ]
+                paths[offset] = part
+
+            try:
+                subprocess.run(cmd, capture_output=True, text=True)
+            except OSError:
+                pass
+
+            verified: dict[int, str] = {}
+            for offset, part in paths.items():
+                # A valid 16kHz mono WAV header alone is 44 bytes; anything
+                # at or below that means ffmpeg didn't actually write audio
+                # for this output (skipped/aborted), so treat it as failed.
+                if os.path.exists(part) and os.path.getsize(part) > 44:
+                    verified[offset] = part
+                else:
                     try:
                         os.remove(part)
                     except OSError:
                         pass
-                    continue
-                batch_paths[offset] = part
-            return batch_paths
+            return verified
 
         batch_out = await asyncio.to_thread(_run_batch)
-        for offset, p in enumerate(batch_out):
-            results[batch_start + offset] = p
+        for offset, part in batch_out.items():
+            results[batch_start + offset] = part
 
     return results
 
