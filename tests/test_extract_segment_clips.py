@@ -14,6 +14,7 @@ def test_extract_segment_clips_returns_none_for_invalid_ranges():
              patch("services.audio_prep.subprocess.run") as mock_run, \
              patch("services.audio_prep.os.path.exists", return_value=True), \
              patch("services.audio_prep.os.path.getsize", return_value=50000):
+            mock_run.return_value.returncode = 0
             clips = [
                 {"start": 0.0, "end": 1.0},
                 {"start": 5.0, "end": 3.0},
@@ -40,6 +41,7 @@ def test_extract_segment_clips_batches_into_one_ffmpeg_call_per_batch():
              patch("services.audio_prep.subprocess.run") as mock_run, \
              patch("services.audio_prep.os.path.exists", return_value=True), \
              patch("services.audio_prep.os.path.getsize", return_value=50000):
+            mock_run.return_value.returncode = 0
             clips = [{"start": float(i), "end": float(i) + 1.0} for i in range(40)]
             out = await extract_segment_clips("a.mp3", clips, "/tmp", batch_size=20)
             assert len(out) == 40
@@ -67,6 +69,7 @@ def test_extract_segment_clips_handles_partial_batch_failure():
              patch("services.audio_prep.subprocess.run") as mock_run, \
              patch("services.audio_prep.os.path.exists", side_effect=fake_exists), \
              patch("services.audio_prep.os.path.getsize", return_value=50000):
+            mock_run.return_value.returncode = 0
             clips = [
                 {"start": 0.0, "end": 1.0},
                 {"start": 2.0, "end": 3.0},
@@ -82,8 +85,8 @@ def test_extract_segment_clips_handles_partial_batch_failure():
 
 
 def test_extract_segment_clips_rejects_truncated_output():
-    """A nonzero ffmpeg exit that still leaves a short/partial file behind
-    must not be accepted just because the file is non-empty."""
+    """A short/partial file must not be accepted just because it's
+    non-empty, even when ffmpeg reports success."""
 
     async def run():
         with patch("services.audio_prep.ffmpeg_available", return_value=True), \
@@ -91,9 +94,29 @@ def test_extract_segment_clips_rejects_truncated_output():
              patch("services.audio_prep.subprocess.run") as mock_run, \
              patch("services.audio_prep.os.path.exists", return_value=True), \
              patch("services.audio_prep.os.path.getsize", return_value=200):
+            mock_run.return_value.returncode = 0
             # 200 bytes is well over the old ">44 bytes" floor but far short
             # of what a real 5-second 16kHz mono WAV requires.
             clips = [{"start": 0.0, "end": 5.0}]
+            out = await extract_segment_clips("a.mp3", clips, "/tmp", batch_size=10)
+            assert out[0] is None
+
+    asyncio.run(run())
+
+
+def test_extract_segment_clips_rejects_output_when_ffmpeg_exits_nonzero():
+    """A nonzero exit must be rejected even if the output file it left
+    behind happens to be large enough to pass the size floor (e.g. a
+    decode error near the end of the clip, after most bytes were written)."""
+
+    async def run():
+        with patch("services.audio_prep.ffmpeg_available", return_value=True), \
+             patch("services.audio_prep.get_audio_duration", return_value=10.0), \
+             patch("services.audio_prep.subprocess.run") as mock_run, \
+             patch("services.audio_prep.os.path.exists", return_value=True), \
+             patch("services.audio_prep.os.path.getsize", return_value=1_000_000):
+            mock_run.return_value.returncode = 1
+            clips = [{"start": 0.0, "end": 1.0}]
             out = await extract_segment_clips("a.mp3", clips, "/tmp", batch_size=10)
             assert out[0] is None
 
@@ -127,6 +150,15 @@ def test_extract_segment_clips_survives_subprocess_oserror(tmp_path):
             assert out[0] is None
             assert out[1] is not None
             assert os.path.exists(out[1])
+
+    asyncio.run(run())
+
+
+def test_extract_segment_clips_rejects_non_positive_batch_size():
+    async def run():
+        with patch("services.audio_prep.ffmpeg_available", return_value=True):
+            with pytest.raises(ValueError):
+                await extract_segment_clips("a.mp3", [{"start": 0.0, "end": 1.0}], "/tmp", batch_size=0)
 
     asyncio.run(run())
 

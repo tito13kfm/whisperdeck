@@ -467,6 +467,8 @@ async def extract_segment_clips(
     the caller skips it the same way the old per-segment loop skipped
     ``AudioPrepError``.
     """
+    if batch_size < 1:
+        raise ValueError("batch_size must be a positive integer")
     if not ffmpeg_available():
         raise AudioPrepError("ffmpeg is not installed or not on PATH. See INSTALL.md.")
     if not clips:
@@ -521,13 +523,18 @@ async def extract_segment_clips(
                 min_bytes[offset] = 44 + int((end - start) * 16000 * 2 * 0.9)
 
             try:
-                subprocess.run(cmd, capture_output=True, text=True)
+                result = subprocess.run(cmd, capture_output=True, text=True)
+                batch_ok = result.returncode == 0
             except OSError:
-                pass
+                batch_ok = False
 
             verified: dict[int, str] = {}
             for offset, part in paths.items():
-                if os.path.exists(part) and os.path.getsize(part) >= min_bytes[offset]:
+                # A nonzero exit means ffmpeg itself reports the invocation
+                # failed - don't trust any output from it even if a partial
+                # write happens to clear the size floor (e.g. a decode error
+                # near the end of a clip can still leave most of its bytes).
+                if batch_ok and os.path.exists(part) and os.path.getsize(part) >= min_bytes[offset]:
                     verified[offset] = part
                 else:
                     try:
