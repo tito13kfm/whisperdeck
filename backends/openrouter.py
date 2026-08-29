@@ -10,25 +10,12 @@ Direct openai provider is the full-fidelity path for that model.
 """
 import time
 import httpx
+from services.hotwords import sanitize_keywords
 from .base import BaseProvider, TranscriptionResult, ProviderError
 
 
 def _is_transcribe_family(model: str) -> bool:
     return "transcribe" in (model or "").lower()
-
-
-def _sanitize_keywords(terms: list[str]) -> list[str]:
-    out: list[str] = []
-    for t in terms:
-        if not t:
-            continue
-        s = t.strip()
-        if not s:
-            continue
-        if any(c in s for c in ("<", ">", "\r", "\n")):
-            continue
-        out.append(s)
-    return out
 
 
 class OpenRouterProvider(BaseProvider):
@@ -69,7 +56,7 @@ class OpenRouterProvider(BaseProvider):
                 }
                 if _is_transcribe_family(self.model):
                     if keywords is not None:
-                        sanitized = _sanitize_keywords(list(keywords) if isinstance(keywords, (list, tuple)) else [str(keywords)])
+                        sanitized = sanitize_keywords(list(keywords) if isinstance(keywords, (list, tuple)) else [str(keywords)])
                         if sanitized:
                             data["keywords[]"] = sanitized
                     if languages is not None:
