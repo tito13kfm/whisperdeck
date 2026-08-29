@@ -3382,34 +3382,35 @@ async def finalize_voice_dump(
 
     kept = [it for it in items if not it.get("discarded", False)]
 
-    source_job = latest_job(db, transcript_id, "voice_dump")
-    source_job_id = source_job.id if source_job else None
-
-    # A non-empty finalize needs a completed job to key the duplicate-finalize
-    # guard on. Without this, source_job_id stays None and the guard below
-    # never fires, so the same request submitted twice inserts two batches
-    # (all-discarded finalizes still take source_job_id=None on purpose - a
-    # discard-only request has nothing to guard against duplicating).
-    if kept and (source_job is None or source_job.status != "completed"):
-        raise HTTPException(status_code=409, detail="No completed voice-dump job to finalize from")
-
-    if source_job_id is not None and db.query(VoiceDumpItem).filter(
-        VoiceDumpItem.transcript_id == transcript_id,
-        VoiceDumpItem.source_job_id == source_job_id,
-    ).first() is not None:
-        raise HTTPException(status_code=409, detail="Already finalized for this draft")
-    try:
-        db.execute(text("BEGIN IMMEDIATE"))
-    except OperationalError as e:
-        if "is locked" in str(e.orig or e):
+    # An all-discarded finalize has nothing to guard against duplicating, so
+    # it never needs the job/lock dance below - source_job_id stays None and
+    # it inserts zero rows either way.
+    source_job_id = None
+    if kept:
+        try:
+            db.execute(text("BEGIN IMMEDIATE"))
+        except OperationalError as e:
+            if "is locked" in str(e.orig or e):
+                raise HTTPException(status_code=409, detail="Already finalized for this draft")
+            raise
+        # Resolve "the job to finalize from" only after acquiring the write
+        # lock, not before: a concurrent rerun (which also takes this lock
+        # before enqueuing) could otherwise slot in between an earlier
+        # unlocked read here and this transaction, so this request would
+        # commit rows tagged to a job that's no longer the latest one -
+        # rerun's fresh job then finishes afterward as an orphaned,
+        # unfinalized draft sitting next to already-finalized rows.
+        source_job = latest_job(db, transcript_id, "voice_dump")
+        if source_job is None or source_job.status != "completed":
+            db.rollback()
+            raise HTTPException(status_code=409, detail="No completed voice-dump job to finalize from")
+        source_job_id = source_job.id
+        if db.query(VoiceDumpItem).filter(
+            VoiceDumpItem.transcript_id == transcript_id,
+            VoiceDumpItem.source_job_id == source_job_id,
+        ).first() is not None:
+            db.rollback()
             raise HTTPException(status_code=409, detail="Already finalized for this draft")
-        raise
-    if source_job_id is not None and db.query(VoiceDumpItem).filter(
-        VoiceDumpItem.transcript_id == transcript_id,
-        VoiceDumpItem.source_job_id == source_job_id,
-    ).first() is not None:
-        db.rollback()
-        raise HTTPException(status_code=409, detail="Already finalized for this draft")
 
     existing_max = db.query(func.max(VoiceDumpItem.sequence_index)).filter(
         VoiceDumpItem.transcript_id == transcript_id,

@@ -606,6 +606,51 @@ def test_finalize_rejects_duplicate_for_same_source_job(client, db_session):
     assert len(rows) == 1
 
 
+def test_finalize_resolves_job_after_lock_not_before(client, db_session):
+    """Regression for the finalize/rerun race: finalize must resolve "the
+    job to finalize from" only after acquiring BEGIN IMMEDIATE, not before.
+    Simulates a concurrent rerun landing a fresh completed job at the exact
+    moment finalize's transaction lock is acquired, and asserts finalize
+    picks up that fresh job - not whatever was "latest" when the request
+    started. If the job resolution regresses to happening before the lock,
+    this fails by binding to old_job instead."""
+    from sqlalchemy.orm import Session
+
+    user, t = _make_voice_dump_transcript(db_session)
+    old_job = LlmJob(
+        user_id=user.id, transcript_id=t.id, kind="voice_dump",
+        provider="groq", model="llama3", status="completed",
+        result_json={"items": []},
+    )
+    db_session.add(old_job)
+    db_session.commit()
+
+    injected = {}
+    orig_execute = Session.execute
+
+    def spy_execute(self, statement, *args, **kwargs):
+        result = orig_execute(self, statement, *args, **kwargs)
+        if "new" not in injected and "BEGIN IMMEDIATE" in str(statement):
+            new_job = LlmJob(
+                user_id=user.id, transcript_id=t.id, kind="voice_dump",
+                provider="groq", model="llama3", status="completed",
+                result_json={"items": []},
+            )
+            self.add(new_job)
+            self.flush()
+            injected["new"] = new_job.id
+        return result
+
+    with patch.object(Session, "execute", spy_execute):
+        r = client.post(
+            f"/api/transcripts/{t.id}/voice-dump/finalize",
+            json=[{"type": "todo", "title": "X", "body": "y"}],
+        )
+    assert r.status_code == 200
+    assert injected["new"] != old_job.id
+    assert r.json()["items"][0]["source_job_id"] == injected["new"]
+
+
 def test_finalize_rejects_non_empty_with_no_job(client, db_session):
     user, t = _make_voice_dump_transcript(db_session)
     items = [{"type": "todo", "title": "One", "body": "x"}]
