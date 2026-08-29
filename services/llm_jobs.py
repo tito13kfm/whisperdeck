@@ -418,11 +418,23 @@ def rerun_llm_job(db, user_id: int, job_id: int) -> LlmJob:
         # The dedicated /voice-dump/rerun route guards against reviving a
         # voice-dump chain once it's finalized, but this generic path (the
         # Queue screen's retry button) can reach any failed/cancelled job by
-        # id regardless of kind, so it needs the same check - otherwise an
-        # old failed voice_dump job can be resurrected after finalization,
-        # producing an unfinalized draft next to already-finalized notes.
+        # id regardless of kind, so it needs the same check - and the same
+        # lock, or an unlocked check here races a concurrent finalize the
+        # exact same way finalize/save-draft did before they took the lock
+        # first: this could see no finalized rows, finalize commits after,
+        # and this still enqueues a fresh job that resurrects after finalization.
         from database import VoiceDumpItem
+        from sqlalchemy import text
+        from sqlalchemy.exc import OperationalError
+
+        try:
+            db.execute(text("BEGIN IMMEDIATE"))
+        except OperationalError as e:
+            if "is locked" in str(e.orig or e):
+                raise ValueError("Voice dump already finalized — rerun not allowed")
+            raise
         if db.query(VoiceDumpItem).filter(VoiceDumpItem.transcript_id == job.transcript_id).first() is not None:
+            db.rollback()
             raise ValueError("Voice dump already finalized — rerun not allowed")
     return enqueue_llm_job(db, user_id, job.transcript_id, job.kind, job.provider, job.model)
 

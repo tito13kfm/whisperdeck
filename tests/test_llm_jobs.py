@@ -323,6 +323,42 @@ def test_rerun_rejects_finalized_voice_dump(db_session):
         assert "already finalized" in str(e)
 
 
+def test_rerun_rejects_when_finalize_races_in_before_lock(db_session):
+    """Regression for the generic rerun path racing a concurrent finalize:
+    simulates finalize committing its rows at the exact moment rerun
+    acquires BEGIN IMMEDIATE (after rerun's initial state looked clean),
+    and asserts the post-lock recheck still catches it."""
+    from database import VoiceDumpItem
+    from sqlalchemy.orm import Session
+
+    user, t = _make_user_and_transcript(db_session)
+    job = enqueue_llm_job(db_session, user.id, t.id, "voice_dump", "groq", "m")
+    job.status = "failed"
+    db_session.commit()
+
+    injected = {}
+    orig_execute = Session.execute
+
+    def spy_execute(self, statement, *args, **kwargs):
+        result = orig_execute(self, statement, *args, **kwargs)
+        if "done" not in injected and "BEGIN IMMEDIATE" in str(statement):
+            self.add(VoiceDumpItem(
+                user_id=user.id, transcript_id=t.id, sequence_index=0,
+                note_type="todo", title="Done", body="x",
+                structured={}, model="m", provider="p",
+            ))
+            self.flush()
+            injected["done"] = True
+        return result
+
+    with patch.object(Session, "execute", spy_execute):
+        try:
+            rerun_llm_job(db_session, user.id, job.id)
+            assert False, "expected ValueError once finalize races in under the lock"
+        except ValueError as e:
+            assert "already finalized" in str(e)
+
+
 def test_cancel_requires_active_job(db_session):
     user, t = _make_user_and_transcript(db_session)
     job = enqueue_llm_job(db_session, user.id, t.id, "correction", "groq", "m")
