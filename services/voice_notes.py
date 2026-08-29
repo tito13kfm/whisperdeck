@@ -2,7 +2,7 @@
 
 A two-call chain that turns a single-speaker transcript into a structured
 note: first classify what KIND of note the speaker is taking
-(todo / idea / reminder / journal / general), then run a per-kind
+(todo / idea / reminder / journal / general / bug), then run a per-kind
 prompt that produces a structured payload (title, body, plus per-type
 fields). Both calls run inside one LlmJob(kind="voice_note") — the
 worker increments progress_done between them so the queue screen shows
