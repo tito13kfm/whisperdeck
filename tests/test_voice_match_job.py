@@ -333,6 +333,53 @@ def test_voice_match_cancel_mid_loop_stops_and_leaves_transcript_unchanged(db_se
     assert _relabel_rows(db_session, t) == []
 
 
+def test_voice_match_cancel_between_batches_skips_the_next_batchs_extraction(db_session, tmp_path):
+    """Extraction runs in bounded batches (one ffmpeg invocation per batch of
+    up to 20 segments), specifically so a cancel is noticed between batches
+    instead of only after every remaining segment has already been extracted.
+    25 segments -> 2 batches; cancelling during the first batch's extraction
+    must stop the second batch's extraction from ever being requested.
+    """
+    user = _user(db_session)
+    _enrolled_profile(db_session, user)
+    segments = [
+        {"start": float(i), "end": float(i) + 1.0, "text": f"seg{i}", "speaker": "SPEAKER_00"}
+        for i in range(25)
+    ]
+    t = _transcript_with_segments(db_session, user, tmp_path, segments)
+    job = enqueue_llm_job(db_session, user.id, t.id, "voice_match", "", "")
+    job.status = "running"
+    db_session.commit()
+
+    async def cancel_on_first_batch(audio_path, clips, output_dir, batch_size=20):
+        cancel_on_first_batch.calls += 1
+        cancel_on_first_batch.clips_seen += len(clips)
+        if cancel_on_first_batch.calls == 1:
+            cancel_llm_job(db_session, user.id, job.id)
+        return [str(tmp_path / "clip.wav") for _ in clips]
+    cancel_on_first_batch.calls = 0
+    cancel_on_first_batch.clips_seen = 0
+
+    factory = lambda: _NoCloseSession(db_session)
+    with patch("services.llm_jobs.extract_segment_clips", cancel_on_first_batch), \
+         patch("services.llm_jobs.voice_id_service.identify_detailed",
+               lambda db, user_id, audio_path, threshold=0.65, hf_token=None: _outcome([{"id": 1, "name": "Alice", "similarity": 0.9, "sample_count": 1}])):
+        asyncio.run(run_llm_job(factory, job.id, transcription_service=None))
+
+    db_session.refresh(job)
+    db_session.refresh(t)
+    assert job.status == "cancelled"
+    # Only the first batch's 20 clips were ever requested for extraction -
+    # the remaining 5 must not have been extracted before the cancel check
+    # between batches caught it. (A single upfront call for all 25 segments
+    # would pass `cancel_on_first_batch.calls == 1` too, so what actually
+    # proves the batches are interleaved with cancel checks is that only
+    # part of the segment list was ever handed to extraction.)
+    assert cancel_on_first_batch.clips_seen == 20
+    assert [s["speaker"] for s in t.segments] == ["SPEAKER_00"] * 25
+    assert _relabel_rows(db_session, t) == []
+
+
 def test_voice_match_cancel_after_a_committed_segment_still_skips_the_writes(db_session, tmp_path):
     """Stronger ordering than the test above, where the cancel lands during the
     FIRST extraction and so fires before the loop body has committed anything.

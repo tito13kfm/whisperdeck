@@ -502,6 +502,7 @@ async def extract_segment_clips(
         def _run_batch(indexed=indexed) -> dict[int, str]:
             cmd = [_ffmpeg_bin(), "-y", "-i", audio_path]
             paths: dict[int, str] = {}
+            min_bytes: dict[int, int] = {}
             for offset, (start, end) in indexed:
                 part = os.path.join(
                     output_dir, f"{base}_{suffix}_seg{batch_start + offset}.wav"
@@ -512,6 +513,12 @@ async def extract_segment_clips(
                     part,
                 ]
                 paths[offset] = part
+                # 44-byte WAV header + 16kHz mono 16-bit PCM data for the clip's
+                # duration. A truncated/partial write from a failing ffmpeg run
+                # (e.g. nonzero exit after an output-side I/O error) lands well
+                # under this, so a plain "file exists and is non-empty" check
+                # isn't enough to catch it - tolerate 10% for encoder rounding.
+                min_bytes[offset] = 44 + int((end - start) * 16000 * 2 * 0.9)
 
             try:
                 subprocess.run(cmd, capture_output=True, text=True)
@@ -520,10 +527,7 @@ async def extract_segment_clips(
 
             verified: dict[int, str] = {}
             for offset, part in paths.items():
-                # A valid 16kHz mono WAV header alone is 44 bytes; anything
-                # at or below that means ffmpeg didn't actually write audio
-                # for this output (skipped/aborted), so treat it as failed.
-                if os.path.exists(part) and os.path.getsize(part) > 44:
+                if os.path.exists(part) and os.path.getsize(part) >= min_bytes[offset]:
                     verified[offset] = part
                 else:
                     try:

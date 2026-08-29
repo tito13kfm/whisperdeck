@@ -905,7 +905,6 @@ async def run_llm_job(SessionLocal, job_id: int, transcription_service, diarizat
             job.progress_total = len(segments)
             job.progress_done = 0
             db.commit()
-            skipped = 0
             # A segment whose probe embedding silently fell back to MFCC, and a
             # segment where every enrolled profile was skipped for using a
             # different embedding model, both produce zero matches without
@@ -921,23 +920,40 @@ async def run_llm_job(SessionLocal, job_id: int, transcription_service, diarizat
             match_sims: dict[str, list[float]] = {}
             new_segments = list(segments)
             VOICE_MATCH_BATCH = 20
-            clip_paths: list[str | None]
-            try:
-                clip_paths = await extract_segment_clips(
-                    transcript.audio_path,
-                    [{"start": seg.get("start", 0), "end": seg.get("end", 0)} for seg in segments],
-                    str(os.path.dirname(transcript.audio_path)),
-                    batch_size=VOICE_MATCH_BATCH,
-                )
-            except Exception:
-                clip_paths = [None] * len(segments)
-                skipped = len(segments)
+            # Extracted one bounded batch at a time (not the whole transcript up
+            # front) so a cancel is noticed between batches rather than after
+            # every remaining segment has already paid for extraction.
+            clip_paths: list[str | None] = [None] * len(segments)
+            cancelled_during_extraction = False
+            for chunk_start in range(0, len(segments), VOICE_MATCH_BATCH):
+                db.refresh(job)
+                if job.status == "cancelled":
+                    cancelled_during_extraction = True
+                    break
+                chunk = segments[chunk_start: chunk_start + VOICE_MATCH_BATCH]
+                try:
+                    chunk_paths = await extract_segment_clips(
+                        transcript.audio_path,
+                        [{"start": seg.get("start", 0), "end": seg.get("end", 0)} for seg in chunk],
+                        str(os.path.dirname(transcript.audio_path)),
+                        batch_size=VOICE_MATCH_BATCH,
+                    )
+                except Exception:
+                    chunk_paths = [None] * len(chunk)
+                if len(chunk_paths) != len(chunk):
+                    chunk_paths = (chunk_paths + [None] * len(chunk))[:len(chunk)]
+                clip_paths[chunk_start: chunk_start + len(chunk)] = chunk_paths
 
-            if len(clip_paths) != len(segments):
-                clip_paths = (clip_paths + [None] * len(segments))[:len(segments)]
+            if cancelled_during_extraction:
+                for p in clip_paths:
+                    if p:
+                        try:
+                            os.remove(p)
+                        except OSError:
+                            pass
+                return
 
-            if skipped == 0:
-                skipped = sum(1 for p in clip_paths if p is None)
+            skipped = sum(1 for p in clip_paths if p is None)
 
             for i, seg in enumerate(segments):
                 db.refresh(job)

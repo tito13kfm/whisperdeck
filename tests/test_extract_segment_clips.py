@@ -13,7 +13,7 @@ def test_extract_segment_clips_returns_none_for_invalid_ranges():
              patch("services.audio_prep.get_audio_duration", return_value=10.0), \
              patch("services.audio_prep.subprocess.run") as mock_run, \
              patch("services.audio_prep.os.path.exists", return_value=True), \
-             patch("services.audio_prep.os.path.getsize", return_value=1000):
+             patch("services.audio_prep.os.path.getsize", return_value=50000):
             clips = [
                 {"start": 0.0, "end": 1.0},
                 {"start": 5.0, "end": 3.0},
@@ -39,7 +39,7 @@ def test_extract_segment_clips_batches_into_one_ffmpeg_call_per_batch():
              patch("services.audio_prep.get_audio_duration", return_value=1000.0), \
              patch("services.audio_prep.subprocess.run") as mock_run, \
              patch("services.audio_prep.os.path.exists", return_value=True), \
-             patch("services.audio_prep.os.path.getsize", return_value=1000):
+             patch("services.audio_prep.os.path.getsize", return_value=50000):
             clips = [{"start": float(i), "end": float(i) + 1.0} for i in range(40)]
             out = await extract_segment_clips("a.mp3", clips, "/tmp", batch_size=20)
             assert len(out) == 40
@@ -66,7 +66,7 @@ def test_extract_segment_clips_handles_partial_batch_failure():
              patch("services.audio_prep.get_audio_duration", return_value=10.0), \
              patch("services.audio_prep.subprocess.run") as mock_run, \
              patch("services.audio_prep.os.path.exists", side_effect=fake_exists), \
-             patch("services.audio_prep.os.path.getsize", return_value=1000):
+             patch("services.audio_prep.os.path.getsize", return_value=50000):
             clips = [
                 {"start": 0.0, "end": 1.0},
                 {"start": 2.0, "end": 3.0},
@@ -77,6 +77,25 @@ def test_extract_segment_clips_handles_partial_batch_failure():
             assert out[1] is None
             assert out[2] is not None
             assert mock_run.call_count == 1
+
+    asyncio.run(run())
+
+
+def test_extract_segment_clips_rejects_truncated_output():
+    """A nonzero ffmpeg exit that still leaves a short/partial file behind
+    must not be accepted just because the file is non-empty."""
+
+    async def run():
+        with patch("services.audio_prep.ffmpeg_available", return_value=True), \
+             patch("services.audio_prep.get_audio_duration", return_value=10.0), \
+             patch("services.audio_prep.subprocess.run") as mock_run, \
+             patch("services.audio_prep.os.path.exists", return_value=True), \
+             patch("services.audio_prep.os.path.getsize", return_value=200):
+            # 200 bytes is well over the old ">44 bytes" floor but far short
+            # of what a real 5-second 16kHz mono WAV requires.
+            clips = [{"start": 0.0, "end": 5.0}]
+            out = await extract_segment_clips("a.mp3", clips, "/tmp", batch_size=10)
+            assert out[0] is None
 
     asyncio.run(run())
 
@@ -92,7 +111,7 @@ def test_extract_segment_clips_survives_subprocess_oserror(tmp_path):
                 raise OSError("no such file or directory")
             out_path = args[-1]
             with open(out_path, "wb") as f:
-                f.write(b"0" * 100)
+                f.write(b"0" * 400)
             class R:
                 returncode = 0
             return R()
@@ -101,8 +120,8 @@ def test_extract_segment_clips_survives_subprocess_oserror(tmp_path):
              patch("services.audio_prep.get_audio_duration", return_value=10.0), \
              patch("services.audio_prep.subprocess.run", side_effect=fake_run):
             clips = [
-                {"start": 0.0, "end": 1.0},
-                {"start": 5.0, "end": 6.0},
+                {"start": 0.0, "end": 0.01},
+                {"start": 5.0, "end": 5.01},
             ]
             out = await extract_segment_clips("a.mp3", clips, str(tmp_path), batch_size=1)
             assert out[0] is None
