@@ -329,8 +329,8 @@ def test_voice_match_records_relabel_history(db_session, tmp_path):
     job.status = "running"
     db_session.commit()
 
-    async def fake_extract(audio_path, clips, output_dir):
-        return str(tmp_path / "clip.wav")
+    async def fake_extract(audio_path, clips, output_dir, batch_size=20):
+        return [str(tmp_path / "clip.wav") for _ in clips]
 
     def fake_identify_detailed(db, user_id, audio_path, threshold=0.65, hf_token=None):
         # first call (segment 0) matches confidently, second doesn't
@@ -350,7 +350,7 @@ def test_voice_match_records_relabel_history(db_session, tmp_path):
     fake_identify_detailed.calls = 0
 
     factory = lambda: _NoCloseSession(db_session)
-    with patch("services.llm_jobs.extract_clips_concat", fake_extract), \
+    with patch("services.llm_jobs.extract_segment_clips", fake_extract), \
          patch("services.llm_jobs.voice_id_service.identify_detailed", fake_identify_detailed):
         asyncio.run(run_llm_job(factory, job.id, transcription_service=None))
 

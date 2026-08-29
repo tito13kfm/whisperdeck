@@ -445,6 +445,111 @@ async def extract_clips_concat(
     return await asyncio.to_thread(_run)
 
 
+async def extract_segment_clips(
+    audio_path: str,
+    clips: list[dict],
+    output_dir: str,
+    batch_size: int = 20,
+) -> list[str | None]:
+    """Extract each {start, end} range into its own 16kHz mono WAV.
+
+    Unlike ``extract_clips_concat`` (which joins them into one file for
+    roster enrollment), this returns one path per input clip — the layout
+    ``voice_match`` needs so each segment can be identified independently.
+    Each batch of up to ``batch_size`` clips is extracted with a single
+    ffmpeg invocation (one process, multiple ``-ss``/``-to`` output groups)
+    instead of one process per clip, so an n-segment transcript spawns
+    roughly ``n / batch_size`` ffmpeg processes rather than ``n``.
+
+    Each resulting WAV must be deleted by the caller when done (mirrors
+    ``extract_clips_concat``'s contract). A per-clip extraction failure
+    yields ``None`` at that index rather than aborting the whole batch —
+    the caller skips it the same way the old per-segment loop skipped
+    ``AudioPrepError``.
+    """
+    if batch_size < 1:
+        raise ValueError("batch_size must be a positive integer")
+    if not ffmpeg_available():
+        raise AudioPrepError("ffmpeg is not installed or not on PATH. See INSTALL.md.")
+    if not clips:
+        return []
+
+    duration = get_audio_duration(audio_path)
+    base = os.path.splitext(os.path.basename(audio_path))[0]
+    suffix = uuid.uuid4().hex
+
+    validated: list[tuple[float, float] | None] = []
+    for clip in clips:
+        try:
+            start = max(0.0, float(clip["start"]))
+            end = min(duration, float(clip["end"]))
+        except (TypeError, ValueError, KeyError):
+            validated.append(None)
+            continue
+        if end <= start:
+            validated.append(None)
+            continue
+        validated.append((start, end))
+
+    results: list[str | None] = [None] * len(clips)
+
+    for batch_start in range(0, len(validated), batch_size):
+        batch_slice = validated[batch_start: batch_start + batch_size]
+        indexed = [
+            (offset, item) for offset, item in enumerate(batch_slice) if item is not None
+        ]
+        if not indexed:
+            continue
+
+        def _run_batch(indexed=indexed) -> dict[int, str]:
+            cmd = [_ffmpeg_bin(), "-y", "-i", audio_path]
+            paths: dict[int, str] = {}
+            min_bytes: dict[int, int] = {}
+            for offset, (start, end) in indexed:
+                part = os.path.join(
+                    output_dir, f"{base}_{suffix}_seg{batch_start + offset}.wav"
+                )
+                cmd += [
+                    "-ss", str(start), "-to", str(end),
+                    "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le",
+                    part,
+                ]
+                paths[offset] = part
+                # 44-byte WAV header + 16kHz mono 16-bit PCM data for the clip's
+                # duration. A truncated/partial write from a failing ffmpeg run
+                # (e.g. nonzero exit after an output-side I/O error) lands well
+                # under this, so a plain "file exists and is non-empty" check
+                # isn't enough to catch it - tolerate 10% for encoder rounding.
+                min_bytes[offset] = 44 + int((end - start) * 16000 * 2 * 0.9)
+
+            try:
+                result = subprocess.run(cmd, capture_output=True, text=True)
+                batch_ok = result.returncode == 0
+            except OSError:
+                batch_ok = False
+
+            verified: dict[int, str] = {}
+            for offset, part in paths.items():
+                # A nonzero exit means ffmpeg itself reports the invocation
+                # failed - don't trust any output from it even if a partial
+                # write happens to clear the size floor (e.g. a decode error
+                # near the end of a clip can still leave most of its bytes).
+                if batch_ok and os.path.exists(part) and os.path.getsize(part) >= min_bytes[offset]:
+                    verified[offset] = part
+                else:
+                    try:
+                        os.remove(part)
+                    except OSError:
+                        pass
+            return verified
+
+        batch_out = await asyncio.to_thread(_run_batch)
+        for offset, part in batch_out.items():
+            results[batch_start + offset] = part
+
+    return results
+
+
 async def chunk_audio(
     audio_path: str,
     output_dir: str,
