@@ -1,25 +1,12 @@
 """OpenAI provider — whisper-1 via OpenAI's API."""
 import time
 import httpx
+from services.hotwords import sanitize_keywords
 from .base import BaseProvider, TranscriptionResult, ProviderError
 
 
 def _is_transcribe_family(model: str) -> bool:
     return "transcribe" in (model or "").lower()
-
-
-def _sanitize_keywords(terms: list[str]) -> list[str]:
-    out: list[str] = []
-    for t in terms:
-        if not t:
-            continue
-        s = t.strip()
-        if not s:
-            continue
-        if "<" in s or ">" in s or "\r" in s or "\n" in s:
-            continue
-        out.append(s)
-    return out
 
 
 class OpenAIProvider(BaseProvider):
@@ -57,7 +44,7 @@ class OpenAIProvider(BaseProvider):
                 }
                 if _is_transcribe_family(self.model):
                     if keywords is not None:
-                        sanitized = _sanitize_keywords(list(keywords) if isinstance(keywords, (list, tuple)) else [str(keywords)])
+                        sanitized = sanitize_keywords(list(keywords) if isinstance(keywords, (list, tuple)) else [str(keywords)])
                         if sanitized:
                             data["keywords[]"] = sanitized
                     if languages is not None:
