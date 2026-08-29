@@ -24,7 +24,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.gzip import GZipMiddleware
-from sqlalchemy import or_, func, case
+from sqlalchemy import or_, func, case, text
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session
 
@@ -3302,10 +3302,21 @@ async def rerun_voice_dump_chain(
         raise HTTPException(status_code=400, detail="Voice-dump chain only applies to voice_dump transcripts")
     if t.status not in ("completed", "partial"):
         raise HTTPException(status_code=400, detail=f"Transcript {transcript_id} is not completed")
+    if db.query(VoiceDumpItem).filter(VoiceDumpItem.transcript_id == transcript_id).first() is not None:
+        raise HTTPException(status_code=409, detail="Already finalized — rerun not allowed")
     from services.settings import resolve_provider_key, KEYLESS_PROVIDERS
     api_key, _ = resolve_provider_key(db, current_user.id, provider)
     if provider not in KEYLESS_PROVIDERS and not api_key:
         raise HTTPException(status_code=400, detail=f"No {provider} API key saved — add one in the service panel")
+    try:
+        db.execute(text("BEGIN IMMEDIATE"))
+    except OperationalError as e:
+        if "is locked" in str(e.orig or e):
+            raise HTTPException(status_code=409, detail="Already finalized — rerun not allowed")
+        raise
+    if db.query(VoiceDumpItem).filter(VoiceDumpItem.transcript_id == transcript_id).first() is not None:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="Already finalized — rerun not allowed")
     job = enqueue_llm_job(db, current_user.id, transcript_id, "voice_dump", provider, model)
     return {"job": serialize_llm_job(job)}
 
@@ -3327,9 +3338,29 @@ async def save_voice_dump_draft(
     ).first()
     if not t:
         raise HTTPException(status_code=404, detail="Transcript not found")
+    if not isinstance(items, list):
+        raise HTTPException(status_code=400, detail="Expected a JSON array of items")
+    try:
+        db.execute(text("BEGIN IMMEDIATE"))
+    except OperationalError as e:
+        if "is locked" in str(e.orig or e):
+            raise HTTPException(status_code=409, detail="Already finalized — save not allowed")
+        raise
+    # Resolve the job to write to only after acquiring the lock, same reason
+    # as finalize: a concurrent rerun could otherwise slot in after an
+    # earlier unlocked read here, so this save would land on a job the
+    # worker has already moved past, and the edits would never show up in
+    # the draft the UI actually follows.
     job = latest_job(db, transcript_id, "voice_dump")
     if not job:
+        db.rollback()
         raise HTTPException(status_code=404, detail="No voice_dump job found for this transcript")
+    if job.status != "completed":
+        db.rollback()
+        raise HTTPException(status_code=409, detail="Draft can only be saved from a completed job")
+    if db.query(VoiceDumpItem).filter(VoiceDumpItem.transcript_id == transcript_id).first() is not None:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="Already finalized — save not allowed")
     if not job.result_json:
         job.result_json = {}
     job.result_json = {**job.result_json, "items": items}
@@ -3356,19 +3387,53 @@ async def finalize_voice_dump(
 
     kept = [it for it in items if not it.get("discarded", False)]
 
+    # An all-discarded finalize has nothing to guard against duplicating, so
+    # it never needs the job/lock dance below - source_job_id stays None and
+    # it inserts zero rows either way.
     source_job_id = None
-    source_job = latest_job(db, transcript_id, "voice_dump")
-    if source_job:
+    if kept:
+        try:
+            db.execute(text("BEGIN IMMEDIATE"))
+        except OperationalError as e:
+            if "is locked" in str(e.orig or e):
+                raise HTTPException(status_code=409, detail="Already finalized for this draft")
+            raise
+        # Resolve "the job to finalize from" only after acquiring the write
+        # lock, not before: a concurrent rerun (which also takes this lock
+        # before enqueuing) could otherwise slot in between an earlier
+        # unlocked read here and this transaction, so this request would
+        # commit rows tagged to a job that's no longer the latest one -
+        # rerun's fresh job then finishes afterward as an orphaned,
+        # unfinalized draft sitting next to already-finalized rows.
+        source_job = latest_job(db, transcript_id, "voice_dump")
+        if source_job is None or source_job.status != "completed":
+            db.rollback()
+            raise HTTPException(status_code=409, detail="No completed voice-dump job to finalize from")
         source_job_id = source_job.id
+        if db.query(VoiceDumpItem).filter(
+            VoiceDumpItem.transcript_id == transcript_id,
+            VoiceDumpItem.source_job_id == source_job_id,
+        ).first() is not None:
+            db.rollback()
+            raise HTTPException(status_code=409, detail="Already finalized for this draft")
+
+    existing_max = db.query(func.max(VoiceDumpItem.sequence_index)).filter(
+        VoiceDumpItem.transcript_id == transcript_id,
+    ).scalar()
+    seq_base = (existing_max + 1) if existing_max is not None else 0
+
+    from services.voice_notes import NOTE_TYPES
 
     created = []
     for idx, item in enumerate(kept):
+        raw_type = item.get("type", "general")
+        note_type = raw_type if raw_type in NOTE_TYPES else "general"
         vdi = VoiceDumpItem(
             user_id=current_user.id,
             transcript_id=transcript_id,
             source_job_id=source_job_id,
-            sequence_index=idx,
-            note_type=item.get("type", "general"),
+            sequence_index=seq_base + idx,
+            note_type=note_type,
             title=item.get("title", ""),
             body=item.get("body", ""),
             structured=item.get("structured", {}),
@@ -3377,7 +3442,11 @@ async def finalize_voice_dump(
         )
         db.add(vdi)
         created.append(vdi)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="Already finalized for this draft")
 
     # Refresh to get assigned ids
     for vdi in created:
@@ -3402,7 +3471,7 @@ async def get_transcript_voice_dump_items(
     items = (
         db.query(VoiceDumpItem)
         .filter(VoiceDumpItem.transcript_id == transcript_id)
-        .order_by(VoiceDumpItem.sequence_index)
+        .order_by(VoiceDumpItem.sequence_index, VoiceDumpItem.id)
         .all()
     )
     return {"items": [_serialize_voice_dump_item(it) for it in items]}

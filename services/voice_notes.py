@@ -2,7 +2,7 @@
 
 A two-call chain that turns a single-speaker transcript into a structured
 note: first classify what KIND of note the speaker is taking
-(todo / idea / reminder / journal / general), then run a per-kind
+(todo / idea / reminder / journal / general / bug), then run a per-kind
 prompt that produces a structured payload (title, body, plus per-type
 fields). Both calls run inside one LlmJob(kind="voice_note") — the
 worker increments progress_done between them so the queue screen shows
@@ -24,7 +24,7 @@ from services.llm_client import chat_completion, resolve_model, transcript_text_
 
 _transcript_text = transcript_text_for_prompt
 
-NOTE_TYPES = ("todo", "idea", "reminder", "journal", "general")
+NOTE_TYPES = ("todo", "idea", "reminder", "journal", "general", "bug")
 
 
 # Per-type JSON schema, documented so the prompts below can target it
@@ -155,8 +155,9 @@ async def classify_voice_note(
         '- "idea": a concept, an observation, something to think about, a note to self\n'
         '- "reminder": something the speaker wants to be reminded of later\n'
         '- "journal": a personal reflection, a moment being recorded, what happened today\n'
+        '- "bug": a defect, error, or crash report\n'
         '- "general": none of the above fit well\n\n'
-        'Respond with JSON: {"type": "todo" | "idea" | "reminder" | "journal" | "general"}\n\n'
+        'Respond with JSON: {"type": "todo" | "idea" | "reminder" | "journal" | "bug" | "general"}\n\n'
         f"TRANSCRIPT:\n{text}"
     )
     try:
@@ -256,6 +257,7 @@ async def segment_voice_dump(
         '- "idea": a concept, an observation, something to think about\n'
         '- "reminder": something the speaker wants to be reminded of later\n'
         '- "journal": a personal reflection, a moment being recorded\n'
+        '- "bug": a defect, error, or crash report\n'
         '- "general": none of the above fit well\n\n'
         "Respond with a JSON array: "
         '[{"span_text": "the exact transcript text for this item", '

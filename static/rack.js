@@ -4721,7 +4721,7 @@ const FORMAT_TARGETS = [
 ];
 
 const NOTE_TYPE_LABELS = {
-  todo: 'Todo', idea: 'Idea', reminder: 'Reminder', journal: 'Journal', general: 'Note',
+  todo: 'Todo', idea: 'Idea', reminder: 'Reminder', journal: 'Journal', general: 'Note', bug: 'Bug',
 };
 const NOTE_TYPE_COLORS = {
   todo: '#FF8A3D',       // nixie amber
@@ -4729,6 +4729,7 @@ const NOTE_TYPE_COLORS = {
   reminder: '#FFCB6B',   // yellow
   journal: '#C8A6FF',    // violet
   general: '#A9ACAF',    // neutral
+  bug: '#FF5A5A',        // red
 };
 
 async function voiceNoteHtml(t) {
@@ -4917,10 +4918,10 @@ async function dumpReviewHtml(t) {
   const keptCount = items.filter(it => !it.discarded).length;
   const cards = items.map((it, i) => {
     const typeColor = NOTE_TYPE_COLORS[it.type] || NOTE_TYPE_COLORS.general;
-    // An unknown type (the finalize route does not validate against
-    // NOTE_TYPES) is offered as an extra option so it round-trips instead
-    // of the select falling back to the first entry and the next save
-    // silently rewriting it.
+    // An unknown type (the finalize route normalizes against NOTE_TYPES
+    // on insert, but the draft may carry a legacy value) is offered as an
+    // extra option so it round-trips instead of the select falling back
+    // to the first entry and the next save silently rewriting it.
     const typeValues = DUMP_NOTE_TYPES.indexOf(it.type) === -1 ? DUMP_NOTE_TYPES.concat([it.type]) : DUMP_NOTE_TYPES;
     const typeOpts = typeValues.map(v =>
       '<option value="' + escapeHtml(v) + '"' + (v === it.type ? ' selected' : '') + '>' + escapeHtml(NOTE_TYPE_LABELS[v] || v) + '</option>').join('');
