@@ -304,6 +304,25 @@ def test_rerun_creates_fresh_pending_job(db_session):
     assert (fresh.provider, fresh.model, fresh.kind) == (job.provider, job.model, job.kind)
 
 
+def test_rerun_rejects_finalized_voice_dump(db_session):
+    from database import VoiceDumpItem
+
+    user, t = _make_user_and_transcript(db_session)
+    job = enqueue_llm_job(db_session, user.id, t.id, "voice_dump", "groq", "m")
+    job.status = "failed"
+    db_session.add(VoiceDumpItem(
+        user_id=user.id, transcript_id=t.id, sequence_index=0,
+        note_type="todo", title="Done", body="x",
+        structured={}, model="m", provider="p",
+    ))
+    db_session.commit()
+    try:
+        rerun_llm_job(db_session, user.id, job.id)
+        assert False, "expected ValueError for a finalized voice dump"
+    except ValueError as e:
+        assert "already finalized" in str(e)
+
+
 def test_cancel_requires_active_job(db_session):
     user, t = _make_user_and_transcript(db_session)
     job = enqueue_llm_job(db_session, user.id, t.id, "correction", "groq", "m")

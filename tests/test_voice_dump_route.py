@@ -576,6 +576,50 @@ def test_save_draft_rejects_already_finalized(client, db_session):
     assert r.status_code == 409
 
 
+def test_save_draft_resolves_job_after_lock_not_before(client, db_session):
+    """Same race as finalize's, on save-draft: it must resolve the job to
+    write to only after acquiring BEGIN IMMEDIATE, not before, or a
+    concurrent rerun's fresh job can land in between and the save writes to
+    a job the worker has already moved past."""
+    from sqlalchemy.orm import Session
+
+    user, t = _make_voice_dump_transcript(db_session)
+    old_job = LlmJob(
+        user_id=user.id, transcript_id=t.id, kind="voice_dump",
+        provider="groq", model="llama3", status="completed",
+        result_json={"items": []},
+    )
+    db_session.add(old_job)
+    db_session.commit()
+
+    injected = {}
+    orig_execute = Session.execute
+
+    def spy_execute(self, statement, *args, **kwargs):
+        result = orig_execute(self, statement, *args, **kwargs)
+        if "new" not in injected and "BEGIN IMMEDIATE" in str(statement):
+            new_job = LlmJob(
+                user_id=user.id, transcript_id=t.id, kind="voice_dump",
+                provider="groq", model="llama3", status="completed",
+                result_json={"items": []},
+            )
+            self.add(new_job)
+            self.flush()
+            injected["new"] = new_job.id
+        return result
+
+    with patch.object(Session, "execute", spy_execute):
+        r = client.post(
+            f"/api/transcripts/{t.id}/voice-dump/save-draft",
+            json=[{"type": "todo", "title": "Edited"}],
+        )
+    assert r.status_code == 200
+    db_session.refresh(old_job)
+    new_job = db_session.query(LlmJob).filter(LlmJob.id == injected["new"]).first()
+    assert old_job.result_json.get("items") == []
+    assert new_job.result_json.get("items") == [{"type": "todo", "title": "Edited"}]
+
+
 def test_rerun_rejects_when_already_finalized(client, db_session):
     user, t = _make_voice_dump_transcript(db_session)
     db_session.add(VoiceDumpItem(

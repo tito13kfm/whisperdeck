@@ -414,6 +414,16 @@ def rerun_llm_job(db, user_id: int, job_id: int) -> LlmJob:
         raise LookupError("Job not found")
     if job.status not in ("failed", "cancelled"):
         raise ValueError(f"Can only rerun failed or cancelled jobs (this one is '{job.status}')")
+    if job.kind == "voice_dump" and job.transcript_id is not None:
+        # The dedicated /voice-dump/rerun route guards against reviving a
+        # voice-dump chain once it's finalized, but this generic path (the
+        # Queue screen's retry button) can reach any failed/cancelled job by
+        # id regardless of kind, so it needs the same check - otherwise an
+        # old failed voice_dump job can be resurrected after finalization,
+        # producing an unfinalized draft next to already-finalized notes.
+        from database import VoiceDumpItem
+        if db.query(VoiceDumpItem).filter(VoiceDumpItem.transcript_id == job.transcript_id).first() is not None:
+            raise ValueError("Voice dump already finalized — rerun not allowed")
     return enqueue_llm_job(db, user_id, job.transcript_id, job.kind, job.provider, job.model)
 
 

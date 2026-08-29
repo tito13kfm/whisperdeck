@@ -3338,13 +3338,6 @@ async def save_voice_dump_draft(
     ).first()
     if not t:
         raise HTTPException(status_code=404, detail="Transcript not found")
-    job = latest_job(db, transcript_id, "voice_dump")
-    if not job:
-        raise HTTPException(status_code=404, detail="No voice_dump job found for this transcript")
-    if job.status != "completed":
-        raise HTTPException(status_code=409, detail="Draft can only be saved from a completed job")
-    if db.query(VoiceDumpItem).filter(VoiceDumpItem.transcript_id == transcript_id).first() is not None:
-        raise HTTPException(status_code=409, detail="Already finalized — save not allowed")
     if not isinstance(items, list):
         raise HTTPException(status_code=400, detail="Expected a JSON array of items")
     try:
@@ -3353,6 +3346,18 @@ async def save_voice_dump_draft(
         if "is locked" in str(e.orig or e):
             raise HTTPException(status_code=409, detail="Already finalized — save not allowed")
         raise
+    # Resolve the job to write to only after acquiring the lock, same reason
+    # as finalize: a concurrent rerun could otherwise slot in after an
+    # earlier unlocked read here, so this save would land on a job the
+    # worker has already moved past, and the edits would never show up in
+    # the draft the UI actually follows.
+    job = latest_job(db, transcript_id, "voice_dump")
+    if not job:
+        db.rollback()
+        raise HTTPException(status_code=404, detail="No voice_dump job found for this transcript")
+    if job.status != "completed":
+        db.rollback()
+        raise HTTPException(status_code=409, detail="Draft can only be saved from a completed job")
     if db.query(VoiceDumpItem).filter(VoiceDumpItem.transcript_id == transcript_id).first() is not None:
         db.rollback()
         raise HTTPException(status_code=409, detail="Already finalized — save not allowed")
