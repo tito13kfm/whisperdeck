@@ -12,7 +12,7 @@ import datetime
 from sqlalchemy import func
 
 from database import LlmJob, Transcript, VoiceProfile, utcnow_naive
-from services.audio_prep import extract_clips_concat
+from services.audio_prep import extract_clips_concat, extract_segment_clips
 from services.queue import MAX_ATTEMPTS, _retry_eligible
 from services.voice_id import voice_id_service
 
@@ -920,45 +920,58 @@ async def run_llm_job(SessionLocal, job_id: int, transcription_service, diarizat
             # profile is indistinguishable from a good match (issue #311).
             match_sims: dict[str, list[float]] = {}
             new_segments = list(segments)
+            VOICE_MATCH_BATCH = 20
+            clip_paths: list[str | None]
+            try:
+                clip_paths = await extract_segment_clips(
+                    transcript.audio_path,
+                    [{"start": seg.get("start", 0), "end": seg.get("end", 0)} for seg in segments],
+                    str(os.path.dirname(transcript.audio_path)),
+                    batch_size=VOICE_MATCH_BATCH,
+                )
+            except Exception:
+                clip_paths = [None] * len(segments)
+                skipped = len(segments)
+
+            if len(clip_paths) != len(segments):
+                clip_paths = (clip_paths + [None] * len(segments))[:len(segments)]
+
+            if skipped == 0:
+                skipped = sum(1 for p in clip_paths if p is None)
+
             for i, seg in enumerate(segments):
-                # cancel_llm_job only flips the row, it can't signal this
-                # worker, so notice the cancel here the same way voice_dump and
-                # tagging do. Checked before the work rather than after, so a
-                # cancel stops paying for an ffmpeg extraction plus an embedding
-                # on every remaining segment. Outside the try below on purpose:
-                # its `except Exception` would otherwise swallow a refresh
-                # failure into the per-segment skip count.
                 db.refresh(job)
                 if job.status == "cancelled":
+                    for p in clip_paths:
+                        if p:
+                            try:
+                                os.remove(p)
+                            except OSError:
+                                pass
                     return
+                clip_path = clip_paths[i]
+                if clip_path is None:
+                    job.progress_done = i + 1
+                    db.commit()
+                    continue
                 outcome = None
                 try:
-                    clip_path = await extract_clips_concat(
-                        transcript.audio_path, [{"start": seg["start"], "end": seg["end"]}],
-                        str(os.path.dirname(transcript.audio_path)),
-                    )
-                    try:
-                        # identify() is a plain sync call (embedding extraction is
-                        # CPU-bound with no internal await) — run it off the event
-                        # loop so one voice_match job doesn't stall the whole app
-                        # per segment. Safe to pass `db` across the thread boundary:
-                        # sqlite is opened with check_same_thread=False.
-                        loop = asyncio.get_event_loop()
-                        def _identify():
-                            return voice_id_service.identify_detailed(db, job.user_id, clip_path,
-                                                                      threshold=VOICE_MATCH_THRESHOLD,
-                                                                      hf_token=user_settings.get("hf_token"))
-                        outcome = await loop.run_in_executor(None, _identify)
-                    finally:
-                        try:
-                            os.remove(clip_path)
-                        except OSError:
-                            pass
+                    loop = asyncio.get_event_loop()
+                    _cp = clip_path
+                    def _identify():
+                        return voice_id_service.identify_detailed(
+                            db, job.user_id, _cp,
+                            threshold=VOICE_MATCH_THRESHOLD,
+                            hf_token=user_settings.get("hf_token"),
+                        )
+                    outcome = await loop.run_in_executor(None, _identify)
                 except Exception:
                     skipped += 1
-                # Read the outcome outside the try above on purpose: a missing key
-                # would be a bug in identify_detailed, not a per-segment extraction
-                # failure, and absorbing it into `skipped` would report it as one.
+                finally:
+                    try:
+                        os.remove(clip_path)
+                    except OSError:
+                        pass
                 if outcome is not None:
                     matches = outcome["matches"]
                     if outcome["degraded"]:
@@ -973,6 +986,7 @@ async def run_llm_job(SessionLocal, job_id: int, transcription_service, diarizat
                         )
                 job.progress_done = i + 1
                 db.commit()
+            clip_paths = []
             # The loop guard can't catch a cancel that lands during the final
             # iteration, and these writes are the ones that actually matter:
             # without this check a cancelled job still stamps every matched

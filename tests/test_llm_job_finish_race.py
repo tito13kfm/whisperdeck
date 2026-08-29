@@ -241,8 +241,8 @@ def test_voice_match_cancel_committed_from_another_connection_wins_the_race(db_s
 
     engine = db_session.get_bind()
 
-    async def fake_extract(audio_path, clips, output_dir):
-        return str(tmp_path / "clip.wav")
+    async def fake_extract(audio_path, clips, output_dir, batch_size=20):
+        return [str(tmp_path / "clip.wav") for _ in clips]
 
     from services.relabel import record_relabel as _real_record_relabel
 
@@ -252,7 +252,7 @@ def test_voice_match_cancel_committed_from_another_connection_wins_the_race(db_s
                                      corrected_text_before=corrected_text_before, description=description)
 
     factory = lambda: _NoCloseSession(db_session)
-    with patch("services.llm_jobs.extract_clips_concat", fake_extract), \
+    with patch("services.llm_jobs.extract_segment_clips", fake_extract), \
          patch("services.llm_jobs.voice_id_service.identify_detailed",
                lambda db, user_id, audio_path, threshold=0.65, hf_token=None: _outcome(
                    [{"id": 1, "name": "Alice", "similarity": 0.9, "sample_count": 1}])), \

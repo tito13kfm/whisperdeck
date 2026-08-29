@@ -445,6 +445,88 @@ async def extract_clips_concat(
     return await asyncio.to_thread(_run)
 
 
+async def extract_segment_clips(
+    audio_path: str,
+    clips: list[dict],
+    output_dir: str,
+    batch_size: int = 20,
+) -> list[str | None]:
+    """Extract each {start, end} range into its own 16kHz mono WAV.
+
+    Unlike ``extract_clips_concat`` (which joins them into one file for
+    roster enrollment), this returns one path per input clip — the layout
+    ``voice_match`` needs so each segment can be identified independently.
+    Batching reduces the number of ``get_audio_duration`` calls from O(n)
+    to O(n / batch_size) and groups temp-file lifecycle.
+
+    Each resulting WAV must be deleted by the caller when done (mirrors
+    ``extract_clips_concat``'s contract). A per-clip extraction failure
+    yields ``None`` at that index rather than aborting the whole batch —
+    the caller skips it the same way the old per-segment loop skipped
+    ``AudioPrepError``.
+    """
+    if not ffmpeg_available():
+        raise AudioPrepError("ffmpeg is not installed or not on PATH. See INSTALL.md.")
+    if not clips:
+        return []
+
+    duration = get_audio_duration(audio_path)
+    base = os.path.splitext(os.path.basename(audio_path))[0]
+    suffix = uuid.uuid4().hex
+
+    validated: list[tuple[float, float] | None] = []
+    for clip in clips:
+        try:
+            start = max(0.0, float(clip["start"]))
+            end = min(duration, float(clip["end"]))
+        except (TypeError, ValueError, KeyError):
+            validated.append(None)
+            continue
+        if end <= start:
+            validated.append(None)
+            continue
+        validated.append((start, end))
+
+    results: list[str | None] = [None] * len(clips)
+
+    for batch_start in range(0, len(validated), batch_size):
+        batch_slice = validated[batch_start: batch_start + batch_size]
+
+        def _run_batch() -> list[str | None]:
+            batch_paths: list[str | None] = [None] * len(batch_slice)
+            for offset, item in enumerate(batch_slice):
+                if item is None:
+                    continue
+                start, end = item
+                part = os.path.join(
+                    output_dir, f"{base}_{suffix}_seg{batch_start + offset}.wav"
+                )
+                result = subprocess.run(
+                    [
+                        _ffmpeg_bin(), "-y", "-i", audio_path,
+                        "-ss", str(start), "-to", str(end),
+                        "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le",
+                        part,
+                    ],
+                    capture_output=True,
+                    text=True,
+                )
+                if result.returncode != 0:
+                    try:
+                        os.remove(part)
+                    except OSError:
+                        pass
+                    continue
+                batch_paths[offset] = part
+            return batch_paths
+
+        batch_out = await asyncio.to_thread(_run_batch)
+        for offset, p in enumerate(batch_out):
+            results[batch_start + offset] = p
+
+    return results
+
+
 async def chunk_audio(
     audio_path: str,
     output_dir: str,
