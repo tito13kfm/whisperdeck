@@ -606,6 +606,17 @@ def test_finalize_rejects_duplicate_for_same_source_job(client, db_session):
     assert len(rows) == 1
 
 
+def test_finalize_rejects_non_empty_with_no_job(client, db_session):
+    user, t = _make_voice_dump_transcript(db_session)
+    items = [{"type": "todo", "title": "One", "body": "x"}]
+    r1 = client.post(f"/api/transcripts/{t.id}/voice-dump/finalize", json=items)
+    assert r1.status_code == 409
+    r2 = client.post(f"/api/transcripts/{t.id}/voice-dump/finalize", json=items)
+    assert r2.status_code == 409
+    rows = db_session.query(VoiceDumpItem).filter(VoiceDumpItem.transcript_id == t.id).all()
+    assert len(rows) == 0
+
+
 def test_finalize_normalizes_unknown_type_to_general(client, db_session):
     user, t = _make_voice_dump_transcript(db_session)
     job = LlmJob(
@@ -627,6 +638,12 @@ def test_finalize_continues_sequence_index_from_existing_max(client, db_session)
         note_type="todo", title="Old", body="x",
         structured={}, model="m", provider="p",
     ))
+    job = LlmJob(
+        user_id=user.id, transcript_id=t.id, kind="voice_dump",
+        provider="groq", model="llama3", status="completed",
+        result_json={"items": []},
+    )
+    db_session.add(job)
     db_session.commit()
     r = client.post(f"/api/transcripts/{t.id}/voice-dump/finalize", json=[{"type": "todo", "title": "New", "body": "y"}])
     assert r.status_code == 200

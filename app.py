@@ -3382,10 +3382,16 @@ async def finalize_voice_dump(
 
     kept = [it for it in items if not it.get("discarded", False)]
 
-    source_job_id = None
     source_job = latest_job(db, transcript_id, "voice_dump")
-    if source_job:
-        source_job_id = source_job.id
+    source_job_id = source_job.id if source_job else None
+
+    # A non-empty finalize needs a completed job to key the duplicate-finalize
+    # guard on. Without this, source_job_id stays None and the guard below
+    # never fires, so the same request submitted twice inserts two batches
+    # (all-discarded finalizes still take source_job_id=None on purpose - a
+    # discard-only request has nothing to guard against duplicating).
+    if kept and (source_job is None or source_job.status != "completed"):
+        raise HTTPException(status_code=409, detail="No completed voice-dump job to finalize from")
 
     if source_job_id is not None and db.query(VoiceDumpItem).filter(
         VoiceDumpItem.transcript_id == transcript_id,
