@@ -373,12 +373,6 @@ def test_voice_dump_cancel_during_final_span_leaves_no_items(db_session):
     segments_payload = json.dumps([{"span_text": "Only note.", "tentative_type": "todo"}])
     struct_payload = json.dumps({"title": "One", "body": "Body", "structured": {}, "clarifying_questions": []})
 
-    async def _cancel_between(db2, job_id2, *a, **kw):
-        return None
-
-    def fake_post_side_effect(*args, **kwargs):
-        return _chat_response(struct_payload if "clarifying" not in str(args) else struct_payload)
-
     calls = {"n": 0}
 
     async def fake_post(self, url=None, **kwargs):
@@ -392,9 +386,19 @@ def test_voice_dump_cancel_during_final_span_leaves_no_items(db_session):
         return _chat_response(struct_payload)
 
     factory = lambda: _NoCloseSession(db_session)
-    with patch("httpx.AsyncClient.post", fake_post):
+    # Pin the post-final-await guard (lines 786-788): if that guard is removed,
+    # _finish would still see the cancellation and roll back, so we assert the
+    # early return path was taken instead.
+    from services import llm_jobs as _llm
+    orig_finish = _llm._finish
+    finish_calls: list[str] = []
+    def spy_finish(db_arg, job_arg, status, error=None):
+        finish_calls.append(status)
+        return orig_finish(db_arg, job_arg, status, error=error)
+    with patch("httpx.AsyncClient.post", fake_post), patch.object(_llm, "_finish", side_effect=spy_finish):
         asyncio.run(run_llm_job(factory, job_id, transcription_service=None))
 
     db_session.refresh(job)
     assert job.status == "cancelled"
     assert job.result_json is None or job.result_json.get("items") is None
+    assert finish_calls == [], "post-final-await guard should have returned before _finish"

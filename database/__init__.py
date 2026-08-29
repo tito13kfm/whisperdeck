@@ -224,7 +224,7 @@ class VoiceDumpItem(Base):
     )
     source_job_id = Column(Integer, ForeignKey("llm_jobs.id"), nullable=True)  # LlmJob(kind="voice_dump")
     sequence_index = Column(Integer, nullable=False, default=0)
-    note_type = Column(String(16), nullable=False)  # bug | idea | todo | reminder (TBD in #284)
+    note_type = Column(String(16), nullable=False)  # one of NOTE_TYPES (services/voice_notes.py)
     title = Column(String(255), default="")
     body = Column(Text, default="")
     structured = Column(JSON, default=dict)
