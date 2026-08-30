@@ -15,7 +15,6 @@ from sqlalchemy import func
 
 from database import Transcript, TranscriptionJob, utcnow_naive
 from backends import get_provider, ProviderError
-from database import ProviderConfig
 from services.job_transitions import transition as _job_transition
 
 # Free-tier numbers confirmed live against https://console.groq.com/docs/rate-limits
@@ -746,25 +745,10 @@ async def _process_transcript_jobs(db, transcript_id: int, jobs: list, diarizati
     if slots == 0:
         return
 
-    prov_cfg = (
-        db.query(ProviderConfig)
-        .filter(ProviderConfig.user_id == transcript.user_id, ProviderConfig.name == transcript.provider)
-        .first()
-    )
-    raw_key = prov_cfg.api_key if prov_cfg else ""
-    # Decrypt the API key transparently if it was encrypted on save
-    from services.settings import _decrypt_key_if_needed
-    from pathlib import Path
-    import os as os_module
-    _queue_data = Path(os_module.environ.get("WHISPERDECK_DATA_DIR") or os_module.environ.get("WHISPERDESK_DATA_DIR") or str(Path(__file__).parent.parent / "data"))
-    _queue_secret_path = _queue_data / ".session_secret"
-    _queue_secret = _queue_secret_path.read_text().strip() if _queue_secret_path.exists() else ""
-    decrypted_key = _decrypt_key_if_needed(raw_key, _queue_secret)
-    provider_config = {
-        "api_key": decrypted_key,
-        "api_url": prov_cfg.api_url if prov_cfg else "",
-        "default_model": (prov_cfg.default_model if prov_cfg else "") or transcript.model,
-    }
+    from services.settings import resolve_provider_key
+    decrypted_key, provider_config = resolve_provider_key(db, transcript.user_id, transcript.provider)
+    if not provider_config.get("default_model"):
+        provider_config["default_model"] = transcript.model or ""
 
     jobs.sort(key=lambda j: j.chunk_index)
     dispatched = []

@@ -5,10 +5,59 @@ no separate table, since this is a small fixed set of scalar values, not
 a growing per-item collection like provider configs.
 """
 import json
+import logging
+import os
+from pathlib import Path
 
 from sqlalchemy import text
 
 from database import User
+
+logger = logging.getLogger(__name__)
+
+# ── Cached session secret (Bug 4) ────────────────────────────────────────
+# Read once at import — the secret is generated once at startup and never
+# rotated at runtime, so per-call disk I/O is unnecessary. Mirrors the
+# SESSION_SECRET caching in app.py.
+_BASE_DIR = Path(__file__).parent.parent.resolve()
+_DATA_DIR = Path(
+    os.environ.get("WHISPERDECK_DATA_DIR")
+    or os.environ.get("WHISPERDESK_DATA_DIR")
+    or str(_BASE_DIR / "data")
+)
+_SESSION_SECRET_PATH = _DATA_DIR / ".session_secret"
+_SESSION_SECRET: str = (
+    _SESSION_SECRET_PATH.read_text().strip() if _SESSION_SECRET_PATH.exists() else ""
+)
+
+
+def _get_cached_secret() -> str:
+    """Return the cached session secret, falling back to a live read if the
+    cached value is empty but the file now exists (covers test harnesses
+    that create the temp data dir after this module was imported)."""
+    global _SESSION_SECRET
+    if _SESSION_SECRET:
+        return _SESSION_SECRET
+    # Lazy fallback — only re-reads when the cached value is empty
+    if _SESSION_SECRET_PATH.exists():
+        try:
+            _SESSION_SECRET = _SESSION_SECRET_PATH.read_text().strip()
+        except OSError:
+            pass
+    if not _SESSION_SECRET:
+        # Re-derive data dir from current env in case it changed since import
+        _live_data = Path(
+            os.environ.get("WHISPERDECK_DATA_DIR")
+            or os.environ.get("WHISPERDESK_DATA_DIR")
+            or str(_BASE_DIR / "data")
+        )
+        _live_path = _live_data / ".session_secret"
+        if _live_path.exists():
+            try:
+                _SESSION_SECRET = _live_path.read_text().strip()
+            except OSError:
+                pass
+    return _SESSION_SECRET
 
 DEFAULT_SETTINGS = {
     "bitrate_kbps": 128,
@@ -70,21 +119,19 @@ KEYLESS_PROVIDERS = ("local", "local_llm", "builtin", "moonshine")
 
 
 def _decrypt_key_if_needed(encrypted: str, session_secret: str = "") -> str:
-    """Decrypt an API key if it looks encrypted (base64-encoded salt+token).
-    Falls back to returning the value as-is for plaintext keys that predate
-    encryption support."""
-    if not encrypted or not session_secret:
+    if not encrypted:
         return encrypted
-    # Encrypted keys are always longer than 64 chars and start with a
-    # base64 character. Plaintext keys are short (gsk_..., sk-..., r8_...).
     if len(encrypted) < 64:
         return encrypted
+    if not session_secret:
+        logger.warning("Cannot decrypt API key (len=%d) — no session secret available", len(encrypted))
+        return ""
     try:
         from services.security import decrypt_api_key
         return decrypt_api_key(encrypted, session_secret)
     except Exception:
-        # Not encrypted or wrong secret — return as-is
-        return encrypted
+        logger.warning("Failed to decrypt API key (len=%d) — returning empty; check .session_secret", len(encrypted))
+        return ""
 
 
 def resolve_provider_key(db, user_id: int, provider: str) -> tuple[str, dict]:
@@ -98,13 +145,7 @@ def resolve_provider_key(db, user_id: int, provider: str) -> tuple[str, dict]:
     )
     if not cfg:
         return "", {}
-    # Import SESSION_SECRET at call time to avoid circular imports
-    import os
-    from pathlib import Path
-    _base = Path(__file__).parent.parent.resolve()
-    _data = Path(os.environ.get("WHISPERDECK_DATA_DIR") or os.environ.get("WHISPERDESK_DATA_DIR") or str(_base / "data"))
-    _secret_path = _data / ".session_secret"
-    _secret = _secret_path.read_text().strip() if _secret_path.exists() else ""
+    _secret = _get_cached_secret()
     raw_key = cfg.api_key or ""
     decrypted = _decrypt_key_if_needed(raw_key, _secret)
     return decrypted, {

@@ -1458,21 +1458,8 @@ async def _run_transcription_pipeline(
             except OSError:
                 pass
 
-    # Get provider config — decrypts API key transparently
-    from services.settings import _decrypt_key_if_needed
-    prov_cfg = db.query(ProviderConfig).filter(
-        ProviderConfig.user_id == current_user.id,
-        ProviderConfig.name == provider,
-    ).first()
-    provider_config = {}
-    if prov_cfg:
-        raw_key = prov_cfg.api_key or ""
-        decrypted_key = _decrypt_key_if_needed(raw_key, SESSION_SECRET)
-        provider_config = {
-            "api_key": decrypted_key,
-            "api_url": prov_cfg.api_url or "",
-            "default_model": prov_cfg.default_model or "",
-        }
+    from services.settings import resolve_provider_key
+    _, provider_config = resolve_provider_key(db, current_user.id, provider)
 
     threshold_bytes = user_settings["chunk_threshold_mb"] * 1024 * 1024
     file_size = os.path.getsize(save_path)
