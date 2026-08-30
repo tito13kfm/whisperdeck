@@ -131,6 +131,48 @@ def test_voice_note_rerun_blocked_across_unconfirmed_states(client, db_session, 
     assert r.status_code == 400
 
 
+def test_diarize_standalone_blocked_when_prepass_rejects(client, db_session, tmp_path):
+    """#417: the standalone /api/diarize (no transcript, so no kind guard is
+    expressible) gains the same audio-feature pre-pass as the other two
+    diarization sites. An explicit request does not override it — same reading
+    as decision 11 row 9. Mutation check: replacing the new clause's body with
+    'pass' turns this 400 into a 500 (the endpoint falls through to the
+    heuristic, which chokes on the junk bytes)."""
+    import io
+    with patch("app.evaluate_diarization_eligibility_async", new_callable=AsyncMock,
+               return_value=DiarizationEligibility(False, "too short to diarize")):
+        resp = client.post(
+            "/api/diarize",
+            files={"file": ("t.wav", io.BytesIO(b"RIFF0000WAVE"), "audio/wav")},
+            data={"method": "heuristic"},
+        )
+    assert resp.status_code == 400
+    assert "too short to diarize" in resp.json()["detail"]
+
+
+def test_diarize_standalone_allowed_when_prepass_reports_eligible(client, db_session, tmp_path):
+    """Complement: pre-pass eligible still reaches the diarizer (200). Patch
+    the diarizer itself so the junk bytes don't matter — this test exercises
+    the eligibility gate, not the diarization engine."""
+    import io
+    from services.diarization import DiarizationResult, DiarizationSegment
+    async def fake_heuristic(*a, **k):
+        return DiarizationResult(
+            segments=[DiarizationSegment(start=0.0, end=1.0, speaker="SPEAKER_00", text="hi")],
+            speaker_count=1, method="heuristic",
+        )
+    with patch("app.evaluate_diarization_eligibility_async", new_callable=AsyncMock,
+               return_value=DiarizationEligibility(True)), \
+         patch("app.diarization_service.diarize_heuristic", fake_heuristic):
+        resp = client.post(
+            "/api/diarize",
+            files={"file": ("t.wav", io.BytesIO(b"RIFF0000WAVE"), "audio/wav")},
+            data={"method": "heuristic"},
+        )
+    assert resp.status_code == 200
+    assert resp.json()["speaker_count"] == 1
+
+
 @pytest.mark.parametrize("status", UNCONFIRMED_STATUSES)
 def test_dictation_job_fields_meeting_shaped_across_unconfirmed_states(db_session, status):
     """_dictation_job_fields must not surface a stray classify_intent job

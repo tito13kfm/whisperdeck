@@ -173,6 +173,7 @@ job-type discriminator) is untouched by this design.
 | `services/transcription.py:187,221` (kind-specific summary/prompt selection) | branches on `transcript.kind` | branches on accepted kind; template selection logic itself unchanged | **preserved** |
 | `services/reformatting.py:88` (`classify_intent`) | dictation-only reformat-tab hint, unrelated to routing | **untouched** — explicitly out of scope, do not rename or merge with decision 2's classifier | **preserved, unrelated** |
 | `static/rack.js:1714,1727-1731,1811,4207,4246,4275,4379-4404` | mode/speaker controls, detail label, kind toggle | frontend mirror of the predicates above; owned by #269's implementation, not re-derived here | **changed** (#269's scope) |
+| `app.py:2807` (`/api/diarize` standalone) | no guard — transcript-less, so `effective_kind` has nothing to read; diarization runs unconditionally | additionally requires decision 1's pre-pass (no kind check — no transcript to check; explicit request does not override, same reading as rediarize row 9) | **changed** (pre-pass added, #417) |
 
 ## Amendment 2026-08-15 (#416 / PR #418): row 2's kind veto is retained
 
@@ -210,8 +211,9 @@ Revisit if a cheap speaker-change signal ever becomes available (a fast VAD, a
 lightweight embedding pass). Row 2 as originally written becomes achievable
 then, and the kind veto can come out.
 
-`/api/diarize` is a third diarization entry point with no kind or eligibility
-guard, absent from the table above. Tracked as #417.
+`/api/diarize` was a third diarization entry point with no kind or eligibility
+guard; #417 adds decision 1's pre-pass to it (no kind guard — transcript-less,
+so not expressible) and adds its row to the table above.
 
 ## Explicitly out of scope (tracked separately)
 

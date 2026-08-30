@@ -2828,6 +2828,16 @@ async def diarize_audio(
         f.write(content)
 
     try:
+        # Standalone diarization has no transcript, so a kind guard is not
+        # expressible here. The audio-feature pre-pass (decision 1) still
+        # applies — short/unbroken recordings produce meaningless splits
+        # regardless of submission path. Same fail-open as the other two
+        # sites; explicit request does not override (same reading as
+        # decision 11 row 9 for rediarize).
+        eligibility = await evaluate_diarization_eligibility_async(str(save_path))
+        if not eligibility.eligible:
+            raise HTTPException(status_code=400, detail=f"Diarization doesn't apply — {eligibility.reason}")
+
         if method == "pyannote" and diarization_service._check_pyannote():
             user_settings = get_user_settings(db, current_user.id)
             result = await diarization_service.diarize_pyannote(
@@ -2846,6 +2856,8 @@ async def diarize_audio(
             "speaker_count": result.speaker_count,
             "method": result.method,
         }
+    except HTTPException:
+        raise
     except MissingTokenError as e:
         # Explicit pyannote opt-in without a token is user-actionable:
         # 400 with the settings-pointing message, not a generic 500
