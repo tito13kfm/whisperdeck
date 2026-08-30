@@ -1,5 +1,6 @@
 import base64
-import os
+
+import pytest
 
 from services.security import decrypt_api_key, encrypt_api_key
 from services.settings import _decrypt_key_if_needed
@@ -39,11 +40,8 @@ def test_encrypt_ciphertext_is_valid_base64():
 
 def test_decrypt_with_wrong_secret_raises():
     encrypted = encrypt_api_key("sk-hello", "correct-secret")
-    try:
+    with pytest.raises(Exception):
         decrypt_api_key(encrypted, "wrong-secret")
-        assert False, "expected exception with wrong secret"
-    except Exception:
-        pass
 
 
 def test_decrypt_key_if_needed_plaintext_passthrough_short():
@@ -72,6 +70,17 @@ def test_decrypt_key_if_needed_empty_inputs():
 
 
 def test_decrypt_key_if_needed_no_secret_long_ciphertext_returns_empty():
-    long_fake = "A" * 80
-    assert _decrypt_key_if_needed(long_fake, "") == ""
-    assert _decrypt_key_if_needed(long_fake, None) == ""  # type: ignore[arg-type]
+    pt = "sk-will-be-encrypted"
+    enc = encrypt_api_key(pt, "some-secret")
+    assert _decrypt_key_if_needed(enc, "") == ""
+    assert _decrypt_key_if_needed(enc, None) == ""  # type: ignore[arg-type]
+
+
+def test_decrypt_key_if_needed_long_plaintext_passthrough():
+    long_plain = "sk-or-v1-" + "a" * 64
+    assert _decrypt_key_if_needed(long_plain, "wrong-secret") == long_plain
+    assert _decrypt_key_if_needed(long_plain, "") == long_plain
+    prefix_plain = "sk-proj-" + "b" * 120
+    assert _decrypt_key_if_needed(prefix_plain, "any-secret") == prefix_plain
+    valid_b64_plain = base64.b64encode(b"x" * 48).decode()
+    assert _decrypt_key_if_needed(valid_b64_plain, "secret") == valid_b64_plain

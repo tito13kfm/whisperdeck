@@ -123,14 +123,25 @@ def _decrypt_key_if_needed(encrypted: str, session_secret: str = "") -> str:
         return encrypted
     if len(encrypted) < 64:
         return encrypted
+    import base64 as _b64
+
+    try:
+        _raw = _b64.b64decode(encrypted, validate=True)
+    except Exception:
+        return encrypted
+    if len(_raw) < 22 or _raw[16:22] != b"gAAAAA":
+        return encrypted
     if not session_secret:
         logger.warning("Cannot decrypt API key (len=%d) — no session secret available", len(encrypted))
         return ""
     try:
+        from cryptography.fernet import InvalidToken as _InvalidToken
+
         from services.security import decrypt_api_key
+
         return decrypt_api_key(encrypted, session_secret)
-    except Exception:
-        logger.warning("Failed to decrypt API key (len=%d) — returning empty; check .session_secret", len(encrypted))
+    except (_InvalidToken, ValueError, _b64.binascii.Error) as exc:
+        logger.warning("Failed to decrypt API key (len=%d): %s — returning empty", len(encrypted), type(exc).__name__)
         return ""
 
 
