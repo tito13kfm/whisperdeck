@@ -246,10 +246,9 @@ def test_voice_match_cancel_committed_from_another_connection_wins_the_race(db_s
 
     from services.relabel import record_relabel as _real_record_relabel
 
-    def hook_record_relabel(db, transcript, kind, changed, corrected_text_before=None, description=""):
+    def hook_record_relabel(*args, **kwargs):
         _cancel_from_another_connection(engine, job.id)
-        return _real_record_relabel(db, transcript, kind, changed,
-                                     corrected_text_before=corrected_text_before, description=description)
+        return _real_record_relabel(*args, **kwargs)
 
     factory = lambda: _NoCloseSession(db_session)
     with patch("services.llm_jobs.extract_segment_clips", fake_extract), \
