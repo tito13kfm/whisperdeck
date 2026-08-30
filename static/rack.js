@@ -4375,6 +4375,7 @@ async function updateDetailJobStatus(t, prevActive) {
     { id: 'job-format-coding_prompt', job: t.format_coding_prompt_job, label: 'Claude Code prompt' },
     { id: 'job-tagging', job: t.tagging_job, label: 'Tagging' },
     { id: 'job-voice-dump', job: t.voice_dump_job, label: 'Voice dump' },
+    { id: 'job-voice-note', job: t.voice_note_job, label: 'Voice note' },
   ];
   for (const { id: containerId, job, label } of runningContainers) {
     if (!llmJobActive(job)) continue;
@@ -4742,13 +4743,13 @@ async function voiceNoteHtml(t) {
   const job = t.voice_note_job;
   const inFlight = job && (job.status === 'pending' || job.status === 'running');
   if (inFlight) {
-    return '<div class="unit" style="padding:32px;text-align:center">' +
-      '<div class="t-cap" style="font-size:11px;letter-spacing:0.16em;margin-bottom:12px">Voice note · ' +
-        escapeHtml(job.progress ? (job.progress.done + ' of ' + job.progress.total) : 'queued') +
-      '</div>' +
-      '<div style="font-family:var(--f-mono);font-size:11.5px;color:var(--label-dim)">The LLM is figuring out what kind of note this is and writing it up. Watch the Queue screen for live progress.</div>' +
-    '</div>';
-  }
+     return '<div id="job-voice-note" class="unit" style="padding:32px;text-align:center">' +
+       '<div class="t-cap" style="font-size:11px;letter-spacing:0.16em;margin-bottom:12px">Voice note · ' +
+         escapeHtml(job.progress ? (job.progress.done + ' of ' + job.progress.total) : 'queued') +
+       '</div>' +
+       '<div style="font-family:var(--f-mono);font-size:11.5px;color:var(--label-dim)">The LLM is figuring out what kind of note this is and writing it up. Watch the Queue screen for live progress.</div>' +
+     '</div>';
+   }
   if (job && job.status === 'failed') {
     return '<div class="unit" style="padding:32px">' +
       '<div class="t-cap" style="font-size:11px;letter-spacing:0.16em;margin-bottom:12px;color:var(--red)">Voice note chain failed</div>' +
@@ -5249,6 +5250,7 @@ async function renderDetailBody() {
         }
       } catch { /* roster fetch failing is non-fatal — just skip the nudge */ }
     }
+    const tagging = llmJobActive(t.tagging_job) ? '<div id="job-tagging">' + jobRunningUnit(t.tagging_job, 'Tagging') + '</div>' : '';
     const tags = Array.isArray(t.tags) ? t.tags : [];
     const tagRow = tags.length
       ? '<div class="unit" style="padding:10px 32px;margin-bottom:10px;font-size:12.5px;color:var(--body);display:flex;align-items:center;gap:10px;flex-wrap:wrap">' +
@@ -5256,7 +5258,7 @@ async function renderDetailBody() {
         tags.map(tag => `<span style="display:inline-block;font-family:var(--f-mono);font-size:10px;padding:3px 9px;border:1px solid var(--panel-lo);border-radius:10px;background:var(--panel-lo);color:var(--label);text-transform:lowercase;letter-spacing:0.02em">${escapeHtml(tag)}</span>`).join('') +
         '</div>'
       : '';
-    body.innerHTML = vm + vmDone + nudge + tagRow + exportToolbarHtml('transcript') + '<div class="unit" style="border-radius:3px;margin-top:' + (vm || vmDone || nudge ? '10px' : '0') + ';padding:6px 32px">' + segmentsHtml(t) + '</div>';
+    body.innerHTML = vm + tagging + vmDone + nudge + tagRow + exportToolbarHtml('transcript') + '<div class="unit" style="border-radius:3px;margin-top:' + (vm || tagging || vmDone || nudge ? '10px' : '0') + ';padding:6px 32px">' + segmentsHtml(t) + '</div>';
     body.querySelectorAll('[data-dact]').forEach(b => b.addEventListener('click', () => detailAction(b.dataset.dact, b)));
   } else if (S.detailTab === 'corrected') {
     body.innerHTML = (t.corrected_text ? exportToolbarHtml('corrected') : '') + correctedHtml(t);
