@@ -54,7 +54,8 @@ def count_distinct_speakers(segments) -> int:
 
 
 def record_relabel(db, transcript, kind: str, changed: list[tuple[int, str]],
-                   corrected_text_before: str | None = None, description: str = "") -> RelabelHistory | None:
+                   corrected_text_before: str | None = None, description: str = "",
+                   speaker_after: dict[int, str] | None = None) -> RelabelHistory | None:
     """changed: [(segment_index, old_speaker), ...] for every segment the
     action rewrote; append a third element (old speaker_confidence, None when
     the segment had none) when the action also rewrites speaker_confidence
@@ -62,6 +63,11 @@ def record_relabel(db, transcript, kind: str, changed: list[tuple[int, str]],
     before-image when the action also rewrites corrected_text (renames); None
     otherwise. Renames are not invertible by reverse transform (renaming A to
     an already-present B merges them), hence the before-image.
+
+    speaker_after: optional {index: new_speaker} map so undo can skip entries
+    whose segment speaker no longer matches the post-relabel value (issue #107:
+    bounds-check alone lets an undo stamp a stale speaker onto a reordered or
+    externally replaced segment). Omitted keys are ignored for backward compat.
 
     Returns the new entry so callers that also rewrite corrected_text can
     stamp the after-image into inverse["corrected_text_after"] once the
@@ -76,7 +82,8 @@ def record_relabel(db, transcript, kind: str, changed: list[tuple[int, str]],
         inverse={
             "segments": [
                 {"index": c[0], "speaker": c[1],
-                 **({"speaker_confidence": c[2]} if len(c) > 2 else {})}
+                 **({"speaker_confidence": c[2]} if len(c) > 2 else {}),
+                 **({"speaker_after": speaker_after[c[0]]} if speaker_after is not None and c[0] in speaker_after else {})}
                 for c in changed
             ],
             "corrected_text": corrected_text_before,
