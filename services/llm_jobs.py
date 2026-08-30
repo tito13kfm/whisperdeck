@@ -1012,12 +1012,52 @@ async def run_llm_job(SessionLocal, job_id: int, transcription_service, diarizat
             db.refresh(job)
             if job.status == "cancelled":
                 return
+            # Voice-match rewrites corrected_text line prefixes alongside
+            # segments so undo keeps the two views in sync (issue #106 fix #2:
+            # same line-anchored contract as the speaker rename path). Must
+            # snapshot the before-image before rewriting and stamp the
+            # after-image onto the history entry, so undo's
+            # corrected_text_after guard can reject stale snapshots.
+            entry = None
             if changed:
                 from services.relabel import record_relabel
-                record_relabel(db, transcript, "voice_match", changed,
-                               description=f"voice match relabeled {len(changed)} lines")
+                entry = record_relabel(
+                    db, transcript, "voice_match", changed,
+                    corrected_text_before=transcript.corrected_text if transcript.corrected_text else None,
+                    description=f"voice match relabeled {len(changed)} lines",
+                )
             from services.relabel import count_distinct_speakers
             transcript.segments = new_segments
+            if transcript.corrected_text and changed:
+                # Build per-index replacement: old speaker → new enrolled name.
+                # changed holds (index, old_speaker); the new name came from
+                # new_segments[index]["speaker"] which was set per-match above
+                # (different indices may map to different enrolled names).
+                replace_by_old: dict[str, str] = {}
+                for c_idx, old_spk in changed:
+                    new_spk = (new_segments[c_idx].get("speaker") or "").strip()
+                    old_s = (old_spk or "").strip()
+                    if old_s and new_spk and old_s != new_spk:
+                        # First writer wins if the same old label maps to
+                        # two enrolled names — shouldn't happen in practice
+                        # (one cluster → one best match), but avoid flip-flop.
+                        replace_by_old.setdefault(old_s, new_spk)
+                if replace_by_old:
+                    lines = transcript.corrected_text.splitlines()
+                    rewritten = []
+                    for line in lines:
+                        replaced = False
+                        for old_s, new_s in replace_by_old.items():
+                            prefix = f"{old_s}: "
+                            if line.startswith(prefix):
+                                rewritten.append(new_s + line[len(old_s):])
+                                replaced = True
+                                break
+                        if not replaced:
+                            rewritten.append(line)
+                    transcript.corrected_text = "\n".join(rewritten)
+            if entry is not None and entry.inverse.get("corrected_text") is not None:
+                entry.inverse = {**entry.inverse, "corrected_text_after": transcript.corrected_text}
             # Matching is per segment, not per cluster, so it can merge several
             # SPEAKER_XX labels onto one enrolled name (count drops) or split
             # one cluster between a matched name and the unmatched original

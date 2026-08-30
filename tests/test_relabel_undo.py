@@ -462,3 +462,232 @@ def test_rediarize_clears_a_stale_degraded_note_on_success(client, db_session, t
 
     db_session.expire_all()
     assert db_session.query(Transcript).filter(Transcript.id == t.id).first().error is None
+
+
+def test_voice_match_rewrites_corrected_text_prefixes(db_session, tmp_path):
+    user = _voice_match_user(db_session)
+    _enrolled_profile(db_session, user, name="Alice")
+    segments = [
+        {"start": 0.0, "end": 1.0, "text": "hello", "speaker": "SPEAKER_00"},
+        {"start": 1.0, "end": 2.0, "text": "bye", "speaker": "SPEAKER_01"},
+    ]
+    corrected = "SPEAKER_00: hello\nSPEAKER_01: bye\nNarrator mentions SPEAKER_00 in passing"
+    t = _transcript_with_segments(db_session, user, tmp_path, segments)
+    t.corrected_text = corrected
+    db_session.commit()
+
+    job = enqueue_llm_job(db_session, user.id, t.id, "voice_match", "", "")
+    job.status = "running"
+    db_session.commit()
+
+    call = {"n": 0}
+
+    async def fake_extract(audio_path, clips, output_dir, batch_size=20):
+        return [str(tmp_path / "clip.wav") for _ in clips]
+
+    def fake_identify_detailed(db, user_id, audio_path, threshold=0.65, hf_token=None):
+        call["n"] += 1
+        # First segment matches, second has no confident match (selective rewrite).
+        if call["n"] == 1:
+            return {
+                "matches": [{"id": 1, "name": "Alice", "similarity": 0.9, "sample_count": 2}],
+                "probe_model": "speechbrain/spkrec-ecapa-voxceleb",
+                "degraded": False, "compared": 1, "skipped_model_mismatch": 0, "warning": None,
+            }
+        return {
+            "matches": [],
+            "probe_model": "speechbrain/spkrec-ecapa-voxceleb",
+            "degraded": False, "compared": 1, "skipped_model_mismatch": 0, "warning": None,
+        }
+
+    factory = lambda: _NoCloseSession(db_session)
+    with patch("services.llm_jobs.extract_segment_clips", fake_extract), \
+         patch("services.llm_jobs.voice_id_service.identify_detailed", fake_identify_detailed):
+         asyncio.run(run_llm_job(factory, job.id, transcription_service=None))
+
+    db_session.refresh(t)
+    assert t.corrected_text.splitlines()[0] == "Alice: hello"
+    assert t.corrected_text.splitlines()[1] == "SPEAKER_01: bye"
+    assert t.corrected_text.splitlines()[2] == "Narrator mentions SPEAKER_00 in passing"
+    row = db_session.query(RelabelHistory).filter(RelabelHistory.transcript_id == t.id).one()
+    assert row.inverse["corrected_text"] == corrected
+    assert row.inverse["corrected_text_after"] == t.corrected_text
+
+
+def test_voice_match_undo_restores_corrected_text(db_session, tmp_path):
+    """Full round-trip: voice-match rewrites prefixes, user undoes — both
+    segments and corrected_text must revert."""
+    user = _voice_match_user(db_session)
+    _enrolled_profile(db_session, user, name="Alice")
+    segments = [
+        {"start": 0.0, "end": 1.0, "text": "hello", "speaker": "SPEAKER_00"},
+    ]
+    corrected = "SPEAKER_00: hello"
+    t = _transcript_with_segments(db_session, user, tmp_path, segments)
+    t.corrected_text = corrected
+    db_session.commit()
+
+    job = enqueue_llm_job(db_session, user.id, t.id, "voice_match", "", "")
+    job.status = "running"
+    db_session.commit()
+
+    async def fake_extract(audio_path, clips, output_dir, batch_size=20):
+        return [str(tmp_path / "clip.wav") for _ in clips]
+
+    def fake_identify_detailed(db, user_id, audio_path, threshold=0.65, hf_token=None):
+        return {
+            "matches": [{"id": 1, "name": "Alice", "similarity": 0.9, "sample_count": 1}],
+            "probe_model": "speechbrain/spkrec-ecapa-voxceleb",
+            "degraded": False, "compared": 1, "skipped_model_mismatch": 0, "warning": None,
+        }
+
+    factory = lambda: _NoCloseSession(db_session)
+    with patch("services.llm_jobs.extract_segment_clips", fake_extract), \
+         patch("services.llm_jobs.voice_id_service.identify_detailed", fake_identify_detailed):
+         asyncio.run(run_llm_job(factory, job.id, transcription_service=None))
+
+    db_session.refresh(t)
+    assert t.corrected_text == "Alice: hello"
+    # Apply undo via the same inverse logic the endpoint uses (direct model
+    # check rather than standing up the HTTP client, which would need a fresh
+    # user registration and a separate DB binding).
+    from services.relabel import latest_relabel
+    entry = latest_relabel(db_session, t.id)
+    assert entry is not None
+    assert entry.inverse.get("corrected_text") == corrected
+    assert entry.inverse.get("corrected_text_after") == "Alice: hello"
+    # Simulate the undo endpoint's corrected_text guard.
+    if entry.inverse.get("corrected_text") is not None and entry.inverse.get("corrected_text_after") == t.corrected_text:
+        t.corrected_text = entry.inverse["corrected_text"]
+        db_session.commit()
+    db_session.refresh(t)
+    assert t.corrected_text == corrected
+
+
+def test_voice_match_undo_skips_stale_corrected_text(db_session, tmp_path):
+    """If a correction job re-runs between voice-match and undo, the
+    before-image is stale — undo must leave corrected_text alone (same
+    guard rename uses)."""
+    user = _voice_match_user(db_session)
+    _enrolled_profile(db_session, user, name="Alice")
+    segments = [{"start": 0.0, "end": 1.0, "text": "hello", "speaker": "SPEAKER_00"}]
+    corrected = "SPEAKER_00: hello"
+    t = _transcript_with_segments(db_session, user, tmp_path, segments)
+    t.corrected_text = corrected
+    db_session.commit()
+
+    job = enqueue_llm_job(db_session, user.id, t.id, "voice_match", "", "")
+    job.status = "running"
+    db_session.commit()
+
+    async def fake_extract(audio_path, clips, output_dir, batch_size=20):
+        return [str(tmp_path / "clip.wav") for _ in clips]
+
+    def fake_identify_detailed(db, user_id, audio_path, threshold=0.65, hf_token=None):
+        return {
+            "matches": [{"id": 1, "name": "Alice", "similarity": 0.9, "sample_count": 1}],
+            "probe_model": "speechbrain/spkrec-ecapa-voxceleb",
+            "degraded": False, "compared": 1, "skipped_model_mismatch": 0, "warning": None,
+        }
+
+    factory = lambda: _NoCloseSession(db_session)
+    with patch("services.llm_jobs.extract_segment_clips", fake_extract), \
+         patch("services.llm_jobs.voice_id_service.identify_detailed", fake_identify_detailed):
+         asyncio.run(run_llm_job(factory, job.id, transcription_service=None))
+
+    db_session.refresh(t)
+    assert t.corrected_text == "Alice: hello"
+    fresh = "Alice: hello, rewritten by a newer correction pass"
+    t.corrected_text = fresh
+    db_session.commit()
+
+    from services.relabel import latest_relabel
+    entry = latest_relabel(db_session, t.id)
+    assert entry.inverse.get("corrected_text_after") != t.corrected_text
+    # Guard must reject the stale snapshot.
+    before = t.corrected_text
+    if entry.inverse.get("corrected_text") is not None and entry.inverse.get("corrected_text_after") == t.corrected_text:
+        t.corrected_text = entry.inverse["corrected_text"]
+        db_session.commit()
+    db_session.refresh(t)
+    assert t.corrected_text == before == fresh
+
+
+def test_voice_match_with_no_corrected_text_stores_none(db_session, tmp_path):
+    """When the transcript has no corrected_text, voice-match must pass None
+    (not an empty string) so the undo guard correctly skips restoration."""
+    user = _voice_match_user(db_session)
+    _enrolled_profile(db_session, user, name="Alice")
+    segments = [{"start": 0.0, "end": 1.0, "text": "hi", "speaker": "SPEAKER_00"}]
+    t = _transcript_with_segments(db_session, user, tmp_path, segments)
+    t.corrected_text = None
+    db_session.commit()
+
+    job = enqueue_llm_job(db_session, user.id, t.id, "voice_match", "", "")
+    job.status = "running"
+    db_session.commit()
+
+    async def fake_extract(audio_path, clips, output_dir, batch_size=20):
+        return [str(tmp_path / "clip.wav") for _ in clips]
+
+    def fake_identify_detailed(db, user_id, audio_path, threshold=0.65, hf_token=None):
+        return {
+            "matches": [{"id": 1, "name": "Alice", "similarity": 0.9, "sample_count": 1}],
+            "probe_model": "speechbrain/spkrec-ecapa-voxceleb",
+            "degraded": False, "compared": 1, "skipped_model_mismatch": 0, "warning": None,
+        }
+
+    factory = lambda: _NoCloseSession(db_session)
+    with patch("services.llm_jobs.extract_segment_clips", fake_extract), \
+         patch("services.llm_jobs.voice_id_service.identify_detailed", fake_identify_detailed):
+         asyncio.run(run_llm_job(factory, job.id, transcription_service=None))
+
+    row = db_session.query(RelabelHistory).filter(RelabelHistory.transcript_id == t.id).one()
+    assert row.inverse["corrected_text"] is None
+    assert "corrected_text_after" not in row.inverse
+
+
+def test_voice_match_rewrites_only_changed_prefixes(db_session, tmp_path):
+    """Voice-match may relabel a subset of segments; corrected_text lines
+    whose prefix wasn't among the changed speakers must not be rewritten,
+    even if the name collides in sentence text."""
+    user = _voice_match_user(db_session)
+    _enrolled_profile(db_session, user, name="Alice")
+    segments = [
+        {"start": 0.0, "end": 1.0, "text": "hello", "speaker": "SPEAKER_00"},
+        {"start": 1.0, "end": 2.0, "text": "bye", "speaker": "SPEAKER_01"},
+    ]
+    corrected = "SPEAKER_00: hello\nSPEAKER_01: bye"
+    t = _transcript_with_segments(db_session, user, tmp_path, segments)
+    t.corrected_text = corrected
+    db_session.commit()
+
+    job = enqueue_llm_job(db_session, user.id, t.id, "voice_match", "", "")
+    job.status = "running"
+    db_session.commit()
+
+    call = {"n": 0}
+
+    async def fake_extract(audio_path, clips, output_dir, batch_size=20):
+        return [str(tmp_path / "clip.wav") for _ in clips]
+
+    def fake_identify_detailed(db, user_id, audio_path, threshold=0.65, hf_token=None):
+        call["n"] += 1
+        if call["n"] == 1:
+            return {
+                "matches": [{"id": 1, "name": "Alice", "similarity": 0.9, "sample_count": 1}],
+                "probe_model": "speechbrain/spkrec-ecapa-voxceleb",
+                "degraded": False, "compared": 1, "skipped_model_mismatch": 0, "warning": None,
+            }
+        return {"matches": [], "probe_model": "speechbrain/spkrec-ecapa-voxceleb",
+                "degraded": False, "compared": 1, "skipped_model_mismatch": 0, "warning": None}
+
+    factory = lambda: _NoCloseSession(db_session)
+    with patch("services.llm_jobs.extract_segment_clips", fake_extract), \
+         patch("services.llm_jobs.voice_id_service.identify_detailed", fake_identify_detailed):
+         asyncio.run(run_llm_job(factory, job.id, transcription_service=None))
+
+    db_session.refresh(t)
+    lines = t.corrected_text.splitlines()
+    assert lines[0] == "Alice: hello"
+    assert lines[1] == "SPEAKER_01: bye"
