@@ -93,6 +93,13 @@ def test_complement_voice_note_has_both_halves():
     )
     # Initial-emitter half: voiceNoteHtml must emit id="job-voice-note"
     # so the poll ticker has a live container to patch (parallels the tagging fix).
-    assert 'id="job-voice-note"' in TEXT or "id='job-voice-note'" in TEXT, (
+    # Scope to the voiceNoteHtml function block — a TEXT-wide check would still
+    # pass if the emitter lost the id but runningContainers kept it (BLOCKed audit).
+    voice_note = _block(
+        "voiceNoteHtml",
+        "async function voiceNoteHtml(t)",
+        "function dumpReviewKey",
+    )
+    assert 'id="job-voice-note"' in voice_note or "id='job-voice-note'" in voice_note, (
         "voiceNoteHtml must emit #job-voice-note so the runningContainers ticker can patch it"
     )

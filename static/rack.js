@@ -4743,13 +4743,13 @@ async function voiceNoteHtml(t) {
   const job = t.voice_note_job;
   const inFlight = job && (job.status === 'pending' || job.status === 'running');
   if (inFlight) {
-     return '<div id="job-voice-note" class="unit" style="padding:32px;text-align:center">' +
-       '<div class="t-cap" style="font-size:11px;letter-spacing:0.16em;margin-bottom:12px">Voice note · ' +
-         escapeHtml(job.progress ? (job.progress.done + ' of ' + job.progress.total) : 'queued') +
-       '</div>' +
-       '<div style="font-family:var(--f-mono);font-size:11.5px;color:var(--label-dim)">The LLM is figuring out what kind of note this is and writing it up. Watch the Queue screen for live progress.</div>' +
-     '</div>';
-   }
+    return '<div id="job-voice-note" class="unit" style="padding:32px;text-align:center">' +
+      '<div class="t-cap" style="font-size:11px;letter-spacing:0.16em;margin-bottom:12px">Voice note · ' +
+        escapeHtml(job.progress ? (job.progress.done + ' of ' + job.progress.total) : 'queued') +
+      '</div>' +
+      '<div style="font-family:var(--f-mono);font-size:11.5px;color:var(--label-dim)">The LLM is figuring out what kind of note this is and writing it up. Watch the Queue screen for live progress.</div>' +
+    '</div>';
+  }
   if (job && job.status === 'failed') {
     return '<div class="unit" style="padding:32px">' +
       '<div class="t-cap" style="font-size:11px;letter-spacing:0.16em;margin-bottom:12px;color:var(--red)">Voice note chain failed</div>' +
