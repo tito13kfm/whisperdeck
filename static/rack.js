@@ -1364,12 +1364,12 @@ async function loadDashboardJobs(initialJobs) {
     var entry = DASH_STAGE_KINDS.find(function(s) { return s.light === lt.dataset.stage; });
     lt.classList.toggle('active', !!(entry && activeKinds[entry.kind]));
   });
-  if (!INST.scopeInit) dashInitVu();
+  if (!INST.dashVuInit) dashInitVu();
 }
 
 function dashInitVu() {
-  if (INST.scopeInit) return;
-  INST.scopeInit = true;
+  if (INST.dashVuInit) return;
+  INST.dashVuInit = true;
   INST.driveMic = 0.6;
   var canvas = document.createElement('canvas');
   canvas.width = 96;
@@ -1377,7 +1377,7 @@ function dashInitVu() {
   var wrap = $('dash-vu');
   if (wrap) wrap.appendChild(canvas);
   function frame(ts) {
-    if (S.page !== 'dashboard') { INST.dashRaf = null; INST.scopeInit = false; return; }
+    if (S.page !== 'dashboard') { INST.dashRaf = null; INST.dashVuInit = false; return; }
     INST.dt = ts / 1000;
     drawVU(canvas, 'dash');
     INST.dashRaf = requestAnimationFrame(frame);
@@ -1394,7 +1394,7 @@ function scheduleDashPoll() {
   }, 3000);
 }
 /* ══════════════════ transcribe: instruments (verbatim from prototype logic) ══════════════════ */
-const INST = { dt: 0, raf: null, dashRaf: null, vuMeters: {}, scopeInit: false, driveMic: null, driveSys: null, dashActive: false };
+const INST = { dt: 0, raf: null, dashRaf: null, vuMeters: {}, scopeBgInit: false, dashVuInit: false, driveMic: null, driveSys: null, dashActive: false };
 
 function instrumentsActive() { return S.running || S.capturing; }
 
@@ -1492,10 +1492,10 @@ function drawVU(canvas, key) {
 function drawScope(canvas) {
   const ctx = canvas.getContext('2d');
   const w = canvas.width, h = canvas.height;
-  if (!INST.scopeInit) {
+  if (!INST.scopeBgInit) {
     ctx.fillStyle = '#03140B';
     ctx.fillRect(0, 0, w, h);
-    INST.scopeInit = true;
+    INST.scopeBgInit = true;
   }
   ctx.fillStyle = 'rgba(3,20,11,0.20)';
   ctx.fillRect(0, 0, w, h);
@@ -1539,7 +1539,7 @@ function drawScope(canvas) {
 function startInstruments() {
   if (INST.raf) return;
   const loop = () => {
-    if (S.page !== 'transcribe') { INST.raf = null; return; }
+    if (S.page !== 'transcribe') { INST.raf = null; INST.scopeBgInit = false; return; }
     INST.dt += 0.016;
     if (S.capturing) {
       INST.driveMic = analyserLevel(CAP.micAn);
