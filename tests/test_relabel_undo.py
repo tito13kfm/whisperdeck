@@ -691,3 +691,52 @@ def test_voice_match_rewrites_only_changed_prefixes(db_session, tmp_path):
     lines = t.corrected_text.splitlines()
     assert lines[0] == "Alice: hello"
     assert lines[1] == "SPEAKER_01: bye"
+
+
+def test_voice_match_leaves_corrected_text_when_old_label_partially_matched(db_session, tmp_path):
+    user = _voice_match_user(db_session)
+    _enrolled_profile(db_session, user, name="Alice")
+    segments = [
+        {"start": 0.0, "end": 1.0, "text": "hello", "speaker": "SPEAKER_00"},
+        {"start": 1.0, "end": 2.0, "text": "again", "speaker": "SPEAKER_00"},
+    ]
+    corrected = "SPEAKER_00: hello\nSPEAKER_00: again"
+    t = _transcript_with_segments(db_session, user, tmp_path, segments)
+    t.corrected_text = corrected
+    db_session.commit()
+
+    job = enqueue_llm_job(db_session, user.id, t.id, "voice_match", "", "")
+    job.status = "running"
+    db_session.commit()
+
+    call = {"n": 0}
+
+    async def fake_extract(audio_path, clips, output_dir, batch_size=20):
+        return [str(tmp_path / "clip.wav") for _ in clips]
+
+    def fake_identify_detailed(db, user_id, audio_path, threshold=0.65, hf_token=None):
+        call["n"] += 1
+        if call["n"] == 1:
+            return {
+                "matches": [{"id": 1, "name": "Alice", "similarity": 0.9, "sample_count": 1}],
+                "probe_model": "speechbrain/spkrec-ecapa-voxceleb",
+                "degraded": False, "compared": 1, "skipped_model_mismatch": 0, "warning": None,
+            }
+        return {
+            "matches": [],
+            "probe_model": "speechbrain/spkrec-ecapa-voxceleb",
+            "degraded": False, "compared": 1, "skipped_model_mismatch": 0, "warning": None,
+        }
+
+    factory = lambda: _NoCloseSession(db_session)
+    with patch("services.llm_jobs.extract_segment_clips", fake_extract), \
+         patch("services.llm_jobs.voice_id_service.identify_detailed", fake_identify_detailed):
+         asyncio.run(run_llm_job(factory, job.id, transcription_service=None))
+
+    db_session.refresh(t)
+    assert t.segments[0]["speaker"] == "Alice"
+    assert t.segments[1]["speaker"] == "SPEAKER_00"
+    assert t.corrected_text == corrected
+    row = db_session.query(RelabelHistory).filter(RelabelHistory.transcript_id == t.id).one()
+    assert row.inverse["corrected_text"] == corrected
+    assert row.inverse["corrected_text_after"] == corrected

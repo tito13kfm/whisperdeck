@@ -1029,19 +1029,23 @@ async def run_llm_job(SessionLocal, job_id: int, transcription_service, diarizat
             from services.relabel import count_distinct_speakers
             transcript.segments = new_segments
             if transcript.corrected_text and changed:
-                # Build per-index replacement: old speaker → new enrolled name.
-                # changed holds (index, old_speaker); the new name came from
-                # new_segments[index]["speaker"] which was set per-match above
-                # (different indices may map to different enrolled names).
-                replace_by_old: dict[str, str] = {}
+                from collections import Counter
+                orig_counts: Counter[str] = Counter(
+                    (s.get("speaker") or "").strip() for s in segments
+                )
+                changed_by_old: dict[str, list[str]] = {}
                 for c_idx, old_spk in changed:
                     new_spk = (new_segments[c_idx].get("speaker") or "").strip()
                     old_s = (old_spk or "").strip()
                     if old_s and new_spk and old_s != new_spk:
-                        # First writer wins if the same old label maps to
-                        # two enrolled names — shouldn't happen in practice
-                        # (one cluster → one best match), but avoid flip-flop.
-                        replace_by_old.setdefault(old_s, new_spk)
+                        changed_by_old.setdefault(old_s, []).append(new_spk)
+                replace_by_old: dict[str, str] = {}
+                for old_s, new_list in changed_by_old.items():
+                    if len(new_list) != orig_counts.get(old_s, 0):
+                        continue
+                    if len(set(new_list)) != 1:
+                        continue
+                    replace_by_old[old_s] = new_list[0]
                 if replace_by_old:
                     lines = transcript.corrected_text.splitlines()
                     rewritten = []
