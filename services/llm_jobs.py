@@ -905,6 +905,11 @@ async def run_llm_job(SessionLocal, job_id: int, transcription_service, diarizat
             job.progress_total = len(segments)
             job.progress_done = 0
             db.commit()
+            # progress_done commits inside the loop are UI-only (the Queue
+            # polls progress); the transcript write is atomic at the end.
+            # A crash mid-loop leaves segments unchanged and the job landed
+            # on "failed" for a manual rerun — rerun is idempotent, it
+            # rebuilds new_segments from transcript.segments (issue #107).
             # A segment whose probe embedding silently fell back to MFCC, and a
             # segment where every enrolled profile was skipped for using a
             # different embedding model, both produce zero matches without
@@ -1021,10 +1026,14 @@ async def run_llm_job(SessionLocal, job_id: int, transcription_service, diarizat
             entry = None
             if changed:
                 from services.relabel import record_relabel
+                # speaker_after lets undo skip entries whose segment was reordered
+                # or externally replaced since the job wrote them (issue #107).
+                speaker_after_map = {idx: new_segments[idx].get("speaker") or "" for idx, _ in changed}
                 entry = record_relabel(
                     db, transcript, "voice_match", changed,
                     corrected_text_before=transcript.corrected_text if transcript.corrected_text else None,
                     description=f"voice match relabeled {len(changed)} lines",
+                    speaker_after=speaker_after_map,
                 )
             from services.relabel import count_distinct_speakers
             transcript.segments = new_segments
