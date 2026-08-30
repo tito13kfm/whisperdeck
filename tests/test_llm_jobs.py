@@ -917,9 +917,9 @@ def test_run_llm_job_classify_pipeline_accepted_dictation_retroactively_enqueues
     assert ci_job is not None
 
 
-def test_run_llm_job_classify_pipeline_accepted_dictation_mutation_kills_classify_intent(db_session):
-    """Mutation guard: classify_intent body replaced with return None — no
-    classify_intent row must appear, proving the test above is not vacuous."""
+def test_run_llm_job_classify_pipeline_cancel_suppresses_dictation_follow_on(db_session):
+    """Cancel racing between the classification-state commit and _finish must
+    leave the classifier 'cancelled' and enqueue no classify_intent row."""
     user, t = _make_user_and_transcript(db_session)
     t.classification_status = "pending"
     t.kind = "meeting"
@@ -930,15 +930,21 @@ def test_run_llm_job_classify_pipeline_accepted_dictation_mutation_kills_classif
 
     fake_post = AsyncMock(return_value=_FakeResponse('{"kind": "dictation", "confidence": 0.95}'))
     factory = lambda: _NoCloseSession(db_session)
-    from services.llm_jobs import run_llm_job as _real
 
-    async def _mutated(*args, **kwargs):
-        with patch("services.llm_jobs.enqueue_auto_classify", return_value=None):
-            return await _real(*args, **kwargs)
+    import services.llm_jobs as _llm
+    real_finish = _llm._finish
+
+    def _racing_finish(db, j, status, error=None):
+        j.status = "cancelled"
+        db.commit()
+        return real_finish(db, j, status, error=error)
 
     with patch("httpx.AsyncClient.post", fake_post):
-        asyncio.run(_mutated(factory, job.id, transcription_service=None))
+        with patch("services.llm_jobs._finish", side_effect=_racing_finish):
+            asyncio.run(run_llm_job(factory, job.id, transcription_service=None))
 
+    db_session.refresh(job)
+    assert job.status == "cancelled"
     count = db_session.query(LlmJob).filter(LlmJob.transcript_id == t.id, LlmJob.kind == "classify_intent").count()
     assert count == 0
 
