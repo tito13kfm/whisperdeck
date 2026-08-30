@@ -2594,6 +2594,7 @@ async def rename_transcript_speaker(
         db, t, "rename", changed,
         corrected_text_before=t.corrected_text if t.corrected_text else None,
         description=f"rename {old} to {new} ({renamed} lines)",
+        speaker_after={idx: new for idx, _ in changed},
     )
     t.segments = new_segments
     # Renaming A to a name already present elsewhere merges the two, so the
@@ -2652,7 +2653,8 @@ async def retag_transcript_segments(
         for i in sorted(index_set)
     ]
     record_relabel(db, t, "retag", changed,
-                   description=f"retag {len(index_set)} lines to {speaker}")
+                   description=f"retag {len(index_set)} lines to {speaker}",
+                   speaker_after={i: speaker for i, *_ in changed})
     # A retag is the user overriding the diarizer, so the diarizer's
     # confidence in the label it lost no longer describes the line. Stamp the
     # user-assigned sentinel instead of leaving the stale value, which kept
@@ -2695,6 +2697,8 @@ async def undo_last_relabel(
     for patch in entry.inverse.get("segments", []):
         i = patch.get("index")
         if isinstance(i, int) and 0 <= i < len(segments):
+            if "speaker_after" in patch and (segments[i].get("speaker") or "") != patch.get("speaker_after"):
+                continue
             restored = {**segments[i], "speaker": patch.get("speaker") or ""}
             # Retag patches carry the pre-retag confidence (None when the
             # segment never had one, behaviorally the same to the UI); rows

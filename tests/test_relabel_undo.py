@@ -462,3 +462,55 @@ def test_rediarize_clears_a_stale_degraded_note_on_success(client, db_session, t
 
     db_session.expire_all()
     assert db_session.query(Transcript).filter(Transcript.id == t.id).first().error is None
+
+def test_undo_skips_stale_index_after_segment_reorder(client, db_session):
+    """Issue #107: undo's bounds-check alone lets a stale speaker stamp onto
+    a reordered segment. With speaker_after in the patch, the reordered line
+    must be skipped."""
+    t = _transcript(db_session)  # idx0 SPEAKER_00, idx1 SPEAKER_01, idx2 SPEAKER_00
+    r = client.post(f"/api/transcripts/{t.id}/speakers/rename",
+                    json={"from": "SPEAKER_00", "to": "Alice"})
+    assert r.status_code == 200
+    db_session.expire_all()
+    t2 = db_session.query(Transcript).filter(Transcript.id == t.id).first()
+    # Verify history carries speaker_after for backward-compat guard
+    from services.relabel import latest_relabel
+    entry = latest_relabel(db_session, t2.id)
+    assert entry is not None
+    assert any("speaker_after" in p for p in entry.inverse["segments"])
+    # Simulate external reorder: swap segments 0 and 1, so idx0 no longer holds "Alice"
+    segs = list(t2.segments)
+    segs[0], segs[1] = segs[1], segs[0]
+    t2.segments = segs
+    db_session.commit()
+    # Undo should skip idx0 (speaker_after mismatch) and only revert idx2
+    r = client.post(f"/api/transcripts/{t2.id}/relabel-undo")
+    assert r.status_code == 200
+    db_session.expire_all()
+    t3 = db_session.query(Transcript).filter(Transcript.id == t2.id).first()
+    # idx0 was swapped to original idx1's text/speaker (SPEAKER_01-> still Alice after swap? no: segs[0] is original SPEAKER_01 which became Alice? actually rename only touched SPEAKER_00)
+    # After rename: [Alice, SPEAKER_01, Alice]; after swap: [SPEAKER_01, Alice, Alice]
+    # Undo with guard: idx0 skipped (now SPEAKER_01 != Alice), idx2 reverted to SPEAKER_00
+    assert t3.segments[0]["speaker"] == "SPEAKER_01"
+    assert t3.segments[1]["speaker"] == "Alice"
+    assert t3.segments[2]["speaker"] == "SPEAKER_00"
+
+
+def test_undo_backward_compat_no_speaker_after_still_reverts(client, db_session):
+    """Rows recorded before #107 lack speaker_after — undo must still revert them."""
+    from services.relabel import record_relabel
+    t = _transcript(db_session)
+    # Record without speaker_after (legacy shape)
+    record_relabel(db_session, t, "rename", [(0, "SPEAKER_00"), (2, "SPEAKER_00")],
+                   description="legacy")
+    t.segments = [
+        {"start": 0.0, "end": 2.0, "text": "hello there", "speaker": "Alice"},
+        {"start": 2.0, "end": 4.0, "text": "general kenobi", "speaker": "SPEAKER_01"},
+        {"start": 4.0, "end": 6.0, "text": "you are bold", "speaker": "Alice"},
+    ]
+    db_session.commit()
+    r = client.post(f"/api/transcripts/{t.id}/relabel-undo")
+    assert r.status_code == 200
+    db_session.expire_all()
+    t2 = db_session.query(Transcript).filter(Transcript.id == t.id).first()
+    assert [s["speaker"] for s in t2.segments] == ["SPEAKER_00", "SPEAKER_01", "SPEAKER_00"]
