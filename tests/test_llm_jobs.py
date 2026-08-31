@@ -894,6 +894,61 @@ def test_run_llm_job_classify_pipeline_accepted_dictation_does_not_enqueue_voice
     assert count == 0
 
 
+def test_run_llm_job_classify_pipeline_accepted_dictation_retroactively_enqueues_classify_intent(db_session):
+    """Issue #314: accepted dictation must enqueue classify_intent
+    retroactively — auto-classified dictation needs the same reformat hint
+    that an explicit-kind dictation gets at post-transcription time."""
+    user, t = _make_user_and_transcript(db_session)
+    t.classification_status = "pending"
+    t.kind = "meeting"
+    db_session.commit()
+    job = enqueue_llm_job(db_session, user.id, t.id, "classify_pipeline", "groq", "m1")
+    job.status = "running"
+    db_session.commit()
+
+    fake_post = AsyncMock(return_value=_FakeResponse('{"kind": "dictation", "confidence": 0.95}'))
+    factory = lambda: _NoCloseSession(db_session)
+    with patch("httpx.AsyncClient.post", fake_post):
+        asyncio.run(run_llm_job(factory, job.id, transcription_service=None))
+
+    db_session.refresh(t)
+    assert t.kind == "dictation"
+    ci_job = db_session.query(LlmJob).filter(LlmJob.transcript_id == t.id, LlmJob.kind == "classify_intent").first()
+    assert ci_job is not None
+
+
+def test_run_llm_job_classify_pipeline_cancel_suppresses_dictation_follow_on(db_session):
+    """Cancel racing between the classification-state commit and _finish must
+    leave the classifier 'cancelled' and enqueue no classify_intent row."""
+    user, t = _make_user_and_transcript(db_session)
+    t.classification_status = "pending"
+    t.kind = "meeting"
+    db_session.commit()
+    job = enqueue_llm_job(db_session, user.id, t.id, "classify_pipeline", "groq", "m1")
+    job.status = "running"
+    db_session.commit()
+
+    fake_post = AsyncMock(return_value=_FakeResponse('{"kind": "dictation", "confidence": 0.95}'))
+    factory = lambda: _NoCloseSession(db_session)
+
+    import services.llm_jobs as _llm
+    real_finish = _llm._finish
+
+    def _racing_finish(db, j, status, error=None):
+        j.status = "cancelled"
+        db.commit()
+        return real_finish(db, j, status, error=error)
+
+    with patch("httpx.AsyncClient.post", fake_post):
+        with patch("services.llm_jobs._finish", side_effect=_racing_finish):
+            asyncio.run(run_llm_job(factory, job.id, transcription_service=None))
+
+    db_session.refresh(job)
+    assert job.status == "cancelled"
+    count = db_session.query(LlmJob).filter(LlmJob.transcript_id == t.id, LlmJob.kind == "classify_intent").count()
+    assert count == 0
+
+
 def test_worker_tick_io_cap_limits_dispatch(db_session, tmp_path):
     """IO pool cap defaults to 2 — one already-running IO job plus one
     freshly claimed IO job fill it; a third pending IO job must wait."""

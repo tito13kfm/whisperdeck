@@ -662,19 +662,17 @@ async def run_llm_job(SessionLocal, job_id: int, transcription_service, diarizat
             job.result_json = {"kind": result["kind"], "confidence": result["confidence"], "accepted": accepted}
             job.progress_done = 1
             db.commit()
-            # classification_status and kind are committed above, before this
-            # runs — enqueue_auto_voice_note reads effective_kind(), which
-            # depends on both being in their final state. There is no earlier
-            # dispatch-time call site that already knows this transcript's
-            # kind for an 'auto' upload (design decision 11, services/
-            # llm_jobs.py:203 row), so the retroactive trigger lives here.
+            if not _finish(db, job, "completed"):
+                return
+            if accepted and result["kind"] == "dictation":
+                from services.settings import get_user_settings
+                enqueue_auto_classify(db, transcript, get_user_settings(db, job.user_id))
             if accepted and result["kind"] == "voice_note":
                 from services.settings import get_user_settings
                 enqueue_auto_voice_note(db, transcript, get_user_settings(db, job.user_id))
             if accepted and result["kind"] == "voice_dump":
                 from services.settings import get_user_settings
                 enqueue_auto_voice_dump(db, transcript, get_user_settings(db, job.user_id))
-            _finish(db, job, "completed")
         elif job.kind == "tagging":
             # Mirrors classify_intent: single LLM call, progress_total=1,
             # never raises (empty list is a valid completed result).
