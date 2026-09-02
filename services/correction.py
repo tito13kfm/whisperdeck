@@ -8,6 +8,7 @@ docs/superpowers/specs/2026-07-02-hotword-glossary-and-correction-pass-design.md
 for why a same-audio pre-pass was rejected in favor of this approach.
 """
 import json
+import re
 
 from services.hotwords import list_hotwords, add_hotword
 from services.llm_client import chat_completion, JSON_MODE_PROVIDERS
@@ -76,11 +77,11 @@ def _batch_lines(lines: list[str], budget: int = _CHUNK_CHAR_BUDGET, overlap: in
 
 
 def _sanitize_tag_content(text: str, tag: str) -> str:
-    """Escape a closing XML tag inside user-controlled text so the delimiter
-    wrapper cannot be broken out of (e.g. a glossary term containing
-    ``</glossary>``). The replacement is visually close to the original but
-    does not close the outer tag."""
-    return text.replace(f"</{tag}>", f"<\\/{tag}>")  # noqa: W605 - intentional XML escape
+    """Escape closing XML tags inside user-controlled text so the delimiter
+    wrapper cannot be broken out of, including whitespace/case variants
+    (e.g. ``</document >``, ``</Document>``) which are valid XML end tags."""
+    pattern = re.compile(r"</\s*" + re.escape(tag) + r"\s*>", re.IGNORECASE)
+    return pattern.sub(lambda m: m.group(0).replace("</", "<\\/", 1), text)  # noqa: W605
 
 
 async def correct_transcript(
