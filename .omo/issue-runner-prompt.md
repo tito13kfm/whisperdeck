@@ -724,6 +724,18 @@ correcting the bug report, not shipping.
 - [ ] `wrong-directions.md` and `token-usage.md` exist in the run dir
 - [ ] The fix is already committed on the worktree branch (per the "Committing the fix" block at the end of Phase 3) with no AI-authorship trailer
 
+**This run is headless: there is no human watching the session to reply
+"continue."** An unmet box above is not a stopping point. It is the next
+thing you do in this same turn: write the missing file, run the missing
+check, add the missing test, then keep going through Phase 4 yourself.
+Do not end a turn with a status report that proposes a next step or
+invites permission ("say `continue Phase 3.5`," "let me know if you want
+me to proceed," etc.). That is functionally the same failure as opening
+the PR with the gate unmet, just in the other direction: unfinished
+instead of unearned. If a step is genuinely blocked (a tool unavailable,
+a decision only the repo owner can make), say so explicitly and why.
+Don't present ordinary remaining work as something to check in about.
+
 Open against `master`, `Closes #<N>` in the body (the real target issue
 number from Phase 0, not the tracking issue's number) so it auto-closes on
 merge. No AI-authorship trailers (no `Co-Authored-By: Claude`, no

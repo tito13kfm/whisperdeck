@@ -616,6 +616,18 @@ not only to code correctness:
   what you saw) before you can check it. "I'll verify this at the end"
   with no circling back is a skipped gate, not a passed one.
 
+**Invoking this command is pre-authorization to run the workflow end to
+end, including the commit, push, and PR in Phase 4.** An incomplete
+Phase 3.5 checklist is not a stopping point. It is the next thing you do
+in this same turn. Do not end a turn between here and Phase 4 with a
+status report that proposes a next step or invites permission ("say
+`continue Phase 3.5`," "let me know if you want me to proceed," etc.).
+Write the missing file, run the missing check, or fix the missing test
+yourself, then keep going through Phase 4. If a step is genuinely
+blocked (a tool unavailable, a decision only the repo owner can make),
+say so explicitly and why. Don't present ordinary remaining work as
+something to check in about first.
+
 ## Phase 4: PR
 
 Open against `master`, `Closes #<N>` in the body (the real target issue
