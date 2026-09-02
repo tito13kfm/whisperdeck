@@ -4,6 +4,8 @@ api_url e.g. Ollama/Lemonade/LM Studio). Used by correction, summarization,
 and transcript reformatting — each of those owns its own prompts and
 response parsing, but shares this HTTP call shape, default-model/provider
 resolution, and transcript-text prep so the three can't drift apart."""
+import re
+
 import httpx
 
 API_BASES = {
@@ -52,6 +54,18 @@ def resolve_model(provider_name: str, model: str, feature_name: str) -> str:
             f"use groq, openai, openrouter, local, or local_llm."
         )
     return model or DEFAULT_MODELS[provider_name]
+
+
+def sanitize_tag_content(text: str, tag: str) -> str:
+    """Escape closing XML tags inside user-controlled text so a delimiter
+    wrapper built around it (`<tag>...</tag>` with a verbatim-data
+    instruction) cannot be broken out of, including whitespace/case variants
+    (e.g. ``</document >``, ``</Document>``) which are valid XML end tags.
+    Shared by every prompt that wraps raw transcript/user text — see
+    correction.py, reformatting.py, transcription.py, tagging.py,
+    voice_notes.py, classification.py, and assistant.py's summarize step."""
+    pattern = re.compile(r"</\s*" + re.escape(tag) + r"\s*>", re.IGNORECASE)
+    return pattern.sub(lambda m: m.group(0).replace("</", "<\\/", 1), text)  # noqa: W605
 
 
 def transcript_text_for_prompt(transcript, max_chars: int = 80000) -> str:
