@@ -3520,6 +3520,27 @@ async def mark_voice_dump_items_seen(
     return {"marked_seen": updated}
 
 
+@app.delete("/api/voice-dump-items/{item_id}")
+async def delete_voice_dump_item(
+    item_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Remove a single finalized voice-dump item. The underlying transcript
+    is untouched — the item is a derived artifact. Mirrors
+    DELETE /api/voice-notes/{id} (app.py:3236)."""
+    item = (
+        db.query(VoiceDumpItem)
+        .filter(VoiceDumpItem.id == item_id, VoiceDumpItem.user_id == current_user.id)
+        .first()
+    )
+    if not item:
+        raise HTTPException(status_code=404, detail="Voice dump item not found")
+    db.delete(item)
+    db.commit()
+    return {"deleted": item_id}
+
+
 @app.get("/api/transcripts/{transcript_id}/versions")
 async def transcript_versions(
     transcript_id: int,

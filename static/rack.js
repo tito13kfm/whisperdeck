@@ -2791,13 +2791,17 @@ async function discardVoiceNote(id) {
   catch (e) { toast(e.message, 'error'); }
 }
 
+async function discardVoiceDumpItem(id) {
+  if (!(await styledConfirm('Discard this dump note? The transcript stays.'))) return;
+  try { await api('/api/voice-dump-items/' + id, { method: 'DELETE' }); toast('Dump note discarded'); loadVoiceDumpItems(); }
+  catch (e) { toast(e.message, 'error'); }
+}
+
 async function loadVoiceDumpItems() {
   // The Dump notes board: finalized voice-dump items across every
   // transcript, most recent first. Same card grid and note_type
   // vocabulary as loadVoiceNotes() — the difference is the source (one
-  // long stream-of-consciousness capture split into many items) and that
-  // there is no per-item discard here: reviewing, editing and discarding
-  // happen before finalize, on the transcript's own Dump Review tab.
+  // long stream-of-consciousness capture split into many items).
   const root = $('page-dumpnotes');
   refreshRailChrome();
   let data;
@@ -2840,6 +2844,7 @@ async function loadVoiceDumpItems() {
         ${preview ? '<div style="font-size:12.5px;line-height:1.5;color:var(--body);white-space:pre-wrap;margin-bottom:8px">' + escapeHtml(preview) + '</div>' : ''}
         ${structuredBits ? '<div style="margin-top:8px">' + structuredBits + '</div>' : ''}
         <div style="display:flex;gap:6px;margin-top:12px;justify-content:flex-end">
+          <button class="btn" data-vdact="discard" data-vdid="${n.id}" style="font-size:10px;padding:4px 10px">Discard</button>
           <button class="btn" data-vdact="open" data-tid="${n.transcript_id}" style="font-size:10px;padding:4px 10px">Open →</button>
         </div>
       </div>`;
@@ -2853,6 +2858,7 @@ async function loadVoiceDumpItems() {
   root.querySelectorAll('[data-vdact]').forEach(b => b.addEventListener('click', (e) => {
     e.stopPropagation();
     if (b.dataset.vdact === 'open') navigate('detail', Number(b.dataset.tid));
+    else if (b.dataset.vdact === 'discard') discardVoiceDumpItem(Number(b.dataset.vdid));
   }));
   root.querySelectorAll('.voice-dump-card').forEach(c => c.addEventListener('click', () => {
     navigate('detail', Number(c.dataset.tid));
