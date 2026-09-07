@@ -737,3 +737,50 @@ def test_finalize_continues_sequence_index_from_existing_max(client, db_session)
     r = client.post(f"/api/transcripts/{t.id}/voice-dump/finalize", json=[{"type": "todo", "title": "New", "body": "y"}])
     assert r.status_code == 200
     assert r.json()["items"][0]["sequence_index"] == 6
+
+
+# ── DELETE /voice-dump-items/{id} (issue #312) ──────────────────────────
+
+
+def test_delete_voice_dump_item_removes_row_only(client, db_session):
+    user, t = _make_voice_dump_transcript(db_session)
+    item = VoiceDumpItem(
+        user_id=user.id, transcript_id=t.id, sequence_index=0,
+        note_type="todo", title="Do X", body="x", structured={}, model="m", provider="p",
+    )
+    db_session.add(item)
+    db_session.commit()
+
+    r = client.delete(f"/api/voice-dump-items/{item.id}")
+    assert r.status_code == 200
+    assert r.json()["deleted"] == item.id
+
+    assert db_session.query(VoiceDumpItem).filter(VoiceDumpItem.id == item.id).first() is None
+    assert db_session.query(Transcript).filter(Transcript.id == t.id).first() is not None
+
+
+def test_delete_voice_dump_item_404_for_missing_id(client, db_session):
+    r = client.delete("/api/voice-dump-items/999999")
+    assert r.status_code == 404
+
+
+def test_delete_voice_dump_item_404_for_other_users_item(client, db_session):
+    other = User(username="other_vdump", password_hash="x", password_salt="y")
+    db_session.add(other)
+    db_session.commit()
+    t = Transcript(
+        user_id=other.id, title="vd", filename="f.mp3", status="completed",
+        full_text="x", segments=[], kind="voice_dump",
+    )
+    db_session.add(t)
+    db_session.commit()
+    item = VoiceDumpItem(
+        user_id=other.id, transcript_id=t.id, sequence_index=0,
+        note_type="idea", title="X", body="x", structured={}, model="m", provider="p",
+    )
+    db_session.add(item)
+    db_session.commit()
+
+    r = client.delete(f"/api/voice-dump-items/{item.id}")
+    assert r.status_code == 404
+    assert db_session.query(VoiceDumpItem).filter(VoiceDumpItem.id == item.id).first() is not None
