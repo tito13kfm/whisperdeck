@@ -457,3 +457,75 @@ def test_transcribe_start_posts_kind_voice_dump(page_no_sw, registered_user, tmp
         f"expected exactly one intercepted /api/transcribe request carrying "
         f"kind=voice_dump, got {intercepted_kinds}"
     )
+
+
+# 8. Discard button: DELETE request, board refresh, no card-navigation leak.
+
+
+def test_dumpnotes_discard_removes_card_without_navigating(page_no_sw, registered_user):
+    """Issue #312's acceptance criterion, the click path itself: the button
+    click must not also trigger the card's own navigate('detail', ...)
+    handler (guarded by e.stopPropagation() at rack.js's [data-vdact]
+    listener), the DELETE must actually reach the server for this item's
+    id, and the board must re-render with the item gone and the header
+    count decremented.
+
+    Uses page_no_sw (not the shared `page` fixture) for the same reason as
+    test 7: this test asserts on a live /api/* request via
+    expect_request(), and sw.js's fetch handler reissues those requests
+    from the service worker's own scope where a page-level assertion may
+    not reliably observe them.
+
+    By this point in the shared-user module, tests 3 and 5 have already
+    seeded 3 dump items onto the board, so this test seeds its own item
+    with a unique title and locates it by text rather than assuming a
+    card count or position.
+    """
+    page = page_no_sw
+    username, password = registered_user
+    _login(page, username, password)
+
+    unique_title = "Discard-me unique title for issue 312"
+    _seed_voice_dump_items(username, [
+        {
+            "note_type": "general", "title": unique_title,
+            "body": "This item exists only to be discarded by this test.",
+            "transcript_title": "Discard target recording",
+            "created_at": utcnow_naive(),
+        },
+    ])
+
+    page.locator("button[data-nav='dumpnotes']").click()
+    page.wait_for_selector("#page-dumpnotes.active", timeout=5000)
+    page.wait_for_selector(".voice-dump-card", timeout=5000)
+
+    cards_before = page.locator(".voice-dump-card").count()
+
+    card = page.locator(".voice-dump-card").filter(has_text=unique_title)
+    assert card.count() == 1
+    discard_btn = card.locator('[data-vdact="discard"]')
+    item_id = discard_btn.get_attribute("data-vdid")
+    assert item_id, "discard button carries no data-vdid"
+
+    discard_btn.click()
+
+    page.wait_for_selector("#styled-confirm-ok", timeout=5000)
+    assert "discard this dump note" in page.locator("#modal-box").inner_text().lower()
+
+    with page.expect_request(
+        lambda r: r.method == "DELETE" and r.url.endswith(f"/api/voice-dump-items/{item_id}"),
+        timeout=5000,
+    ):
+        page.click("#styled-confirm-ok")
+
+    page.wait_for_selector(
+        f".voice-dump-card:has-text('{unique_title}')", state="detached", timeout=5000,
+    )
+    assert page.locator(".voice-dump-card").count() == cards_before - 1
+
+    status_text = page.locator("#page-dumpnotes .page-status").inner_text().lower()
+    assert status_text == f"{cards_before - 1} notes"
+
+    # The regression this test exists for: discarding must not also fire
+    # the card's own click-to-navigate handler.
+    assert "active" in (page.locator("#page-dumpnotes").get_attribute("class") or "")
