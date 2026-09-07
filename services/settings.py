@@ -145,15 +145,25 @@ def _decrypt_key_if_needed(encrypted: str, session_secret: str = "") -> str:
         return ""
 
 
+def get_provider_config(db, user_id: int, name: str):
+    """Fetch the saved ProviderConfig row for a user+name, or None.
+    This is the one raw-query site; all other callers go through it (or
+    through resolve_provider_key which calls it). Providers that need
+    'first active' semantics or create-on-upsert keep their own query and
+    are documented at the call site."""
+    from database import ProviderConfig  # local import avoids a module-load cycle
+
+    return (
+        db.query(ProviderConfig)
+        .filter(ProviderConfig.user_id == user_id, ProviderConfig.name == name)
+        .first()
+    )
+
+
 def resolve_provider_key(db, user_id: int, provider: str) -> tuple[str, dict]:
     """The one place API keys are drawn from: the user's ProviderConfig pool.
     Returns (api_key, provider_config); both empty when nothing is saved."""
-    from database import ProviderConfig  # local import avoids a module-load cycle
-    cfg = (
-        db.query(ProviderConfig)
-        .filter(ProviderConfig.user_id == user_id, ProviderConfig.name == provider)
-        .first()
-    )
+    cfg = get_provider_config(db, user_id, provider)
     if not cfg:
         return "", {}
     _secret = _get_cached_secret()
@@ -164,6 +174,25 @@ def resolve_provider_key(db, user_id: int, provider: str) -> tuple[str, dict]:
         "api_url": cfg.api_url or "",
         "default_model": cfg.default_model or "",
     }
+
+
+def require_provider_key(db, user_id: int, provider: str) -> str:
+    """Resolve the key for `provider` and guard the 'key required' invariant.
+
+    Returns the (decrypted) api_key on success. Raises HTTP 400 with the
+    canonical message when a keyed provider has no key saved. Local/keyless
+    providers never raise. The message wording is the contract — every LLM
+    route must use this so the hint does not drift again.
+    """
+    from fastapi import HTTPException
+
+    api_key, _ = resolve_provider_key(db, user_id, provider)
+    if provider not in KEYLESS_PROVIDERS and not api_key:
+        raise HTTPException(
+            status_code=400,
+            detail=f"No {provider} API key saved — add one in the service panel",
+        )
+    return api_key
 
 
 def get_user_settings(db, user_id: int) -> dict:
