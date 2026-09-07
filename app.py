@@ -710,6 +710,8 @@ def _build_status_payload(db: Session, current_user: User) -> dict:
         VoiceDumpItem.user_id == current_user.id, VoiceDumpItem.seen_at == None  # noqa: E711
     ).count()
 
+    # Intentionally raw: 'first active provider' has no name filter,
+    # so get_provider_config(name=...) does not apply.
     active_prov = db.query(ProviderConfig).filter(
         ProviderConfig.user_id == current_user.id, ProviderConfig.is_active == True  # noqa: E712
     ).first()
@@ -1157,11 +1159,10 @@ async def get_providers(db: Session = Depends(get_db), current_user: User = Depe
     """List available providers with their metadata."""
     providers = list_providers()
     # Merge in saved config status
+    from services.settings import get_provider_config
+
     for p in providers:
-        saved = db.query(ProviderConfig).filter(
-            ProviderConfig.user_id == current_user.id,
-            ProviderConfig.name == p["id"],
-        ).first()
+        saved = get_provider_config(db, current_user.id, p["id"])
         if saved:
             p["configured"] = bool(saved.api_key)
             p["is_active"] = saved.is_active
@@ -1184,10 +1185,9 @@ async def get_providers(db: Session = Depends(get_db), current_user: User = Depe
 
 @app.get("/api/providers/{name}")
 async def get_provider_config(name: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    cfg = db.query(ProviderConfig).filter(
-        ProviderConfig.user_id == current_user.id,
-        ProviderConfig.name == name,
-    ).first()
+    from services.settings import get_provider_config as _get_provider_config
+
+    cfg = _get_provider_config(db, current_user.id, name)
     if not cfg:
         return {"name": name, "api_key": "", "api_url": "", "default_model": "", "is_active": False}
     return {
@@ -1203,6 +1203,8 @@ async def get_provider_config(name: str, db: Session = Depends(get_db), current_
 
 @app.put("/api/providers/{name}")
 async def update_provider_config(name: str, data: dict = Body(...), db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    # Intentionally raw: upsert path — must create ProviderConfig when none
+    # exists; get_provider_config is read-only and would not help here.
     cfg = db.query(ProviderConfig).filter(
         ProviderConfig.user_id == current_user.id,
         ProviderConfig.name == name,
@@ -1239,20 +1241,11 @@ async def list_provider_models(name: str, db: Session = Depends(get_db), current
     if name not in known:
         raise HTTPException(status_code=404, detail=f"Unknown provider: {name}")
 
-    # Get saved config
-    cfg = db.query(ProviderConfig).filter(
-        ProviderConfig.user_id == current_user.id,
-        ProviderConfig.name == name,
-    ).first()
-    prov_config = {}
-    if cfg:
-        prov_config = {
-            "api_key": cfg.api_key or "",
-            "api_url": cfg.api_url or "",
-            "default_model": cfg.default_model or "",
-        }
+    from services.settings import resolve_provider_key
 
-    # Also grab site_url/site_name for OpenRouter
+    _, prov_config = resolve_provider_key(db, current_user.id, name)
+    # Enrich with OpenRouter-specific extras (resolve_provider_key only
+    # returns api_key/api_url/default_model).
     prov_config["site_url"] = prov_config.get("site_url", "")
     prov_config["site_name"] = "WhisperDeck"
 
@@ -2887,10 +2880,9 @@ async def summarize_transcript(
         raise HTTPException(status_code=400, detail="Voice notes have their own structured summary — see the Notes tab; the meeting-style summary doesn't apply")
     if t.status != "completed":
         raise HTTPException(status_code=400, detail=f"Transcript {transcript_id} is not completed")
-    from services.settings import resolve_provider_key, KEYLESS_PROVIDERS
-    api_key, _ = resolve_provider_key(db, current_user.id, provider)
-    if provider not in KEYLESS_PROVIDERS and not api_key:
-        raise HTTPException(status_code=400, detail=f"No {provider} API key saved — add one in the service panel")
+    from services.settings import require_provider_key
+
+    require_provider_key(db, current_user.id, provider)
 
     job = enqueue_llm_job(db, current_user.id, transcript_id, "summary", provider, model)
     return {"job": serialize_llm_job(job)}
@@ -2932,10 +2924,9 @@ async def format_transcript(
         raise HTTPException(status_code=400, detail="Reformatting is only available for dictation transcripts")
     if t.status != "completed":
         raise HTTPException(status_code=400, detail=f"Transcript {transcript_id} is not completed")
-    from services.settings import resolve_provider_key, KEYLESS_PROVIDERS
-    api_key, _ = resolve_provider_key(db, current_user.id, provider)
-    if provider not in KEYLESS_PROVIDERS and not api_key:
-        raise HTTPException(status_code=400, detail=f"No {provider} API key saved — add one in the service panel")
+    from services.settings import require_provider_key
+
+    require_provider_key(db, current_user.id, provider)
 
     job = enqueue_llm_job(db, current_user.id, transcript_id, kind, provider, model)
     return {"job": serialize_llm_job(job)}
@@ -3019,10 +3010,9 @@ async def correct_transcript_route(
     if transcript.status not in ("completed", "partial"):
         raise HTTPException(status_code=400, detail=f"Transcript {transcript_id} is not completed")
 
-    from services.settings import resolve_provider_key, KEYLESS_PROVIDERS
-    api_key, provider_config = resolve_provider_key(db, current_user.id, provider)
-    if provider not in KEYLESS_PROVIDERS and not api_key:
-        raise HTTPException(status_code=400, detail=f"No {provider} API key saved — add one in the service panel")
+    from services.settings import require_provider_key
+
+    require_provider_key(db, current_user.id, provider)
 
     job = enqueue_llm_job(db, current_user.id, transcript_id, "correction", provider, model)
     return {"job": serialize_llm_job(job)}
@@ -3277,10 +3267,9 @@ async def rerun_voice_note_chain(
         raise HTTPException(status_code=400, detail="Voice-note chain only applies to voice_note transcripts")
     if t.status not in ("completed", "partial"):
         raise HTTPException(status_code=400, detail=f"Transcript {transcript_id} is not completed")
-    from services.settings import resolve_provider_key, KEYLESS_PROVIDERS
-    api_key, _ = resolve_provider_key(db, current_user.id, provider)
-    if provider not in KEYLESS_PROVIDERS and not api_key:
-        raise HTTPException(status_code=400, detail=f"No {provider} API key saved — add one in the service panel")
+    from services.settings import require_provider_key
+
+    require_provider_key(db, current_user.id, provider)
     job = enqueue_llm_job(db, current_user.id, transcript_id, "voice_note", provider, model)
     return {"job": serialize_llm_job(job)}
 
@@ -3307,10 +3296,9 @@ async def rerun_voice_dump_chain(
         raise HTTPException(status_code=400, detail=f"Transcript {transcript_id} is not completed")
     if db.query(VoiceDumpItem).filter(VoiceDumpItem.transcript_id == transcript_id).first() is not None:
         raise HTTPException(status_code=409, detail="Already finalized — rerun not allowed")
-    from services.settings import resolve_provider_key, KEYLESS_PROVIDERS
-    api_key, _ = resolve_provider_key(db, current_user.id, provider)
-    if provider not in KEYLESS_PROVIDERS and not api_key:
-        raise HTTPException(status_code=400, detail=f"No {provider} API key saved — add one in the service panel")
+    from services.settings import require_provider_key
+
+    require_provider_key(db, current_user.id, provider)
     try:
         db.execute(text("BEGIN IMMEDIATE"))
     except OperationalError as e:
@@ -3610,10 +3598,9 @@ async def correction_models(provider: str, db: Session = Depends(get_db), curren
     local_llm_api_url = None
     local_llm_api_key = None
     if provider == "local_llm":
-        cfg = db.query(ProviderConfig).filter(
-            ProviderConfig.user_id == current_user.id,
-            ProviderConfig.name == "local_llm",
-        ).first()
+        from services.settings import get_provider_config as _get_llm_cfg
+
+        cfg = _get_llm_cfg(db, current_user.id, "local_llm")
         if cfg:
             local_llm_api_url = cfg.api_url
             local_llm_api_key = cfg.api_key
@@ -3719,10 +3706,9 @@ async def assistant_request(
     provider = user_settings.get("correction_provider", "local_llm")
     model = user_settings.get("correction_model", "gpt-oss-20b-mxfp4-GGUF")
 
-    from services.settings import resolve_provider_key, KEYLESS_PROVIDERS
-    api_key, _ = resolve_provider_key(db, current_user.id, provider)
-    if provider not in KEYLESS_PROVIDERS and not api_key:
-        raise HTTPException(status_code=400, detail=f"No {provider} API key saved")
+    from services.settings import require_provider_key
+
+    require_provider_key(db, current_user.id, provider)
 
     job = enqueue_llm_job(db, current_user.id, None, "assistant", provider, model)
     job.result_json = {"user_request": request}
