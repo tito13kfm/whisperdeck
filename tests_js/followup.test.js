@@ -372,3 +372,25 @@ test('materializeFinalizeItems tolerates malformed input', () => {
   assert.deepEqual(materializeFinalizeItems(null), []);
   assert.deepEqual(materializeFinalizeItems('nope'), []);
 });
+
+test('a PERSISTED apply-phase draft wins over the input it overlays', () => {
+  // save-draft stores an apply-phase draft in the full input[] shape, so its
+  // answers come back as pairs, not bare strings. Reading only the string
+  // form silently reverted the saved edit to the original answer on reload.
+  const input = [{
+    key: 'a0', source_bucket: 'action_items', source_index: 0, source_text: 'Dana fixes login',
+    type: 'action_item', owner: '', due: '', private: false,
+    answers: [{ question: 'By when?', answer: 'Friday' }],
+  }];
+  const persistedDraft = [{
+    key: 'a0', source_bucket: 'action_items', source_index: 0, source_text: 'Dana fixes login',
+    type: 'action_item', owner: 'Dana', due: '', private: true,
+    answers: [{ question: 'By when?', answer: 'Monday' }],
+  }];
+  const [item] = normalizeFollowupItems(input, persistedDraft);
+  assert.deepEqual(item.answers, ['Monday']);
+  assert.equal(item.owner, 'Dana');
+  assert.equal(item.private, true);
+  assert.deepEqual(materializeApplyInput([item])[0].answers,
+    [{ question: 'By when?', answer: 'Monday' }]);
+});

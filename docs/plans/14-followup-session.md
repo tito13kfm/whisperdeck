@@ -170,7 +170,8 @@ apply: {
            private, answers: [{question, answer}]}],
   proposals: [{key, source_bucket, source_index, text, type, owner, due,
                confidence, changed, note}],
-  draft?: [...],
+  draft?: [...],            # full input[] shape, NOT the sparse posted list
+  review_draft?: [{key, type, text, owner, due, private, discarded}],
   finalized_at?: "<iso>",   # written by finalize, in the insert transaction
   finalized_count?: <int>
 }
@@ -265,7 +266,9 @@ Two things that separates it from the draft path, both deliberate:
 - **Its own key.** `rerun_llm_job` promotes `draft` into the next job's `input[]`, and a review overlay carries the rewritten `text` rather than `source_text` / `answers`. Sharing the key would feed the wrong shape into a Queue-screen Retry, so the review overlay is `review_draft` and never collides.
 - **Its own predicate.** `_followup_save_editable` is a superset of `_followup_draft_editable`, used by save-draft only. Widening the shared predicate would also make the Apply route accept a completed apply job, which would let the review screen silently enqueue a second apply. `followupState` still reports `review` for this state; only savability changed.
 
-**"Draft-editable"** means the latest `followup` job is either `phase="generate"` and `status="completed"`, or `phase="apply"` and `status` in (`failed`, `cancelled`). In the second case the generate job is no longer the latest job, so the editable draft is read from `result_json["input"]`, keys are validated against `input`, and the next Apply enqueues a fresh apply job carrying `generate_job_id` forward. `followupState` mirrors this: the `apply_failed` state exposes `input` as the draft.
+**"Draft-editable"** means the latest `followup` job is either `phase="generate"` and `status="completed"`, or `phase="apply"` and `status` in (`failed`, `cancelled`). In the second case the generate job is no longer the latest job, so the editable draft is read from `result_json["draft"] or result_json["input"]` (a saved draft wins, matching the promotion in `rerun_llm_job`; the two are the only paths from a failed apply job to the next `input[]`, so if they disagree an edit survives one route and is reverted by the other). Keys are validated against that same list, and the next Apply enqueues a fresh apply job carrying `generate_job_id` forward.
+
+Slice 4 reads the same pair: the `apply_failed` cards bind to `result_json.draft || result_json.input`. Note that a persisted apply-phase draft is stored in the **full `input[]` shape**, so its `answers` come back as `{question, answer}` pairs rather than the bare strings the draft screen posts. `normalizeFollowupItems` accepts either, and the draft's value wins over the source in both shapes.
 
 Note the envelope difference from voice dump: `POST .../voice-dump/save-draft` (`app.py:3315`) takes a bare item array as the body (see the comment at `static/rack.js:5390-5391`), while follow-up's `save-draft` takes `{"items": [...]}`. The JS module and the route must agree on the envelope; do not copy the voice-dump call shape.
 
@@ -281,7 +284,9 @@ Settings: `followup_provider: "local_llm"` and `followup_model: "gpt-oss-20b-mxf
 
 ### Frontend
 
-**New pure CommonJS module `static/followup.js`**, templated on `static/dump_review.js` (which ends with `module.exports` at `:80`). Exports: `FOLLOWUP_ITEM_TYPES`, `FOLLOWUP_TYPE_LABELS`, `followupState(job)`, `normalizeFollowupItems(items, draft)`, `sortForReview`, `materializeApplyInput`, `normalizeProposals`, `materializeFinalizeItems`, `summaryStale(summary, job)`. No DOM and no globals, so `node --test` can load it directly; esbuild inlines it into the bundle.
+**New pure CommonJS module `static/followup.js`**, templated on `static/dump_review.js` (which ends with `module.exports` at `:80`). Exports: `FOLLOWUP_ITEM_TYPES`, `FOLLOWUP_TYPE_LABELS`, `followupState(job)`, `normalizeFollowupItems(items, draft)`, `sortForReview`, `materializeApplyInput`, `normalizeProposals(proposals, draft)`, `materializeFinalizeItems`, `summaryStale(summary, job)`.
+
+What slice 4 passes as each `draft` argument: `normalizeFollowupItems` gets `result_json.draft || result_json.input` (see "Draft-editable"), and `normalizeProposals` gets `result_json.review_draft` on the review screen. Those are two different keys holding two different shapes, deliberately, so a Queue-screen Retry cannot pick up a review overlay. No DOM and no globals, so `node --test` can load it directly; esbuild inlines it into the bundle.
 
 Two signatures to get right, both settled above: `followupState` takes the job **alone** (no `finalizedRows`; `finalized` is `job.result_json.finalized_at`), and `summaryStale` compares `summary.created_at !== job.result_json.summary_snapshot.created_at` — never a job timestamp. `materializeApplyInput` copies `source_bucket` and `source_index` through from the generate items.
 

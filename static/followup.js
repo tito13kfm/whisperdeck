@@ -90,11 +90,23 @@ function normalizeFollowupItems(items, draft) {
     const questions = Array.isArray(src.questions)
       ? src.questions.filter((q) => typeof q === 'string' && q.trim())
       : pairs.map((a) => a.question).filter((q) => q.trim());
+    // The draft arrives in either of two shapes and both must win over the
+    // source: bare strings while the user is still typing in this session,
+    // and pair form once save-draft has persisted it (the server stores an
+    // apply-phase draft in the full input[] shape, via _followup_input_entry).
+    // Reading only the string form would silently revert a saved edit to the
+    // original answer on reload.
     const draftAnswers = Array.isArray(d.answers) ? d.answers : [];
+    const answerAt = (list, qi) => {
+      const a = list[qi];
+      if (typeof a === 'string') return a;
+      if (a && typeof a === 'object' && typeof a.answer === 'string') return a.answer;
+      return null;
+    };
     const answers = questions.map((_, qi) => {
-      if (typeof draftAnswers[qi] === 'string') return draftAnswers[qi];
-      const carried = pairs[qi];
-      return (carried && typeof carried.answer === 'string') ? carried.answer : '';
+      const edited = answerAt(draftAnswers, qi);
+      if (edited !== null) return edited;
+      return answerAt(pairs, qi) ?? '';
     });
     return {
       key,
