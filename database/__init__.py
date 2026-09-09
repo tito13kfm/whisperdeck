@@ -2,7 +2,7 @@
 import datetime
 from sqlalchemy import (
     Column, Integer, String, Text, Float, DateTime, ForeignKey,
-    JSON, Boolean, UniqueConstraint, create_engine, event, inspect, text
+    Index, JSON, Boolean, UniqueConstraint, create_engine, event, inspect, text
 )
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker
 
@@ -90,6 +90,7 @@ class Transcript(Base):
     summary = relationship("Summary", back_populates="transcript", uselist=False, cascade="all, delete-orphan")
     voice_note = relationship("VoiceNote", back_populates="transcript", uselist=False, cascade="all, delete-orphan")
     voice_dump_items = relationship("VoiceDumpItem", back_populates="transcript", cascade="all, delete-orphan")
+    followup_items = relationship("FollowupItem", back_populates="transcript", cascade="all, delete-orphan")
     jobs = relationship("TranscriptionJob", back_populates="transcript", cascade="all, delete-orphan")
     # ORM-level cascade is load-bearing: the FK's ondelete="CASCADE" never
     # fires because SQLite's foreign_keys pragma is off (never enabled by
@@ -234,6 +235,60 @@ class VoiceDumpItem(Base):
     seen_at = Column(DateTime, nullable=True)  # NULL = unseen; set when user visits Dump Notes board
 
     transcript = relationship("Transcript", back_populates="voice_dump_items")
+
+
+class FollowupItem(Base):
+    """One finalized follow-up item for a meeting summary (issue #253).
+
+    The follow-up feature runs a two-phase LlmJob(kind="followup"): a
+    `generate` phase asks clarifying questions about the flat summary
+    bullets, an `apply` phase rewrites each item into one self-contained
+    sentence that folds the user's answers in. Nothing durable exists until
+    the user confirms — these rows are written only by the finalize route,
+    from the apply job's `result_json["proposals"]`.
+
+    Row existence is deliberately NOT the definition of "finalized": that is
+    `result_json["finalized_at"]` on the apply job. Repeated follow-ups on
+    one transcript are allowed by design, and an all-discarded finalize
+    writes zero rows yet still closes the review card. The unique constraint
+    below is the last-resort integrity net behind that marker.
+
+    `source_bucket` / `source_index` are carried explicitly from the summary
+    snapshot (never reverse-parsed out of the opaque routing key) because
+    #245 ingestion dedupes on them.
+    """
+    __tablename__ = "followup_items"
+    __table_args__ = (
+        # sequence_index restarts at 0 for every apply job (not a
+        # transcript-wide offset like VoiceDumpItem), so a double finalize of
+        # the same job collides here and the route can turn it into a 409.
+        UniqueConstraint("source_job_id", "sequence_index", name="uq_followup_item_job_seq"),
+        Index("ix_followup_items_transcript_id", "transcript_id"),
+        Index("ix_followup_items_user_id_item_type", "user_id", "item_type"),
+    )
+
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    transcript_id = Column(
+        Integer, ForeignKey("transcripts.id", ondelete="CASCADE"), nullable=False,
+    )
+    source_job_id = Column(Integer, ForeignKey("llm_jobs.id"), nullable=False)  # the apply-phase LlmJob
+    sequence_index = Column(Integer, nullable=False)  # numbered from 0 per apply job
+    item_type = Column(String(16), nullable=False)  # one of FOLLOWUP_ITEM_TYPES (services/followups.py)
+    text = Column(Text, nullable=False)  # the final, self-contained sentence
+    owner = Column(String(255), default="")
+    due = Column(String(64), nullable=True)  # ISO when strictly parseable, else the free text as given
+    private = Column(Boolean, default=False)  # excluded from the apply rewrite; no other consumer yet (#245)
+    confidence = Column(Float, nullable=True)  # advisory only — sorts the review cards
+    source_bucket = Column(String(16), nullable=False)  # key_points | action_items | decisions
+    source_index = Column(Integer, nullable=False)  # index within that bucket in the snapshot
+    source_text = Column(Text, default="")  # the original bare summary string
+    clarifications = Column(JSON, default=list)  # [{"question": str, "answer": str}]
+    model = Column(String(128), default="")
+    provider = Column(String(64), default="")
+    created_at = Column(DateTime, default=utcnow_naive)
+
+    transcript = relationship("Transcript", back_populates="followup_items")
 
 
 class TranscriptTag(Base):
@@ -887,7 +942,7 @@ def init_db(db_path: str = "data/whisperdesk.db") -> tuple:
 
 
 __all__ = [
-    "Base", "User", "Transcript", "Summary", "VoiceNote", "VoiceProfile", "VoiceClip", "ProviderConfig", "TranscriptionJob", "LlmJob", "RelabelHistory", "HotwordEntry", "TranscriptTag",
+    "Base", "User", "Transcript", "Summary", "VoiceNote", "VoiceProfile", "VoiceClip", "ProviderConfig", "TranscriptionJob", "LlmJob", "RelabelHistory", "HotwordEntry", "TranscriptTag", "FollowupItem",
     "init_db", "migrate_schema", "backfill_user_id", "ensure_columns", "ensure_nullable_llm_job_transcript_id", "backfill_llm_job_result_snapshots",
     "backfill_legacy_classification", "classification_columns_were_absent",
 ]
