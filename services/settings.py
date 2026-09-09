@@ -75,6 +75,11 @@ DEFAULT_SETTINGS = {
     "correction_model": "gpt-oss-20b-mxfp4-GGUF",
     "summary_provider": "local_llm",
     "summary_model": "gpt-oss-20b-mxfp4-GGUF",
+    # Follow-up session (issue #253) — the second pass over a finished
+    # summary. Manual trigger only, so this pair is read by the Summary
+    # tab's picker and by nothing automatic.
+    "followup_provider": "local_llm",
+    "followup_model": "gpt-oss-20b-mxfp4-GGUF",
     "format_provider": "local_llm",
     "format_model": "gpt-oss-20b-mxfp4-GGUF",
     "classification_provider": "local_llm",
