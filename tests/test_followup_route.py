@@ -947,3 +947,189 @@ def test_apply_without_provider_uses_the_stored_setting(client, db_session):
     job = db_session.get(LlmJob, r.json()["job"]["id"])
     assert job.provider == "local_llm"
     assert job.model == "stored-model"
+
+
+# ── The apply_failed retry must not lose the user's answers ───────────────
+# input[] entries carry pair-form answers and no `questions` key. Reading only
+# `questions` (on either side of the wire) left the answers empty and dropped
+# everything the user typed on the way back to Apply, which is exactly the
+# loss keeping followup out of AUTO_RETRY_KINDS exists to prevent.
+
+def _failed_apply_job(db_session, t, **extra):
+    return _seed_job(
+        db_session, t, "apply", "failed",
+        summary_snapshot={"created_at": "2026-01-01T00:00:00"},
+        generate_job_id=1,
+        input=[_input_item(answers=[{"question": "By when?", "answer": "Friday"}])],
+        **extra,
+    )
+
+
+def test_save_draft_on_a_failed_apply_keeps_the_question_text(client, db_session):
+    """A bare-string answer posted against an input[] entry has no questions
+    list to match against; the question has to come back out of the stored
+    pairs, or it is silently replaced by an empty string."""
+    user, t, _ = _make_meeting(db_session)
+    job = _failed_apply_job(db_session, t)
+    r = client.post(f"/api/transcripts/{t.id}/followup/save-draft", json={
+        "items": [{"key": "a0", "type": "action_item", "owner": "", "due": "",
+                   "private": False, "answers": ["Monday"]}],
+    })
+    assert r.status_code == 200, r.text
+    db_session.refresh(job)
+    assert job.result_json["draft"][0]["answers"] == [
+        {"question": "By when?", "answer": "Monday"}
+    ]
+
+
+def test_apply_from_a_failed_apply_carries_the_stored_answers(client, db_session):
+    """Re-applying without re-posting the answers keeps them."""
+    user, t, _ = _make_meeting(db_session)
+    _failed_apply_job(db_session, t)
+    r = client.post(f"/api/transcripts/{t.id}/followup/apply", json={
+        "items": [{"key": "a0", "type": "action_item", "owner": "", "due": "",
+                   "private": False}],
+    })
+    assert r.status_code == 200, r.text
+    job = db_session.get(LlmJob, r.json()["job"]["id"])
+    assert job.result_json["input"][0]["answers"] == [
+        {"question": "By when?", "answer": "Friday"}
+    ]
+
+
+def test_apply_can_still_clear_an_answer(client, db_session):
+    """An explicitly posted empty list clears, so carrying forward on an
+    omitted key does not make an answer impossible to delete."""
+    user, t, _ = _make_meeting(db_session)
+    _failed_apply_job(db_session, t)
+    r = client.post(f"/api/transcripts/{t.id}/followup/apply", json={
+        "items": [{"key": "a0", "type": "action_item", "owner": "", "due": "",
+                   "private": False, "answers": []}],
+    })
+    assert r.status_code == 200, r.text
+    job = db_session.get(LlmJob, r.json()["job"]["id"])
+    assert job.result_json["input"][0]["answers"] == []
+
+
+def test_draft_source_prefers_a_saved_draft_over_input(client, db_session):
+    """Mirrors rerun_llm_job's promotion. If the two disagree, a draft edit
+    survives the Queue screen's Retry but is reverted by the Summary tab."""
+    user, t, _ = _make_meeting(db_session)
+    _failed_apply_job(db_session, t, draft=[_input_item(
+        owner="Dana", answers=[{"question": "By when?", "answer": "Monday"}])])
+    r = client.post(f"/api/transcripts/{t.id}/followup/apply", json={
+        "items": [{"key": "a0", "type": "action_item", "owner": "", "due": "",
+                   "private": False}],
+    })
+    assert r.status_code == 200, r.text
+    job = db_session.get(LlmJob, r.json()["job"]["id"])
+    assert job.result_json["input"][0]["answers"] == [
+        {"question": "By when?", "answer": "Monday"}
+    ]
+
+
+def test_finalize_rejects_an_item_that_lost_its_provenance(client, db_session):
+    """A missing source_bucket/source_index would violate the two NOT NULL
+    columns and surface as a false "already finalized" 409."""
+    user, t, _ = _make_meeting(db_session)
+    proposal = _proposal()
+    proposal.pop("source_bucket")
+    job = _apply_job(db_session, t, inputs=[], proposals=[proposal])
+    r = client.post(f"/api/transcripts/{t.id}/followup/finalize", json={
+        "items": [{"key": "a0", "type": "action_item", "text": "Ship it.",
+                   "owner": "", "due": "", "private": False, "discarded": False}],
+    })
+    assert r.status_code == 400, r.text
+    assert "source bucket" in r.json()["detail"]
+    db_session.refresh(job)
+    assert "finalized_at" not in job.result_json
+
+
+def test_finalize_rejects_a_non_boolean_private_flag(client, db_session):
+    user, t, _ = _make_meeting(db_session)
+    _apply_job(db_session, t)
+    r = client.post(f"/api/transcripts/{t.id}/followup/finalize", json={
+        "items": [{"key": "a0", "type": "action_item", "text": "Ship it.",
+                   "owner": "", "due": "", "private": "yes", "discarded": False}],
+    })
+    assert r.status_code == 400
+    assert r.json()["detail"] == "private must be true or false"
+
+
+# ── Review-screen edits are savable (user decision, 2026-09-09) ───────────
+# The review cards let the user rewrite the proposed text, retype an owner and
+# tick Discard. Those edits persist under result_json["review_draft"], a key of
+# its own: rerun_llm_job promotes `draft` into the next job's input[], and a
+# review overlay carries `text` rather than source_text/answers, so sharing the
+# key would feed the wrong shape into a Queue-screen Retry.
+
+def test_save_draft_on_a_completed_apply_stores_a_review_draft(client, db_session):
+    user, t, _ = _make_meeting(db_session)
+    job = _apply_job(db_session, t)
+    r = client.post(f"/api/transcripts/{t.id}/followup/save-draft", json={
+        "items": [{"key": "a0", "type": "action_item", "text": "Dana fixes login by Monday.",
+                   "owner": "Dana", "due": "2026-02-02", "private": False, "discarded": False}],
+    })
+    assert r.status_code == 200, r.text
+    db_session.refresh(job)
+    rj = job.result_json
+    entry = rj["review_draft"][0]
+    assert entry["text"] == "Dana fixes login by Monday."
+    assert entry["owner"] == "Dana"
+    assert entry["discarded"] is False
+    # The proposals the overlay sits on top of are untouched, and the draft
+    # key used by the failed-apply path is not written here.
+    assert rj["proposals"][0]["text"] == "Dana fixes the login bug by Friday."
+    assert "draft" not in rj
+
+
+def test_review_draft_survives_a_reload(client, db_session):
+    """The whole point of the decision: edit, reload, still there."""
+    user, t, _ = _make_meeting(db_session)
+    _apply_job(db_session, t)
+    client.post(f"/api/transcripts/{t.id}/followup/save-draft", json={
+        "items": [{"key": "a0", "type": "action_item", "text": "Edited.",
+                   "owner": "", "due": None, "private": False, "discarded": True}],
+    })
+    r = client.get(f"/api/transcripts/{t.id}/runs/followup")
+    assert r.status_code == 200, r.text
+    entry = r.json()["runs"][0]["result"]["review_draft"][0]
+    assert entry["text"] == "Edited."
+    assert entry["discarded"] is True
+
+
+def test_save_draft_is_refused_once_finalized(client, db_session):
+    """Widening save-draft to the review screen must not reopen a finalized
+    follow-up."""
+    user, t, _ = _make_meeting(db_session)
+    _apply_job(db_session, t, finalized_at="2026-01-02T00:00:00", finalized_count=1)
+    r = client.post(f"/api/transcripts/{t.id}/followup/save-draft", json={
+        "items": [{"key": "a0", "type": "action_item", "text": "Too late.",
+                   "owner": "", "due": None, "private": False, "discarded": False}],
+    })
+    assert r.status_code == 409
+    assert r.json()["detail"] == "This follow-up is already finalized"
+
+
+def test_apply_is_still_refused_from_the_review_screen(client, db_session):
+    """save-draft got its own predicate on purpose. Apply must NOT become
+    available on a completed apply job, or the review screen would silently
+    enqueue a second apply."""
+    user, t, _ = _make_meeting(db_session)
+    _apply_job(db_session, t)
+    r = client.post(f"/api/transcripts/{t.id}/followup/apply", json={
+        "items": [{"key": "a0", "type": "action_item", "owner": "", "due": "",
+                   "private": False, "answers": []}],
+    })
+    assert r.status_code == 409
+    assert r.json()["detail"] == "This follow-up draft can't be edited right now"
+
+
+def test_review_draft_keys_are_validated_against_proposals(client, db_session):
+    user, t, _ = _make_meeting(db_session)
+    _apply_job(db_session, t)
+    r = client.post(f"/api/transcripts/{t.id}/followup/save-draft", json={
+        "items": [{"key": "nope", "type": "action_item", "text": "x",
+                   "owner": "", "due": None, "private": False, "discarded": False}],
+    })
+    assert r.status_code == 400

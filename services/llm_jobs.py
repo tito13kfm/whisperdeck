@@ -505,10 +505,18 @@ def rerun_llm_job(db, user_id: int, job_id: int) -> LlmJob:
             promoted = old_result.get("draft") or old_result.get("input")
             if promoted is not None:
                 carry["input"] = promoted
-        return enqueue_llm_job(
-            db, user_id, job.transcript_id, job.kind, job.provider, job.model,
-            result_json=carry,
-        )
+        try:
+            return enqueue_llm_job(
+                db, user_id, job.transcript_id, job.kind, job.provider, job.model,
+                result_json=carry,
+            )
+        except ValueError:
+            # enqueue refuses to drop a result_json payload onto an existing
+            # active job. Every other refusal in this branch rolls back first;
+            # without this the BEGIN IMMEDIATE write lock is held until the
+            # session is torn down.
+            db.rollback()
+            raise
     return enqueue_llm_job(db, user_id, job.transcript_id, job.kind, job.provider, job.model)
 
 

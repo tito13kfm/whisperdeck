@@ -77,11 +77,25 @@ function normalizeFollowupItems(items, draft) {
     const src = (it && typeof it === 'object') ? it : {};
     const key = typeof src.key === 'string' ? src.key : String(i);
     const d = draftByKey[key] || {};
+    // A generate item carries `questions` plus (via the draft) bare-string
+    // answers. An apply-phase `input[]` entry carries neither: it has only
+    // pair-form `answers: [{question, answer}]`. The apply_failed state
+    // hands us exactly that list as the draft source, so read the questions
+    // back out of the pairs there -- otherwise `questions` is empty, the
+    // answers array below is empty too, and every answer the user typed is
+    // dropped on the way back to Apply.
+    const pairs = Array.isArray(src.answers)
+      ? src.answers.filter((a) => a && typeof a === 'object' && typeof a.question === 'string')
+      : [];
     const questions = Array.isArray(src.questions)
       ? src.questions.filter((q) => typeof q === 'string' && q.trim())
-      : [];
+      : pairs.map((a) => a.question).filter((q) => q.trim());
     const draftAnswers = Array.isArray(d.answers) ? d.answers : [];
-    const answers = questions.map((_, qi) => (typeof draftAnswers[qi] === 'string' ? draftAnswers[qi] : ''));
+    const answers = questions.map((_, qi) => {
+      if (typeof draftAnswers[qi] === 'string') return draftAnswers[qi];
+      const carried = pairs[qi];
+      return (carried && typeof carried.answer === 'string') ? carried.answer : '';
+    });
     return {
       key,
       source_bucket: typeof src.source_bucket === 'string' ? src.source_bucket : '',
@@ -92,10 +106,16 @@ function normalizeFollowupItems(items, draft) {
         : (FOLLOWUP_ITEM_TYPES.includes(src.type) ? src.type : 'reference'),
       owner: typeof d.owner === 'string' ? d.owner : (typeof src.owner === 'string' ? src.owner : ''),
       due: typeof d.due === 'string' ? d.due : (typeof src.due === 'string' ? src.due : ''),
-      // A model-supplied `private: true` at generate time is always
-      // ignored server-side (private is always false at generate) -- only
-      // a saved draft, i.e. the user, can set it.
-      private: typeof d.private === 'boolean' ? d.private : false,
+      // Only the user can set `private`, and the two source shapes differ.
+      // A generate item (always has `questions`) may carry a model-supplied
+      // private:true that the server already forced false -- ignore it here
+      // too, belt and braces. An apply-phase input[] entry (never has
+      // `questions`) carries the flag the user themselves set, and it MUST
+      // be honoured: dropping it on the apply_failed path would feed that
+      // item's text into the apply prompt on the retry.
+      private: typeof d.private === 'boolean' ? d.private
+        : (!Array.isArray(src.questions) && typeof src.private === 'boolean'
+          ? src.private : false),
       needs_clarification: !!src.needs_clarification,
       reason: typeof src.reason === 'string' ? src.reason : '',
       questions,

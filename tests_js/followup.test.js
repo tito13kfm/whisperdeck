@@ -275,12 +275,45 @@ test('materializeApplyInput drops unanswered questions from answers[] entirely',
   assert.deepEqual(out.answers, [{ question: 'Q1?', answer: 'A1' }]);
 });
 
-test('materializeApplyInput is deterministic: calling it twice on the same normalized items matches exactly', () => {
-  const items = normalizeFollowupItems([
-    { key: 'a0', source_bucket: 'action_items', source_index: 0, source_text: 'x', questions: ['Q?'] },
-    { key: 'd0', source_bucket: 'decisions', source_index: 1, source_text: 'y', questions: [] },
-  ], [{ key: 'a0', answers: ['A'] }]);
-  assert.deepEqual(materializeApplyInput(items), materializeApplyInput(items));
+test('materializeApplyInput is idempotent across a save/reload round trip of input[]', () => {
+  // The apply_failed state hands input[] back as the draft source. Feeding
+  // that through normalize -> materialize has to reproduce it, or the retry
+  // silently rewrites from something other than what the user saved.
+  const input = [
+    { key: 'a0', source_bucket: 'action_items', source_index: 0, source_text: 'x',
+      type: 'action_item', owner: 'Dana', due: '2026-02-01', private: false,
+      answers: [{ question: 'Who owns this?', answer: 'Dana' }] },
+    { key: 'd0', source_bucket: 'decisions', source_index: 1, source_text: 'y',
+      type: 'decision', owner: '', due: '', private: true, answers: [] },
+  ];
+  assert.deepEqual(materializeApplyInput(normalizeFollowupItems(input)), input);
+});
+
+test('an apply_failed draft keeps the answers the user already typed', () => {
+  // Regression: input[] carries pair-form answers and NO questions key. Reading
+  // only `questions` left the answers array empty and dropped every answer on
+  // the way back to Apply -- the exact loss the AUTO_RETRY_KINDS exclusion
+  // exists to prevent.
+  const input = [{
+    key: 'a0', source_bucket: 'action_items', source_index: 0, source_text: 'Dana fixes login',
+    type: 'action_item', owner: '', due: '', private: false,
+    answers: [{ question: 'By when?', answer: 'Friday' }],
+  }];
+  const [item] = normalizeFollowupItems(input);
+  assert.deepEqual(item.questions, ['By when?']);
+  assert.deepEqual(item.answers, ['Friday']);
+  assert.deepEqual(materializeApplyInput([item])[0].answers,
+    [{ question: 'By when?', answer: 'Friday' }]);
+});
+
+test('a draft edit still overrides a carried answer on an apply_failed item', () => {
+  const input = [{
+    key: 'a0', source_bucket: 'action_items', source_index: 0, source_text: 'Dana fixes login',
+    type: 'action_item', owner: '', due: '', private: false,
+    answers: [{ question: 'By when?', answer: 'Friday' }],
+  }];
+  const [item] = normalizeFollowupItems(input, [{ key: 'a0', answers: ['Monday'] }]);
+  assert.deepEqual(item.answers, ['Monday']);
 });
 
 test('materializeApplyInput tolerates malformed input', () => {

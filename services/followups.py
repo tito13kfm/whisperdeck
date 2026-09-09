@@ -58,6 +58,9 @@ MAX_OWNER_CHARS = 255      # matches FollowupItem.owner String(255)
 MAX_DUE_CHARS = 64         # matches FollowupItem.due String(64)
 MAX_TEXT_CHARS = 600       # the proposed self-contained sentence
 MAX_NOTE_CHARS = 300       # model-written `reason` / `note`
+MAX_KEY_CHARS = 32         # "a0" / "d12" / "k7"; the model must echo it back
+                           # verbatim, so this cap only ever guards against a
+                           # malformed body, never truncates a real key
 
 GENERATE_TRANSCRIPT_CHARS = 30000
 APPLY_TRANSCRIPT_CHARS = 20000
@@ -77,7 +80,10 @@ APPLY_MAX_TOKENS = 16384
 # The keys rerun_llm_job carries from a failed follow-up job onto its
 # replacement. `draft` and `proposals` are deliberately absent — a rerun
 # promotes the draft into `input` and re-derives the proposals.
-FOLLOWUP_INPUT_KEYS = ("phase", "summary_snapshot", "items", "input", "generate_job_id")
+# "truncated" rides along so a rerun of a truncated generate job keeps the
+# flag the UI warns from; dropping it would silently retract the warning.
+FOLLOWUP_INPUT_KEYS = ("phase", "summary_snapshot", "items", "input",
+                      "generate_job_id", "truncated")
 
 # The one raise in this module. Named workaround, because the shipped default
 # model is a reasoning model and a trace the stripper misses lands here.
@@ -437,7 +443,7 @@ def build_apply_prompt(input_items, transcript_text: str) -> str:
             # `key` and `source_bucket` arrive on the apply request body like
             # every other field here, so they get the same treatment as the
             # rest: the bucket is clamped to the enum, the key is escaped.
-            "key": _sanitize_for(_clean_str(item.get("key"), MAX_DUE_CHARS), _APPLY_TAGS),
+            "key": _sanitize_for(_clean_str(item.get("key"), MAX_KEY_CHARS), _APPLY_TAGS),
             "bucket": bucket if bucket in FOLLOWUP_BUCKETS else None,
             "text": _sanitize_for(_clean_str(item.get("source_text"), MAX_SOURCE_CHARS), _APPLY_TAGS),
             "type": item.get("type") if item.get("type") in FOLLOWUP_ITEM_TYPES else "reference",

@@ -3572,7 +3572,7 @@ _FOLLOWUP_FINALIZED = "This follow-up is already finalized"
 _FOLLOWUP_NOT_EDITABLE = "This follow-up draft can't be edited right now"
 
 
-def _serialize_followup_item(item) -> dict:
+def _serialize_followup_item(item) -> dict | None:
     if not item:
         return None
     return {
@@ -3627,11 +3627,66 @@ def _followup_draft_editable(job) -> bool:
     return False
 
 
+def _followup_save_editable(job) -> bool:
+    """Which states accept a save-draft. A superset of _followup_draft_editable:
+    the review screen (a completed, not-yet-finalized apply job) also lets the
+    user edit the proposed text, retype an owner, and tick Discard, and those
+    edits have to survive a reload the same way draft-screen edits do.
+
+    Deliberately NOT the same predicate the apply route uses: widening that one
+    would also let Apply re-run from the review screen and enqueue a second
+    apply job, which is a different feature.
+    """
+    if _followup_finalized(job):
+        return False
+    rj = job.result_json or {}
+    if rj.get("phase") == "apply" and job.status == "completed":
+        return True
+    return _followup_draft_editable(job)
+
+
+def _followup_review_entry(src: dict, posted: dict) -> dict:
+    """One review_draft entry: the user's overlay on top of one proposal."""
+    item_type = posted.get("type")
+    if item_type not in FOLLOWUP_ITEM_TYPES:
+        item_type = src.get("type") if src.get("type") in FOLLOWUP_ITEM_TYPES else "reference"
+    text = posted.get("text")
+    text = text if isinstance(text, str) else src.get("text", "")
+    owner = posted.get("owner")
+    owner = owner if isinstance(owner, str) else (src.get("owner") or "")
+    due = posted.get("due", src.get("due"))
+    return {
+        "key": src["key"],
+        "type": item_type,
+        # Not stripped to empty here the way finalize is: this is a draft, and
+        # the user is allowed to clear a field and come back to it. Finalize
+        # is the strict gate.
+        "text": text.strip()[:MAX_TEXT_CHARS],
+        "owner": owner[:MAX_OWNER_CHARS],
+        "due": normalize_due(due),
+        "private": bool(posted.get("private", src.get("private", False))),
+        "discarded": bool(posted.get("discarded", False)),
+    }
+
+
 def _followup_draft_source(job) -> list:
     """The item list a draft edit is validated against: `items` for a
-    generate job, `input` for a failed/cancelled apply job."""
+    generate job, `proposals` for a completed apply job (the review screen),
+    `input` for a failed/cancelled apply job.
+
+    The apply branch prefers a saved `draft` over `input`, matching the
+    promotion in rerun_llm_job. The two are the only paths from a failed
+    apply job to the next input[], so if they disagree a draft edit survives
+    the Queue screen's Retry but is silently reverted by the Summary tab's
+    Apply."""
     rj = job.result_json or {}
-    base = rj.get("input") if rj.get("phase") == "apply" else rj.get("items")
+    if rj.get("phase") == "apply":
+        if job.status == "completed":
+            base = rj.get("proposals")
+        else:
+            base = rj.get("draft") or rj.get("input")
+    else:
+        base = rj.get("items")
     if not isinstance(base, list):
         return []
     return [it for it in base if isinstance(it, dict) and isinstance(it.get("key"), str)]
@@ -3704,7 +3759,16 @@ def _followup_answers(src: dict, posted: dict) -> list:
     raw = posted.get("answers")
     if not isinstance(raw, list):
         raw = src.get("answers") if isinstance(src.get("answers"), list) else []
-    questions = src.get("questions") if isinstance(src.get("questions"), list) else []
+    questions = src.get("questions") if isinstance(src.get("questions"), list) else None
+    if questions is None:
+        # An apply-phase input[] entry has no `questions` key at all — the
+        # model-written questions survive only inside its pair-form answers.
+        # Without this, a bare-string answer posted against such an entry
+        # would be stored with an empty question and the user would lose the
+        # text they were answering. A posted empty list still clears.
+        src_answers = src.get("answers") if isinstance(src.get("answers"), list) else []
+        questions = [a.get("question") for a in src_answers
+                     if isinstance(a, dict) and isinstance(a.get("question"), str)]
     out = []
     for i, a in enumerate(raw):
         if isinstance(a, str):
@@ -3871,7 +3935,7 @@ async def save_followup_draft(
     if _followup_finalized(job):
         db.rollback()
         raise HTTPException(status_code=409, detail=_FOLLOWUP_FINALIZED)
-    if not _followup_draft_editable(job):
+    if not _followup_save_editable(job):
         db.rollback()
         raise HTTPException(status_code=409, detail=_FOLLOWUP_NOT_EDITABLE)
     source = _followup_draft_source(job)
@@ -3879,7 +3943,22 @@ async def save_followup_draft(
     if error:
         db.rollback()
         raise HTTPException(status_code=400, detail=error)
-    if (job.result_json or {}).get("phase") == "apply":
+    rj_now = job.result_json or {}
+    if rj_now.get("phase") == "apply" and job.status == "completed":
+        # The review screen. Stored under its own key: rerun_llm_job promotes
+        # `draft` into the next job's input[], and a review overlay (which
+        # carries the rewritten `text`, not `source_text`/`answers`) is the
+        # wrong shape for that. Keeping the two apart means a Queue-screen
+        # Retry can never pick this up by mistake.
+        posted_by_key = {it["key"]: it for it in items}
+        review_draft = [
+            _followup_review_entry(src, posted_by_key.get(src["key"], {}))
+            for src in source
+        ]
+        job.result_json = {**rj_now, "review_draft": review_draft}
+        db.commit()
+        return {"items": review_draft}
+    if rj_now.get("phase") == "apply":
         # A draft on a failed apply job is promoted straight into the next
         # job's input[] by rerun_llm_job's `old.get("draft") or
         # old.get("input")` (services/llm_jobs.py), and by the apply route
@@ -4053,6 +4132,21 @@ async def finalize_followup(
         if due_value is not None and (not isinstance(due_value, str) or len(due_value) > MAX_DUE_CHARS):
             db.rollback()
             raise HTTPException(status_code=400, detail=f"due must be a string of at most {MAX_DUE_CHARS} characters")
+        for flag in ("private", "discarded"):
+            if it.get(flag) is not None and not isinstance(it.get(flag), bool):
+                db.rollback()
+                raise HTTPException(status_code=400, detail=f"{flag} must be true or false")
+        # Finding: a missing bucket/index would violate the two NOT NULL
+        # provenance columns and surface as the IntegrityError -> 409
+        # "already finalized" below, which is both wrong and undiagnosable.
+        # Reject it here, where the message can say what is actually wrong.
+        src_entry = input_by_key.get(it["key"], proposal_by_key[it["key"]])
+        if (src_entry.get("source_bucket") or proposal_by_key[it["key"]].get("source_bucket")) is None:
+            db.rollback()
+            raise HTTPException(status_code=400, detail=f"Follow-up item {it['key']} has lost its source bucket — start the follow-up again")
+        if src_entry.get("source_index") is None and proposal_by_key[it["key"]].get("source_index") is None:
+            db.rollback()
+            raise HTTPException(status_code=400, detail=f"Follow-up item {it['key']} has lost its source index — start the follow-up again")
 
     created = []
     for idx, it in enumerate(kept):
@@ -4105,6 +4199,10 @@ async def finalize_followup(
     try:
         db.commit()
     except IntegrityError:
+        # Reachable only via the (source_job_id, sequence_index) unique
+        # constraint, i.e. a concurrent finalize of this same apply job. The
+        # NOT NULL provenance case is rejected with a 400 in the strict loop
+        # above, so it can no longer masquerade as "already finalized".
         db.rollback()
         raise HTTPException(status_code=409, detail=_FOLLOWUP_FINALIZED)
     for row in created:
