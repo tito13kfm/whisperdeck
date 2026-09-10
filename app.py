@@ -3825,6 +3825,21 @@ def _followup_provider_model(db, user_id: int, provider, model) -> tuple[str, st
     )
 
 
+def _validate_followup_provider(provider: str) -> None:
+    """Fail fast with a 400 on an unsupported provider name.
+
+    Without this, an unresolvable provider (a typo, or a transcription-only
+    keyless provider like "moonshine" that require_provider_key waves
+    through) enqueues a job that only fails once the worker calls
+    resolve_api_base — the same check this runs synchronously here."""
+    from services.llm_client import resolve_api_base
+
+    try:
+        resolve_api_base(provider, {}, feature_name="Follow-up")
+    except RuntimeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 def _followup_begin_immediate(db) -> None:
     try:
         db.execute(text("BEGIN IMMEDIATE"))
@@ -3862,6 +3877,7 @@ async def start_followup(
     if t.summary is None:
         raise HTTPException(status_code=400, detail="No summary yet — run Summarize first")
     provider, model = _followup_provider_model(db, current_user.id, provider, model)
+    _validate_followup_provider(provider)
     snapshot = summary_snapshot(t.summary)
     seeds, truncated = seed_items_from_summary(snapshot)
     if not seeds:
@@ -4015,6 +4031,7 @@ async def apply_followup(
     if model is not None and not isinstance(model, str):
         raise HTTPException(status_code=400, detail="provider and model must be strings")
     provider, model = _followup_provider_model(db, current_user.id, provider, model)
+    _validate_followup_provider(provider)
     items = body["items"]
     require_provider_key(db, current_user.id, provider)
     _followup_begin_immediate(db)

@@ -265,6 +265,29 @@ def test_generate_degrades_instead_of_raising(items):
     assert [o["type"] for o in out] == ["action_item", "reference"]
 
 
+def test_generate_ungrounded_owner_and_due_are_dropped():
+    """There are no user answers yet at generate time, so an owner or due
+    the model invents can only be grounded in the seed's own source text —
+    same rule the apply normalizer already enforces on its output."""
+    raw = {"items": [{"key": "a0", "owner": "Mallory", "due": "2099-01-01"}]}
+    out = normalize_generate_result(raw, _seeds())
+    assert out[0]["owner"] == ""
+    assert out[0]["due"] is None
+
+
+def test_generate_grounded_owner_and_due_are_kept():
+    seeds = [{
+        "key": "a0", "source_bucket": "action_items", "source_index": 0,
+        "source_text": "Dana will follow up on the contract by 2026-09-15",
+        "type": "action_item", "owner": "", "due": None, "private": False,
+        "needs_clarification": False, "reason": "", "questions": [], "confidence": None,
+    }]
+    raw = {"items": [{"key": "a0", "owner": "Dana", "due": "2026-09-15"}]}
+    out = normalize_generate_result(raw, seeds)
+    assert out[0]["owner"] == "Dana"
+    assert out[0]["due"] == "2026-09-15"
+
+
 # ── apply normalizer ──────────────────────────────────────────────────────
 
 def _input_items(private=False):

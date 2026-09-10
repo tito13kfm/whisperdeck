@@ -251,6 +251,19 @@ def test_start_followup_400_when_keyed_provider_has_no_key(client, db_session):
     assert "groq API key" in r.json()["detail"]
 
 
+def test_start_followup_400_for_an_unsupported_provider(client, db_session):
+    """"moonshine" is a transcription-only provider in KEYLESS_PROVIDERS, so
+    require_provider_key waves it through with no key check at all — it is
+    not a chat provider resolve_api_base knows how to reach. Without
+    validating the name itself, the job would only fail once the worker
+    calls resolve_api_base."""
+    user, t, _ = _make_meeting(db_session)
+    r = client.post(f"/api/transcripts/{t.id}/followup", data={"provider": "moonshine"})
+    assert r.status_code == 400
+    assert "moonshine" in r.json()["detail"]
+    assert db_session.query(LlmJob).filter(LlmJob.kind == "followup").count() == 0
+
+
 def test_start_followup_returns_the_running_generate_job(client, db_session):
     user, t, _ = _make_meeting(db_session)
     existing = _seed_job(db_session, t, "generate", "running", items=[_generate_item()])
@@ -588,6 +601,16 @@ def test_apply_400_when_keyed_provider_has_no_key(client, db_session):
                     json={"provider": "groq", "items": [{"key": "a0"}]})
     assert r.status_code == 400
     assert "groq API key" in r.json()["detail"]
+    assert db_session.query(LlmJob).filter(LlmJob.kind == "followup").count() == 1
+
+
+def test_apply_400_for_an_unsupported_provider(client, db_session):
+    user, t, _ = _make_meeting(db_session)
+    _seed_job(db_session, t, "generate", "completed", items=[_generate_item()])
+    r = client.post(f"/api/transcripts/{t.id}/followup/apply",
+                    json={"provider": "moonshine", "items": [{"key": "a0"}]})
+    assert r.status_code == 400
+    assert "moonshine" in r.json()["detail"]
     assert db_session.query(LlmJob).filter(LlmJob.kind == "followup").count() == 1
 
 

@@ -333,6 +333,11 @@ def normalize_generate_result(raw, seeds) -> list[dict]:
     bucket default with no questions — and keys the model invented are
     dropped. `private` is always False here: the flag does not exist until
     the user sets it on the draft, and a model-supplied one is ignored.
+
+    An `owner`/`due` the model invented out of nothing is dropped, same as
+    `normalize_apply_result`: at this phase there are no user answers yet
+    to ground against, so the only thing an owner or due can be grounded in
+    is the seed's own source text.
     """
     by_key = _entries_by_key(raw)
     out: list[dict] = []
@@ -355,14 +360,22 @@ def normalize_generate_result(raw, seeds) -> list[dict]:
                 if len(questions) >= MAX_QUESTIONS_PER_ITEM:
                     break
 
+        owner = _clean_str(entry.get("owner"), MAX_OWNER_CHARS)
+        if owner and not _grounded(owner, seed, []):
+            owner = ""
+        raw_due = _clean_str(entry.get("due"), MAX_DUE_CHARS)
+        due = normalize_due(entry.get("due"))
+        if due and not _grounded(raw_due, seed, []):
+            due = None
+
         out.append({
             "key": seed["key"],
             "source_bucket": seed["source_bucket"],
             "source_index": seed["source_index"],
             "source_text": seed["source_text"],
             "type": item_type,
-            "owner": _clean_str(entry.get("owner"), MAX_OWNER_CHARS),
-            "due": normalize_due(entry.get("due")),
+            "owner": owner,
+            "due": due,
             # Only the user can mark an item private, and only on the draft.
             "private": False,
             "needs_clarification": bool(entry.get("needs_clarification")) or bool(questions),
