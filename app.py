@@ -3855,7 +3855,7 @@ async def start_followup(
     ).first()
     if not t:
         raise HTTPException(status_code=404, detail="Transcript not found")
-    if effective_kind(t) in ("voice_note", "voice_dump"):
+    if effective_kind(t) != "meeting":
         raise HTTPException(status_code=400, detail="Follow-up applies to meeting summaries only")
     if t.status != "completed":
         raise HTTPException(status_code=400, detail=f"Transcript {transcript_id} is not completed")

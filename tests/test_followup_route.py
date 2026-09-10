@@ -157,12 +157,27 @@ def test_start_followup_404_for_other_users_transcript(client, db_session):
     assert r.status_code == 404
 
 
-@pytest.mark.parametrize("kind", ["voice_note", "voice_dump"])
-def test_start_followup_400_for_single_speaker_kinds(client, db_session, kind):
+@pytest.mark.parametrize("kind", ["voice_note", "voice_dump", "dictation"])
+def test_start_followup_400_for_non_meeting_kinds(client, db_session, kind):
     user, t, _ = _make_meeting(db_session, kind=kind)
     r = client.post(f"/api/transcripts/{t.id}/followup", data={"provider": "local_llm"})
     assert r.status_code == 400
     assert "meeting" in r.json()["detail"]
+    assert db_session.query(LlmJob).filter(LlmJob.kind == "followup").count() == 0
+
+
+@pytest.mark.parametrize("classification_status", ["pending", "uncertain", "failed"])
+def test_start_followup_400_for_unresolved_classification(client, db_session, classification_status):
+    """A transcript whose auto-classification hasn't landed yet has no
+    confirmed kind (effective_kind returns None), even if `kind` itself
+    still reads "meeting" from an earlier default or a stale guess."""
+    user, t, _ = _make_meeting(db_session, kind="meeting")
+    t.classification_status = classification_status
+    db_session.commit()
+    r = client.post(f"/api/transcripts/{t.id}/followup", data={"provider": "local_llm"})
+    assert r.status_code == 400
+    assert "meeting" in r.json()["detail"]
+    assert db_session.query(LlmJob).filter(LlmJob.kind == "followup").count() == 0
 
 
 def test_start_followup_400_when_transcript_not_completed(client, db_session):
