@@ -222,6 +222,28 @@ def test_start_followup_409_while_a_summary_job_is_running(client, db_session):
     assert "summary" in r.json()["detail"].lower()
 
 
+def test_start_followup_409_for_a_summary_job_that_lands_between_check_and_lock(client, db_session):
+    """The summary-running check has to run after BEGIN IMMEDIATE, not
+    before it — otherwise a concurrent summary enqueue that commits in the
+    gap between an early check and the lock is invisible, and a follow-up
+    starts against a snapshot summarization is about to overwrite.
+
+    require_provider_key is the last call before the lock is taken, so a
+    summary job inserted from its side effect lands exactly in that gap."""
+    user, t, _ = _make_meeting(db_session)
+
+    def _racing_summary_job(*args, **kwargs):
+        db_session.add(LlmJob(user_id=user.id, transcript_id=t.id, kind="summary",
+                              provider="local_llm", model="m", status="running"))
+        db_session.commit()
+
+    with patch("services.settings.require_provider_key", side_effect=_racing_summary_job):
+        r = client.post(f"/api/transcripts/{t.id}/followup", data={"provider": "local_llm"})
+    assert r.status_code == 409
+    assert "summary" in r.json()["detail"].lower()
+    assert db_session.query(LlmJob).filter(LlmJob.kind == "followup").count() == 0
+
+
 def test_start_followup_400_when_keyed_provider_has_no_key(client, db_session):
     user, t, _ = _make_meeting(db_session)
     r = client.post(f"/api/transcripts/{t.id}/followup", data={"provider": "groq"})

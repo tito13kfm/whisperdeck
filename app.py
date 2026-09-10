@@ -3869,10 +3869,15 @@ async def start_followup(
         # and would otherwise yield a completed job with an empty draft and no
         # explanation.
         raise HTTPException(status_code=400, detail="This summary has no items to follow up on")
-    if get_active_job(db, transcript_id, "summary") is not None:
-        raise HTTPException(status_code=409, detail="A summary is still running — wait for it to finish")
     require_provider_key(db, current_user.id, provider)
     _followup_begin_immediate(db)
+    # Checked inside the lock, not before: a summary enqueue racing the
+    # pre-lock check could commit between the check and BEGIN IMMEDIATE,
+    # and a follow-up would then start against a snapshot summarization
+    # was about to overwrite.
+    if get_active_job(db, transcript_id, "summary") is not None:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="A summary is still running — wait for it to finish")
     # generate and apply share one kind, so get_active_job matches an
     # in-flight apply too. Without the phase check, "start a fresh follow-up"
     # during a running apply would hand back the apply job with 200 and the
