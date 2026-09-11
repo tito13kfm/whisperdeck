@@ -28,7 +28,7 @@ from sqlalchemy import or_, func, case, text
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session
 
-from database import init_db, backfill_user_id, Transcript, Summary, VoiceNote, VoiceDumpItem, VoiceProfile, VoiceClip, ProviderConfig, User, LlmJob, TranscriptionJob, TranscriptTag, utcnow_naive
+from database import init_db, backfill_user_id, Transcript, Summary, VoiceNote, VoiceDumpItem, VoiceProfile, VoiceClip, ProviderConfig, User, LlmJob, TranscriptionJob, TranscriptTag, FollowupItem, utcnow_naive
 from services.auth import (
     get_or_create_fallback_user, create_user, authenticate_user, validate_password,
     verify_password,
@@ -56,7 +56,7 @@ from services.model_catalog import get_correction_models
 from services.llm_jobs import (
     enqueue_llm_job, enqueue_post_transcription_jobs,
     enqueue_pipeline_classify,
-    serialize_llm_job, latest_job,
+    serialize_llm_job, latest_job, get_active_job,
     cancel_llm_job, rerun_llm_job, llm_worker_loop, reset_stuck_llm_jobs,
     dismiss_llm_job, clear_finished_llm_jobs,
 )
@@ -386,6 +386,7 @@ _SERIALIZED_JOB_KINDS = (
     "correction", "summary", "voice_match",
     "format_markdown", "format_email", "format_coding_prompt", "classify_intent",
     "voice_note", "voice_dump", "tagging", "assistant", "classify_pipeline",
+    "followup",
 )
 
 
@@ -467,6 +468,15 @@ def _serialize_transcript(db: Session, t: Transcript, *, jobs_map: dict[tuple[in
         # kind opts in — their result_json holds whole documents.
         "voice_match_job": serialize_llm_job(jobs_map[(t.id, "voice_match")], include_result=True) if (t.id, "voice_match") in jobs_map else None,
         "classify_pipeline_job": serialize_llm_job(jobs_map[(t.id, "classify_pipeline")]) if (t.id, "classify_pipeline") in jobs_map else None,
+        # Plain serialize_llm_job, i.e. include_result=False, deliberately
+        # (issue #253): this serializer runs for every transcript on the list
+        # endpoint, and a follow-up job's result_json holds every summary
+        # item's text, the user's typed answers and the items they marked
+        # private — the most sensitive payload in the feature. The UI reads
+        # result_json through GET /runs/followup instead. Do not copy the
+        # voice_match_job line above; that opt-in is scoped to a small
+        # similarity summary.
+        "followup_job": serialize_llm_job(jobs_map[(t.id, "followup")]) if (t.id, "followup") in jobs_map else None,
         "cost": transcript_cost(db, t),
         "tags": _tags_for_transcript(db, t.id),
         **_dictation_job_fields(jobs_map, t),
@@ -3113,7 +3123,7 @@ async def transcript_runs(
     including dismissed ones (dismiss only hides a job from the Queue
     screen — the row and its result_json snapshot persist). Powers the
     run-comparison picker on the detail page."""
-    if kind not in ("correction", "summary", "rediarize", "format_markdown", "format_email", "format_coding_prompt", "classify_intent", "voice_note", "voice_dump"):
+    if kind not in ("correction", "summary", "rediarize", "format_markdown", "format_email", "format_coding_prompt", "classify_intent", "voice_note", "voice_dump", "followup"):
         raise HTTPException(status_code=400, detail=f"Unknown run kind '{kind}'")
     t = db.query(Transcript).filter(
         Transcript.id == transcript_id, Transcript.user_id == current_user.id
@@ -3539,6 +3549,709 @@ async def delete_voice_dump_item(
     db.delete(item)
     db.commit()
     return {"deleted": item_id}
+
+
+# ── Follow-up session (issue #253) ────────────────────────────────────────
+# Two phases (generate, apply) on ONE job kind, with the phase in
+# result_json["phase"]. See docs/plans/14-followup-session.md. Every route
+# below follows the same pinned guard order: 404 on the transcript, then
+# body/type validation, then require_provider_key (start and apply only),
+# then BEGIN IMMEDIATE, then the latest/active job resolved *inside* that
+# transaction, then the state guards each with db.rollback() before raising.
+# Resolving the job inside the lock is not cosmetic: the check and the write
+# must not be splittable by a concurrent rerun.
+from services.followups import (
+    FOLLOWUP_ITEM_TYPES, MAX_ITEMS, MAX_OWNER_CHARS, MAX_DUE_CHARS,
+    MAX_QUESTION_CHARS, MAX_ANSWER_CHARS, MAX_TEXT_CHARS,
+    normalize_due, seed_items_from_summary, summary_snapshot,
+)
+
+_FOLLOWUP_LOCK_BUSY = "Another follow-up request is in flight — try again"
+_FOLLOWUP_NO_JOB = "No follow-up job found for this transcript"
+_FOLLOWUP_FINALIZED = "This follow-up is already finalized"
+_FOLLOWUP_NOT_EDITABLE = "This follow-up draft can't be edited right now"
+
+
+def _serialize_followup_item(item) -> dict | None:
+    if not item:
+        return None
+    return {
+        "id": item.id,
+        "transcript_id": item.transcript_id,
+        "source_job_id": item.source_job_id,
+        "sequence_index": item.sequence_index,
+        "item_type": item.item_type,
+        "text": item.text or "",
+        "owner": item.owner or "",
+        "due": item.due,
+        # Stored flag with no consumer today beyond the apply-prompt
+        # exclusion; returned unfiltered here, #245 ingestion reads it later.
+        "private": bool(item.private),
+        "confidence": item.confidence,
+        "source_bucket": item.source_bucket,
+        "source_index": item.source_index,
+        "source_text": item.source_text or "",
+        "clarifications": item.clarifications or [],
+        "model": item.model or "",
+        "provider": item.provider or "",
+        "created_at": item.created_at.isoformat() if item.created_at else None,
+    }
+
+
+def _followup_finalized(job) -> bool:
+    """The single definition of "this follow-up is finished".
+
+    Deliberately the marker on the job, never the existence of FollowupItem
+    rows: repeated follow-ups on one transcript are allowed by design, and an
+    all-discarded finalize writes zero rows yet still closes the card. Do not
+    copy the voice-dump "any row on the transcript" predicate.
+
+    A module-level function rather than an inline result_json read so the
+    IntegrityError path (the unique constraint behind the marker) can be
+    exercised by stubbing this out.
+    """
+    return bool((job.result_json or {}).get("finalized_at"))
+
+
+def _followup_draft_editable(job) -> bool:
+    """The latest job is either a completed generate job, or an apply job
+    that failed/was cancelled (whose editable draft is result_json["input"]).
+    Both routes and the frontend's followupState() mirror this one predicate
+    so they cannot disagree."""
+    rj = job.result_json or {}
+    phase = rj.get("phase")
+    if phase == "generate":
+        return job.status == "completed"
+    if phase == "apply":
+        return job.status in ("failed", "cancelled")
+    return False
+
+
+def _followup_save_editable(job) -> bool:
+    """Which states accept a save-draft. A superset of _followup_draft_editable:
+    the review screen (a completed, not-yet-finalized apply job) also lets the
+    user edit the proposed text, retype an owner, and tick Discard, and those
+    edits have to survive a reload the same way draft-screen edits do.
+
+    Deliberately NOT the same predicate the apply route uses: widening that one
+    would also let Apply re-run from the review screen and enqueue a second
+    apply job, which is a different feature.
+    """
+    if _followup_finalized(job):
+        return False
+    rj = job.result_json or {}
+    if rj.get("phase") == "apply" and job.status == "completed":
+        return True
+    return _followup_draft_editable(job)
+
+
+def _followup_review_entry(src: dict, posted: dict) -> dict:
+    """One review_draft entry: the user's overlay on top of one proposal."""
+    item_type = posted.get("type")
+    if item_type not in FOLLOWUP_ITEM_TYPES:
+        item_type = src.get("type") if src.get("type") in FOLLOWUP_ITEM_TYPES else "reference"
+    text = posted.get("text")
+    text = text if isinstance(text, str) else src.get("text", "")
+    owner = posted.get("owner")
+    owner = owner if isinstance(owner, str) else (src.get("owner") or "")
+    due = posted.get("due", src.get("due"))
+    return {
+        "key": src["key"],
+        "type": item_type,
+        # Not stripped to empty here the way finalize is: this is a draft, and
+        # the user is allowed to clear a field and come back to it. Finalize
+        # is the strict gate.
+        "text": text.strip()[:MAX_TEXT_CHARS],
+        "owner": owner[:MAX_OWNER_CHARS],
+        "due": normalize_due(due),
+        "private": bool(posted.get("private", src.get("private", False))),
+        "discarded": bool(posted.get("discarded", False)),
+    }
+
+
+def _followup_draft_source(job) -> list:
+    """The item list a draft edit is validated against: `items` for a
+    generate job, `proposals` for a completed apply job (the review screen),
+    `input` for a failed/cancelled apply job.
+
+    The apply branch prefers a saved `draft` over `input`, matching the
+    promotion in rerun_llm_job. The two are the only paths from a failed
+    apply job to the next input[], so if they disagree a draft edit survives
+    the Queue screen's Retry but is silently reverted by the Summary tab's
+    Apply."""
+    rj = job.result_json or {}
+    if rj.get("phase") == "apply":
+        if job.status == "completed":
+            base = rj.get("proposals")
+        else:
+            base = rj.get("draft") or rj.get("input")
+    else:
+        base = rj.get("items")
+    if not isinstance(base, list):
+        return []
+    return [it for it in base if isinstance(it, dict) and isinstance(it.get("key"), str)]
+
+
+def _followup_items_error(items, source_by_key: dict) -> str | None:
+    """Shared 400 rules for save-draft and apply, so the two cannot drift.
+
+    Returns the error message or None. It returns rather than raises because
+    every caller is already inside BEGIN IMMEDIATE and owes a db.rollback()
+    before the raise.
+    """
+    if not isinstance(items, list):
+        return "Expected {'items': [...]}"
+    if len(items) > MAX_ITEMS:
+        return f"Too many follow-up items (max {MAX_ITEMS})"
+    seen = set()
+    for it in items:
+        if not isinstance(it, dict):
+            return "Each follow-up item must be an object"
+        key = it.get("key")
+        if not isinstance(key, str) or key not in source_by_key:
+            return f"Unknown follow-up item key {key!r}"
+        if key in seen:
+            return f"Duplicate follow-up item key {key!r}"
+        seen.add(key)
+        item_type = it.get("type")
+        if item_type is not None and item_type not in FOLLOWUP_ITEM_TYPES:
+            return f"Unknown follow-up item type {item_type!r}"
+        owner = it.get("owner")
+        if owner is not None and (not isinstance(owner, str) or len(owner) > MAX_OWNER_CHARS):
+            return f"owner must be a string of at most {MAX_OWNER_CHARS} characters"
+        due = it.get("due")
+        if due is not None and (not isinstance(due, str) or len(due) > MAX_DUE_CHARS):
+            return f"due must be a string of at most {MAX_DUE_CHARS} characters"
+        if "private" in it and not isinstance(it["private"], bool):
+            return "private must be a boolean"
+        answers = it.get("answers")
+        if answers is not None:
+            if not isinstance(answers, list):
+                return "answers must be a list"
+            for a in answers:
+                # Two accepted shapes, both produced by static/followup.js: a
+                # bare answer string aligned to the item's question order (the
+                # draft cards), or a {question, answer} pair
+                # (materializeApplyInput). _followup_answers folds both into
+                # the stored pair form.
+                if isinstance(a, str):
+                    q, ans = "", a
+                elif isinstance(a, dict):
+                    q, ans = a.get("question", ""), a.get("answer", "")
+                else:
+                    return "each answer must be a string or an object"
+                if not isinstance(q, str) or not isinstance(ans, str):
+                    return "question and answer must be strings"
+                if len(q) > MAX_QUESTION_CHARS:
+                    return f"question must be at most {MAX_QUESTION_CHARS} characters"
+                if len(ans) > MAX_ANSWER_CHARS:
+                    return f"answer must be at most {MAX_ANSWER_CHARS} characters"
+    return None
+
+
+def _followup_answers(src: dict, posted: dict) -> list:
+    """The stored [{question, answer}] pairs for one item.
+
+    Accepts either wire shape (see _followup_items_error). A bare string is
+    matched to the question at the same index on the SOURCE entry, which is
+    where the model-written questions live — the posted draft carries answers
+    only. Unanswered questions are dropped rather than stored blank."""
+    raw = posted.get("answers")
+    if not isinstance(raw, list):
+        raw = src.get("answers") if isinstance(src.get("answers"), list) else []
+    questions = src.get("questions") if isinstance(src.get("questions"), list) else None
+    if questions is None:
+        # An apply-phase input[] entry has no `questions` key at all — the
+        # model-written questions survive only inside its pair-form answers.
+        # Without this, a bare-string answer posted against such an entry
+        # would be stored with an empty question and the user would lose the
+        # text they were answering. A posted empty list still clears.
+        src_answers = src.get("answers") if isinstance(src.get("answers"), list) else []
+        questions = [a.get("question") for a in src_answers
+                     if isinstance(a, dict) and isinstance(a.get("question"), str)]
+    out = []
+    for i, a in enumerate(raw):
+        if isinstance(a, str):
+            question = questions[i] if i < len(questions) and isinstance(questions[i], str) else ""
+            answer = a
+        elif isinstance(a, dict):
+            question = a.get("question") or ""
+            answer = a.get("answer") or ""
+        else:
+            continue
+        answer = answer.strip()[:MAX_ANSWER_CHARS]
+        if answer:
+            out.append({"question": question.strip()[:MAX_QUESTION_CHARS], "answer": answer})
+    return out
+
+
+def _followup_input_entry(src: dict, posted: dict) -> dict:
+    """One result_json["input"] entry: provenance carried from the draft
+    source entry, the editable fields taken from what the user posted.
+    source_bucket / source_index ride along explicitly so finalize never
+    reverse-parses the opaque `key`."""
+    item_type = posted.get("type")
+    if item_type not in FOLLOWUP_ITEM_TYPES:
+        item_type = src.get("type") if src.get("type") in FOLLOWUP_ITEM_TYPES else "reference"
+    owner = posted.get("owner", src.get("owner", "")) or ""
+    return {
+        "key": src["key"],
+        "source_bucket": src.get("source_bucket"),
+        "source_index": src.get("source_index"),
+        "source_text": src.get("source_text", ""),
+        "type": item_type,
+        "owner": owner[:MAX_OWNER_CHARS],
+        "due": normalize_due(posted.get("due", src.get("due"))),
+        # Only the user sets this, and only on the draft.
+        "private": bool(posted.get("private", src.get("private", False))),
+        "answers": _followup_answers(src, posted),
+    }
+
+
+def _followup_provider_model(db, user_id: int, provider, model) -> tuple[str, str]:
+    """Resolve the provider/model pair for a follow-up run.
+
+    A request that omits either falls back to the user's stored
+    followup_provider / followup_model, never to a literal written here.
+    Sending a transcript off this machine is strictly opt-in: the stored
+    default is local_llm, so a route that baked in a cloud provider (or even
+    baked in "local_llm" and then drifted from DEFAULT_SETTINGS) would be
+    deciding that on the user's behalf. See issue #456 for the same fix owed
+    to the summarize / correct / voice-note / voice-dump routes."""
+    settings = get_user_settings(db, user_id)
+    return (
+        provider or settings["followup_provider"],
+        model or settings["followup_model"],
+    )
+
+
+def _validate_followup_provider(provider: str) -> None:
+    """Fail fast with a 400 on an unsupported provider name.
+
+    Without this, an unresolvable provider (a typo, or a transcription-only
+    keyless provider like "moonshine" that require_provider_key waves
+    through) enqueues a job that only fails once the worker calls
+    resolve_api_base — the same check this runs synchronously here."""
+    from services.llm_client import resolve_api_base
+
+    try:
+        resolve_api_base(provider, {}, feature_name="Follow-up")
+    except RuntimeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+def _followup_begin_immediate(db) -> None:
+    try:
+        db.execute(text("BEGIN IMMEDIATE"))
+    except OperationalError as e:
+        if "is locked" in str(e.orig or e):
+            raise HTTPException(status_code=409, detail=_FOLLOWUP_LOCK_BUSY)
+        raise
+
+
+@app.post("/api/transcripts/{transcript_id}/followup")
+async def start_followup(
+    transcript_id: int,
+    provider: str | None = Form(None),
+    model: str | None = Form(None),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Start the generate phase: snapshot the Summary and seed one item per
+    bullet, then ask the model which of them are ambiguous.
+
+    The snapshot is the item identity for the whole feature — the Summary
+    upsert overwrites the three buckets in place with no ids, so every phase
+    and finalize read result_json["summary_snapshot"], never the live row."""
+    from services.settings import require_provider_key
+
+    t = db.query(Transcript).filter(
+        Transcript.id == transcript_id, Transcript.user_id == current_user.id
+    ).first()
+    if not t:
+        raise HTTPException(status_code=404, detail="Transcript not found")
+    if effective_kind(t) != "meeting":
+        raise HTTPException(status_code=400, detail="Follow-up applies to meeting summaries only")
+    if t.status != "completed":
+        raise HTTPException(status_code=400, detail=f"Transcript {transcript_id} is not completed")
+    if t.summary is None:
+        raise HTTPException(status_code=400, detail="No summary yet — run Summarize first")
+    provider, model = _followup_provider_model(db, current_user.id, provider, model)
+    _validate_followup_provider(provider)
+    snapshot = summary_snapshot(t.summary)
+    seeds, truncated = seed_items_from_summary(snapshot)
+    if not seeds:
+        # An all-empty Summary row is normal (the upsert writes .get(bucket, [])),
+        # and would otherwise yield a completed job with an empty draft and no
+        # explanation.
+        raise HTTPException(status_code=400, detail="This summary has no items to follow up on")
+    require_provider_key(db, current_user.id, provider)
+    _followup_begin_immediate(db)
+    # Checked inside the lock, not before: a summary enqueue racing the
+    # pre-lock check could commit between the check and BEGIN IMMEDIATE,
+    # and a follow-up would then start against a snapshot summarization
+    # was about to overwrite.
+    if get_active_job(db, transcript_id, "summary") is not None:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="A summary is still running — wait for it to finish")
+    # generate and apply share one kind, so get_active_job matches an
+    # in-flight apply too. Without the phase check, "start a fresh follow-up"
+    # during a running apply would hand back the apply job with 200 and the
+    # UI (which branches on result_json.phase) would render `applying`.
+    active = get_active_job(db, transcript_id, "followup")
+    if active is not None:
+        phase = (active.result_json or {}).get("phase")
+        db.rollback()
+        if phase != "generate":
+            raise HTTPException(status_code=409, detail="A follow-up is being applied — wait for it to finish")
+        return {"job": serialize_llm_job(active)}
+    try:
+        job = enqueue_llm_job(
+            db, current_user.id, transcript_id, "followup", provider, model,
+            result_json={
+                "phase": "generate",
+                "summary_snapshot": snapshot,
+                "items": seeds,
+                "truncated": truncated,
+            },
+        )
+    except ValueError:
+        # enqueue_llm_job refuses to drop a supplied result_json onto an
+        # existing active job. The lock above should make this unreachable.
+        db.rollback()
+        raise HTTPException(status_code=409, detail="A follow-up is already running for this transcript")
+    return {"job": serialize_llm_job(job)}
+
+
+@app.post("/api/transcripts/{transcript_id}/followup/save-draft")
+async def save_followup_draft(
+    transcript_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Persist the user's in-progress edits into result_json["draft"] and
+    nothing else. Takes no provider — no LLM call happens here.
+
+    Note the envelope: {"items": [...]}, NOT the bare array the voice-dump
+    save-draft route accepts."""
+    body = await request.json()
+    t = db.query(Transcript).filter(
+        Transcript.id == transcript_id, Transcript.user_id == current_user.id
+    ).first()
+    if not t:
+        raise HTTPException(status_code=404, detail="Transcript not found")
+    if not isinstance(body, dict) or not isinstance(body.get("items"), list):
+        raise HTTPException(status_code=400, detail="Expected {'items': [...]}")
+    items = body["items"]
+    _followup_begin_immediate(db)
+    job = latest_job(db, transcript_id, "followup")
+    if job is None:
+        db.rollback()
+        raise HTTPException(status_code=404, detail=_FOLLOWUP_NO_JOB)
+    # Finalized is checked before draft-editable on purpose: a finalized job
+    # is phase=apply/completed, which is already not draft-editable, so the
+    # other order would make this guard unreachable and its message never
+    # reach the user.
+    if _followup_finalized(job):
+        db.rollback()
+        raise HTTPException(status_code=409, detail=_FOLLOWUP_FINALIZED)
+    if not _followup_save_editable(job):
+        db.rollback()
+        raise HTTPException(status_code=409, detail=_FOLLOWUP_NOT_EDITABLE)
+    source = _followup_draft_source(job)
+    error = _followup_items_error(items, {it["key"]: it for it in source})
+    if error:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=error)
+    rj_now = job.result_json or {}
+    if rj_now.get("phase") == "apply" and job.status == "completed":
+        # The review screen. Stored under its own key: rerun_llm_job promotes
+        # `draft` into the next job's input[], and a review overlay (which
+        # carries the rewritten `text`, not `source_text`/`answers`) is the
+        # wrong shape for that. Keeping the two apart means a Queue-screen
+        # Retry can never pick this up by mistake.
+        posted_by_key = {it["key"]: it for it in items}
+        review_draft = [
+            _followup_review_entry(src, posted_by_key.get(src["key"], {}))
+            for src in source
+        ]
+        job.result_json = {**rj_now, "review_draft": review_draft}
+        db.commit()
+        return {"items": review_draft}
+    if rj_now.get("phase") == "apply":
+        # A draft on a failed apply job is promoted straight into the next
+        # job's input[] by rerun_llm_job's `old.get("draft") or
+        # old.get("input")` (services/llm_jobs.py), and by the apply route
+        # below. Store it in the full input shape rather than verbatim, or
+        # that promotion produces entries with no source_bucket /
+        # source_index / source_text — which the prompt needs and which
+        # finalize's two NOT NULL provenance columns reject.
+        posted_by_key = {it["key"]: it for it in items}
+        draft = [
+            _followup_input_entry(src, posted_by_key.get(src["key"], {}))
+            for src in source
+        ]
+    else:
+        draft = items
+    # Rebind, never mutate in place: result_json is a plain Column(JSON) with
+    # no MutableDict, so job.result_json["draft"] = ... would not flush.
+    job.result_json = {**(job.result_json or {}), "draft": draft}
+    db.commit()
+    return {"items": draft}
+
+
+@app.post("/api/transcripts/{transcript_id}/followup/apply")
+async def apply_followup(
+    transcript_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Enqueue the apply phase from the posted (edited) items.
+
+    summary_snapshot is carried forward from the current job, never
+    re-snapshotted off the live Summary row: the stale notice compares
+    summary.created_at against the snapshot, so re-taking it here would make
+    a summary rerun between generate and apply silently disappear."""
+    from services.settings import require_provider_key
+
+    body = await request.json()
+    t = db.query(Transcript).filter(
+        Transcript.id == transcript_id, Transcript.user_id == current_user.id
+    ).first()
+    if not t:
+        raise HTTPException(status_code=404, detail="Transcript not found")
+    if not isinstance(body, dict) or not isinstance(body.get("items"), list):
+        raise HTTPException(status_code=400, detail="Expected {'items': [...]}")
+    provider = body.get("provider")
+    model = body.get("model")
+    if provider is not None and not isinstance(provider, str):
+        raise HTTPException(status_code=400, detail="provider and model must be strings")
+    if model is not None and not isinstance(model, str):
+        raise HTTPException(status_code=400, detail="provider and model must be strings")
+    provider, model = _followup_provider_model(db, current_user.id, provider, model)
+    _validate_followup_provider(provider)
+    items = body["items"]
+    require_provider_key(db, current_user.id, provider)
+    _followup_begin_immediate(db)
+    latest = latest_job(db, transcript_id, "followup")
+    if latest is None:
+        db.rollback()
+        raise HTTPException(status_code=404, detail=_FOLLOWUP_NO_JOB)
+    if _followup_finalized(latest):
+        db.rollback()
+        raise HTTPException(status_code=409, detail=_FOLLOWUP_FINALIZED)
+    if not _followup_draft_editable(latest):
+        db.rollback()
+        raise HTTPException(status_code=409, detail=_FOLLOWUP_NOT_EDITABLE)
+    if get_active_job(db, transcript_id, "followup") is not None:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="A follow-up job is already running — wait for it to finish")
+    source = _followup_draft_source(latest)
+    error = _followup_items_error(items, {it["key"]: it for it in source})
+    if error:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=error)
+    posted_by_key = {it["key"]: it for it in items}
+    # Walk `source`, not the posted list: input[] must hold EVERY item,
+    # including private ones and any the client omitted (carried forward with
+    # their existing fields and no answers). _prompt_items is the one filter
+    # that keeps private items out of the prompt.
+    input_items = [_followup_input_entry(src, posted_by_key.get(src["key"], {})) for src in source]
+    rj = latest.result_json or {}
+    carry = {
+        "phase": "apply",
+        "generate_job_id": latest.id if rj.get("phase") == "generate" else rj.get("generate_job_id"),
+        "summary_snapshot": rj.get("summary_snapshot") or {},
+        "input": input_items,
+    }
+    try:
+        job = enqueue_llm_job(
+            db, current_user.id, transcript_id, "followup", provider, model, result_json=carry,
+        )
+    except ValueError:
+        # Belt and braces behind the explicit guard above, with its own wording
+        # so a test can tell the two apart: enqueue_llm_job refuses to drop a
+        # supplied result_json onto an existing active job.
+        db.rollback()
+        raise HTTPException(status_code=409, detail="Couldn't start the follow-up — another follow-up job is already active")
+    return {"job": serialize_llm_job(job)}
+
+
+@app.post("/api/transcripts/{transcript_id}/followup/finalize")
+async def finalize_followup(
+    transcript_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Write the kept proposals into FollowupItem rows and stamp the
+    finalized_at marker on the apply job, in ONE transaction.
+
+    The lock and the job resolution are unconditional, unlike the voice-dump
+    finalize: an all-discarded finalize still has to write the marker, which
+    is what closes the review card and makes finalize non-repeatable."""
+    body = await request.json()
+    t = db.query(Transcript).filter(
+        Transcript.id == transcript_id, Transcript.user_id == current_user.id
+    ).first()
+    if not t:
+        raise HTTPException(status_code=404, detail="Transcript not found")
+    if not isinstance(body, dict) or not isinstance(body.get("items"), list):
+        raise HTTPException(status_code=400, detail="Expected {'items': [...]}")
+    items = body["items"]
+    if len(items) > MAX_ITEMS:
+        raise HTTPException(status_code=400, detail=f"Too many follow-up items (max {MAX_ITEMS})")
+    _followup_begin_immediate(db)
+    job = latest_job(db, transcript_id, "followup")
+    rj = (job.result_json or {}) if job else {}
+    if job is None or rj.get("phase") != "apply" or job.status != "completed":
+        db.rollback()
+        raise HTTPException(status_code=409, detail="No completed follow-up apply job to finalize from")
+    if _followup_finalized(job):
+        db.rollback()
+        raise HTTPException(status_code=409, detail=_FOLLOWUP_FINALIZED)
+    proposals = rj.get("proposals") if isinstance(rj.get("proposals"), list) else []
+    proposal_by_key = {
+        p["key"]: p for p in proposals if isinstance(p, dict) and isinstance(p.get("key"), str)
+    }
+    raw_input = rj.get("input") if isinstance(rj.get("input"), list) else []
+    input_by_key = {
+        i["key"]: i for i in raw_input if isinstance(i, dict) and isinstance(i.get("key"), str)
+    }
+    seen = set()
+    for it in items:
+        if not isinstance(it, dict):
+            db.rollback()
+            raise HTTPException(status_code=400, detail="Each follow-up item must be an object")
+        key = it.get("key")
+        if not isinstance(key, str) or key not in proposal_by_key:
+            db.rollback()
+            raise HTTPException(status_code=400, detail=f"Unknown follow-up item key {key!r}")
+        if key in seen:
+            db.rollback()
+            raise HTTPException(status_code=400, detail=f"Duplicate follow-up item key {key!r}")
+        seen.add(key)
+    kept = [it for it in items if not it.get("discarded", False)]
+    # Strict here, no silent fallback: these become durable rows.
+    for it in kept:
+        if it.get("type") not in FOLLOWUP_ITEM_TYPES:
+            db.rollback()
+            raise HTTPException(status_code=400, detail=f"Unknown follow-up item type {it.get('type')!r}")
+        text_value = it.get("text")
+        if not isinstance(text_value, str) or not text_value.strip():
+            db.rollback()
+            raise HTTPException(status_code=400, detail="Follow-up item text cannot be empty")
+        if len(text_value.strip()) > MAX_TEXT_CHARS:
+            db.rollback()
+            raise HTTPException(status_code=400, detail=f"Follow-up item text must be at most {MAX_TEXT_CHARS} characters")
+        owner_value = it.get("owner")
+        if owner_value is not None and (not isinstance(owner_value, str) or len(owner_value) > MAX_OWNER_CHARS):
+            db.rollback()
+            raise HTTPException(status_code=400, detail=f"owner must be a string of at most {MAX_OWNER_CHARS} characters")
+        due_value = it.get("due")
+        if due_value is not None and (not isinstance(due_value, str) or len(due_value) > MAX_DUE_CHARS):
+            db.rollback()
+            raise HTTPException(status_code=400, detail=f"due must be a string of at most {MAX_DUE_CHARS} characters")
+        for flag in ("private", "discarded"):
+            if it.get(flag) is not None and not isinstance(it.get(flag), bool):
+                db.rollback()
+                raise HTTPException(status_code=400, detail=f"{flag} must be true or false")
+        # Finding: a missing bucket/index would violate the two NOT NULL
+        # provenance columns and surface as the IntegrityError -> 409
+        # "already finalized" below, which is both wrong and undiagnosable.
+        # Reject it here, where the message can say what is actually wrong.
+        src_entry = input_by_key.get(it["key"], proposal_by_key[it["key"]])
+        if (src_entry.get("source_bucket") or proposal_by_key[it["key"]].get("source_bucket")) is None:
+            db.rollback()
+            raise HTTPException(status_code=400, detail=f"Follow-up item {it['key']} has lost its source bucket — start the follow-up again")
+        if src_entry.get("source_index") is None and proposal_by_key[it["key"]].get("source_index") is None:
+            db.rollback()
+            raise HTTPException(status_code=400, detail=f"Follow-up item {it['key']} has lost its source index — start the follow-up again")
+
+    created = []
+    for idx, it in enumerate(kept):
+        key = it["key"]
+        proposal = proposal_by_key[key]
+        # Provenance comes off the matched input[] entry, never from
+        # reverse-parsing `key`: a MAX_ITEMS truncation or a future key
+        # scheme would otherwise corrupt the two columns #245 dedupes on.
+        src = input_by_key.get(key, proposal)
+        bucket = src.get("source_bucket") or proposal.get("source_bucket")
+        index = src.get("source_index")
+        if index is None:
+            index = proposal.get("source_index")
+        confidence = proposal.get("confidence")
+        if isinstance(confidence, bool) or not isinstance(confidence, (int, float)):
+            confidence = None
+        clarifications = [
+            {"question": a.get("question", ""), "answer": a.get("answer", "")}
+            for a in (src.get("answers") or [])
+            if isinstance(a, dict)
+        ]
+        row = FollowupItem(
+            user_id=current_user.id,
+            transcript_id=transcript_id,
+            source_job_id=job.id,
+            # From 0 per apply job, NOT a transcript-wide max+1: that is what
+            # makes a double finalize of one job collide on the unique
+            # constraint instead of quietly inserting a second copy.
+            sequence_index=idx,
+            item_type=it["type"],
+            text=it["text"].strip(),
+            owner=it.get("owner") or "",
+            due=normalize_due(it.get("due")),
+            private=bool(it.get("private", src.get("private", False))),
+            confidence=confidence,
+            source_bucket=bucket,
+            source_index=index,
+            source_text=src.get("source_text", ""),
+            clarifications=clarifications,
+            model=job.model or "",
+            provider=job.provider or "",
+        )
+        db.add(row)
+        created.append(row)
+    job.result_json = {
+        **rj,
+        "finalized_at": utcnow_naive().isoformat(),
+        "finalized_count": len(created),
+    }
+    try:
+        db.commit()
+    except IntegrityError:
+        # Reachable only via the (source_job_id, sequence_index) unique
+        # constraint, i.e. a concurrent finalize of this same apply job. The
+        # NOT NULL provenance case is rejected with a 400 in the strict loop
+        # above, so it can no longer masquerade as "already finalized".
+        db.rollback()
+        raise HTTPException(status_code=409, detail=_FOLLOWUP_FINALIZED)
+    for row in created:
+        db.refresh(row)
+    return {"items": [_serialize_followup_item(r) for r in created]}
+
+
+@app.get("/api/transcripts/{transcript_id}/followup-items")
+async def get_transcript_followup_items(
+    transcript_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """All finalized FollowupItem rows for one transcript, unfiltered —
+    `private` is a stored flag with no consumer today (#245 reads it later)."""
+    t = db.query(Transcript).filter(
+        Transcript.id == transcript_id, Transcript.user_id == current_user.id
+    ).first()
+    if not t:
+        raise HTTPException(status_code=404, detail="Transcript not found")
+    rows = (
+        db.query(FollowupItem)
+        .filter(FollowupItem.transcript_id == transcript_id)
+        .order_by(FollowupItem.sequence_index, FollowupItem.id)
+        .all()
+    )
+    return {"items": [_serialize_followup_item(r) for r in rows]}
 
 
 @app.get("/api/transcripts/{transcript_id}/versions")

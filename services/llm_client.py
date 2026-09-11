@@ -4,6 +4,7 @@ api_url e.g. Ollama/Lemonade/LM Studio). Used by correction, summarization,
 and transcript reformatting — each of those owns its own prompts and
 response parsing, but shares this HTTP call shape, default-model/provider
 resolution, and transcript-text prep so the three can't drift apart."""
+import json
 import re
 
 import httpx
@@ -54,6 +55,106 @@ def resolve_model(provider_name: str, model: str, feature_name: str) -> str:
             f"use groq, openai, openrouter, local, or local_llm."
         )
     return model or DEFAULT_MODELS[provider_name]
+
+
+_FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL)
+# <think>...</think> traces (Qwen3, DeepSeek-R1, ...). Non-greedy so a
+# response with several blocks loses each one rather than everything between
+# the first opener and the last closer.
+_THINK_RE = re.compile(r"<think[^>]*>.*?</think\s*>", re.DOTALL | re.IGNORECASE)
+# gpt-oss "harmony" channels: <|start|>assistant<|channel|>analysis<|message|>
+# ...thinking...<|end|><|start|>assistant<|channel|>final<|message|>{...}
+_HARMONY_FINAL_RE = re.compile(r"<\|channel\|>\s*final\s*<\|message\|>", re.IGNORECASE)
+_HARMONY_SIDE_RE = re.compile(
+    r"<\|channel\|>\s*(?:analysis|commentary|critic)\s*<\|message\|>"
+    r".*?(?=<\|(?:end|start|return|channel)\|>|\Z)",
+    re.DOTALL | re.IGNORECASE,
+)
+_HARMONY_TOKEN_RE = re.compile(r"<\|[^|>]*\|>")
+
+
+def _strip_reasoning(text: str) -> str:
+    """Remove reasoning traces so the JSON extractor below never slices
+    across one.
+
+    chat_completion falls back to ``reasoning_content`` when ``content`` is
+    empty (see below), so a thinking model's whole trace can reach the
+    parser. A trace routinely contains braces, and a find("{")..rfind("}")
+    slice across it produces a span json.loads rejects — a hard job failure
+    after the user has already done their part of the work.
+    """
+    if not text:
+        return text
+    if "</think" in text.lower():
+        text = _THINK_RE.sub(" ", text)
+        # A closer whose opener was never emitted (the provider stripped it,
+        # or the trace arrived split): keep only what follows the last closer.
+        lowered = text.lower()
+        idx = lowered.rfind("</think")
+        if idx >= 0:
+            after = text[idx:]
+            gt = after.find(">")
+            text = after[gt + 1:] if gt >= 0 else text[:idx]
+    finals = list(_HARMONY_FINAL_RE.finditer(text))
+    if finals:
+        text = text[finals[-1].end():]
+    else:
+        text = _HARMONY_SIDE_RE.sub(" ", text)
+    if "<|" in text:
+        text = _HARMONY_TOKEN_RE.sub(" ", text)
+    return text
+
+
+def _outermost_span(text: str, open_ch: str, close_ch: str) -> tuple[int, str] | None:
+    start = text.find(open_ch)
+    end = text.rfind(close_ch)
+    if start < 0 or end < 0 or end <= start:
+        return None
+    return start, text[start:end + 1]
+
+
+def extract_json_object(text: str, allow_array: bool = False):
+    """Pull the first JSON value out of a model response.
+
+    The prompt asks for bare JSON, but models wrap it in a ```json fence,
+    prefix it with prose ("Sure, here you go:"), or emit a reasoning trace
+    first — so strip the trace, strip the fence, then slice to the outermost
+    delimiters.
+
+    Returns a dict, or None when nothing parses. With ``allow_array=True`` a
+    top-level list is returned too: a bare ``[{...}]`` is a natural answer to
+    "output items" and callers that can wrap it should not fail the job over
+    it. The default stays object-only, which is what the tagging caller (and
+    tests/test_tagging.py) has always relied on.
+
+    Promoted here from services/tagging.py so every feature that parses a
+    JSON reply shares one hardened extractor (issue #253).
+    """
+    if not text:
+        return None
+    text = _strip_reasoning(text)
+    fence = _FENCE_RE.search(text)
+    if fence:
+        text = fence.group(1)
+    candidates = []
+    obj = _outermost_span(text, "{", "}")
+    if obj:
+        candidates.append(obj)
+    if allow_array:
+        arr = _outermost_span(text, "[", "]")
+        if arr:
+            candidates.append(arr)
+    candidates.sort(key=lambda pair: pair[0])
+    for _, snippet in candidates:
+        try:
+            parsed = json.loads(snippet)
+        except (ValueError, TypeError):
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+        if allow_array and isinstance(parsed, list):
+            return parsed
+    return None
 
 
 def sanitize_tag_content(text: str, tag: str) -> str:

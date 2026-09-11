@@ -34,6 +34,7 @@ EXPECTED_KEYS = {
     "has_audio", "has_video", "job_progress", "processed_size_bytes",
     "queue_status",
     "correction_job", "summary_job", "voice_match_job", "classify_pipeline_job",
+    "followup_job",
     "format_markdown_job", "format_email_job", "format_coding_prompt_job",
     "classify_intent_job", "classify_intent_hint",
     "voice_note_job", "voice_dump_job", "tagging_job",
@@ -105,6 +106,13 @@ def test_all_kinds_have_same_job_field_names(db_session):
     assert d["classify_pipeline_job"] is None
     assert v["classify_pipeline_job"] is None
     assert vd["classify_pipeline_job"] is None
+    # followup_job is uniform as well (issue #253). The follow-up feature is
+    # only reachable from a meeting summary, but the slot is present and null
+    # on every kind so the frontend never has to switch on kind to read it.
+    assert m["followup_job"] is None
+    assert d["followup_job"] is None
+    assert v["followup_job"] is None
+    assert vd["followup_job"] is None
     # tags list is also uniform, empty when no job has completed.
     assert m["tags"] == []
     assert d["tags"] == []

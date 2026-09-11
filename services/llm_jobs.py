@@ -23,6 +23,7 @@ VALID_KINDS = (
     "correction", "summary", "rediarize", "voice_match",
     "format_markdown", "format_email", "format_coding_prompt", "classify_intent",
     "voice_note", "voice_dump", "tagging", "assistant", "classify_pipeline",
+    "followup",
 )
 # Auto-retry (issue #14) is scoped to network-dependent kinds only —
 # correction/summary/format_*/classify_intent call a provider API and can
@@ -34,6 +35,17 @@ VALID_KINDS = (
 # "Open Design Questions" in
 # docs/superpowers/plans/2026-07-07-queue-audit-llmjob-auto-retry.md
 # if reconsidering.
+#
+# `followup` (issue #253) is a third deliberate exclusion, and the only
+# network-bound one. The sweep below filters on status and kind alone — it has
+# no phase awareness, so it cannot retry a failed generate while leaving a
+# failed apply alone. Resurrecting a failed apply is destructive: `apply_failed`
+# is a draft-editable state whose draft is read from result_json["input"], and
+# _retry_eligible flips the row back to pending ~10s later. The user edits for
+# half a minute, their Apply 409s because the latest job is no longer
+# draft-editable, and the resurrected job completes against the pre-edit input.
+# A parse failure is deterministic besides. Both Retry paths still cover a
+# transient generate failure. See docs/plans/14-followup-session.md.
 AUTO_RETRY_KINDS = ("correction", "summary", "format_markdown", "format_email", "format_coding_prompt", "classify_intent", "voice_note", "voice_dump", "tagging", "assistant", "classify_pipeline")
 # Two independent concurrency pools, capped separately (issue #14): I/O-bound
 # kinds are provider API calls (bounded by provider rate limits, not local
@@ -41,7 +53,7 @@ AUTO_RETRY_KINDS = ("correction", "summary", "format_markdown", "format_email", 
 # embedding extraction) and stay small so they don't fight each other for
 # the same CPU. IO_KINDS/CPU_KINDS must partition VALID_KINDS exactly — see
 # test_io_cpu_pools_partition_valid_kinds.
-IO_KINDS = ("correction", "summary", "format_markdown", "format_email", "format_coding_prompt", "classify_intent", "voice_note", "voice_dump", "tagging", "assistant", "classify_pipeline")
+IO_KINDS = ("correction", "summary", "format_markdown", "format_email", "format_coding_prompt", "classify_intent", "voice_note", "voice_dump", "tagging", "assistant", "classify_pipeline", "followup")
 CPU_KINDS = ("rediarize", "voice_match")
 _MAX_CONCURRENT_IO_JOBS = 2
 _MAX_CONCURRENT_CPU_JOBS = 1
@@ -107,19 +119,34 @@ def latest_job(db, transcript_id: int | None, kind: str) -> LlmJob | None:
 
 
 def enqueue_llm_job(db, user_id: int, transcript_id: int | None, kind: str,
-                    provider: str, model: str, error: str | None = None) -> LlmJob:
+                    provider: str, model: str, error: str | None = None,
+                    result_json: dict | None = None) -> LlmJob:
     """One active job per transcript+kind — returns the existing one instead
     of stacking duplicates. `error` pre-fails the job (e.g. 'no key saved')
-    so the skip is visible and rerunnable in the queue."""
+    so the skip is visible and rerunnable in the queue.
+
+    `result_json` seeds the job's input in the *insert* commit. The assistant
+    handoff's enqueue-then-write-result_json pattern has a real gap — a worker
+    can claim the job between the two commits and see no input — and follow-up
+    (issue #253) cannot tolerate it, because its phase, snapshot and seeds are
+    the whole job. Passing it here closes the window.
+
+    When `result_json` is supplied and an active job already exists, this
+    raises instead of returning that job: silently dropping the payload is how
+    a caller ends up with a job the dispatcher fails as "has no input".
+    """
     if kind not in VALID_KINDS:
         raise ValueError(f"Unknown LLM job kind: {kind}")
     existing = get_active_job(db, transcript_id, kind)
     if existing:
+        if result_json is not None:
+            raise ValueError(f"active {kind} job already exists")
         return existing
     job = LlmJob(
         user_id=user_id, transcript_id=transcript_id, kind=kind,
         provider=provider, model=model,
         status="failed" if error else "pending", error=error,
+        result_json=result_json,
     )
     db.add(job)
     db.commit()
@@ -436,6 +463,60 @@ def rerun_llm_job(db, user_id: int, job_id: int) -> LlmJob:
         if db.query(VoiceDumpItem).filter(VoiceDumpItem.transcript_id == job.transcript_id).first() is not None:
             db.rollback()
             raise ValueError("Voice dump already finalized — rerun not allowed")
+    if job.kind == "followup" and job.transcript_id is not None:
+        # Same lock-first shape as voice_dump above, but the "already
+        # finalized" predicate is the marker on the job's own result_json —
+        # NOT "any FollowupItem row on this transcript". Repeated follow-ups
+        # on one transcript are allowed by design, and an all-discarded
+        # finalize writes zero rows yet still closes the card, so row
+        # existence is wrong in both directions.
+        from sqlalchemy import text
+        from sqlalchemy.exc import OperationalError
+
+        from services.followups import FOLLOWUP_INPUT_KEYS
+
+        try:
+            db.execute(text("BEGIN IMMEDIATE"))
+        except OperationalError as e:
+            if "is locked" in str(e.orig or e):
+                raise ValueError("Follow-up already finalized — rerun not allowed")
+            raise
+        # The job was loaded before the lock; a finalize that committed in
+        # between is still sitting in this session's identity map as the
+        # pre-finalize row (and latest_job below returns that same object
+        # without repopulating it). Re-read inside the lock or the marker
+        # check silently passes on exactly the race the lock is here for.
+        db.refresh(job)
+        latest = latest_job(db, job.transcript_id, "followup")
+        if latest is None or latest.id != job.id:
+            db.rollback()
+            raise ValueError("Only the most recent follow-up job can be rerun")
+        old_result = job.result_json or {}
+        if old_result.get("finalized_at"):
+            db.rollback()
+            raise ValueError("Follow-up already finalized — rerun not allowed")
+        # Whitelist, so `draft` and `proposals` are dropped rather than carried.
+        carry = {k: old_result[k] for k in FOLLOWUP_INPUT_KEYS if k in old_result}
+        if old_result.get("phase") == "apply":
+            # Promote a saved draft. This path is reachable from the Queue
+            # screen's generic Retry, which — unlike the Summary tab's Apply —
+            # posts no items, so without this the model would silently rewrite
+            # the un-edited input the user had already corrected.
+            promoted = old_result.get("draft") or old_result.get("input")
+            if promoted is not None:
+                carry["input"] = promoted
+        try:
+            return enqueue_llm_job(
+                db, user_id, job.transcript_id, job.kind, job.provider, job.model,
+                result_json=carry,
+            )
+        except ValueError:
+            # enqueue refuses to drop a result_json payload onto an existing
+            # active job. Every other refusal in this branch rolls back first;
+            # without this the BEGIN IMMEDIATE write lock is held until the
+            # session is torn down.
+            db.rollback()
+            raise
     return enqueue_llm_job(db, user_id, job.transcript_id, job.kind, job.provider, job.model)
 
 
@@ -808,6 +889,62 @@ async def run_llm_job(SessionLocal, job_id: int, transcription_service, diarizat
                     return
                 job.result_json = {"items": items}
                 job.progress_done = len(segments) + 1
+                _finish(db, job, "completed")
+            except Exception as e:
+                _finish(db, job, "failed", str(e))
+        elif job.kind == "followup":
+            # One kind, two phases (issue #253) — result_json["phase"] says
+            # which, and enqueue_llm_job(result_json=...) put it there in the
+            # insert commit. No FollowupItem rows are written here; the
+            # finalize route creates them from the apply job's proposals.
+            job.progress_total = 1
+            # Not optional, and not cosmetic: every sibling branch commits
+            # before its one await point (see services/queue.py's invariant).
+            # Unflushed, the Queue screen shows 0/0 for the whole run.
+            db.commit()
+            payload = job.result_json or {}
+            phase = payload.get("phase")
+            if phase not in ("generate", "apply"):
+                _finish(db, job, "failed",
+                        "Follow-up job has no input; start it again from the Summary tab")
+                return
+            try:
+                from services.followups import (
+                    apply_followup_answers, generate_followup_items,
+                )
+                if phase == "generate":
+                    result_key = "items"
+                    result = await generate_followup_items(
+                        transcript, payload.get("items") or [],
+                        api_key=api_key, provider_name=job.provider,
+                        provider_config=provider_config, model=job.model,
+                    )
+                else:
+                    result_key = "proposals"
+                    result = await apply_followup_answers(
+                        transcript, payload.get("input") or [],
+                        api_key=api_key, provider_name=job.provider,
+                        provider_config=provider_config, model=job.model,
+                    )
+                # Two load-bearing invariants in the next four lines:
+                #
+                # 1. db.refresh(job) comes BEFORE the result_json merge, and
+                #    _finish comes last. _finish delegates to a bulk
+                #    .update(synchronize_session=False) whose autoflush pulls a
+                #    pending result_json assignment into the same transaction;
+                #    assigning before the post-await refresh loses it — the
+                #    hazard voice_match documents further down this function.
+                # 2. Rebind, never mutate in place. result_json is a plain
+                #    Column(JSON) with no MutableDict, so
+                #    job.result_json["items"] = ... would not flush. The spread
+                #    is also what keeps `phase`, `summary_snapshot` and `input`
+                #    alive: a plain assignment loses them and every later guard
+                #    (rerun carry, draft-editable, finalize) reads None.
+                db.refresh(job)
+                if job.status == "cancelled":
+                    return
+                job.result_json = {**(job.result_json or {}), result_key: result}
+                job.progress_done = 1
                 _finish(db, job, "completed")
             except Exception as e:
                 _finish(db, job, "failed", str(e))
